@@ -12,7 +12,6 @@ default = []
 test-util = ["dep:tiny_http", "dep:rcgen"]
 
 [dependencies]
-p5-core.workspace = true
 p5-crypto.workspace = true
 rcgen = { version = "0.13", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }

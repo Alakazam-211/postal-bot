@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use p5_core::{DeliveryMode, PeerType, PostalAddr};
+use p5_core::{DeliveryMode, PeerType, PostalAddr, Trust};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -15,7 +15,7 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 use crate::session_map::SessionMap;
 use crate::sm::{
     declared_typ, receive_msg, Inbound, ReceiveError, SmContext, SmError, REASON_HOST_DOWN,
-    REASON_NO_AGENT, REASON_RATE_LIMITED,
+    REASON_NO_AGENT, REASON_NOT_CONNECTED, REASON_RATE_LIMITED,
 };
 use crate::turn::{TurnConfig, TurnLimiter};
 
@@ -124,7 +124,7 @@ impl AgentState {
         if self.our_typ.is_some() {
             ctx.our_typ = self.our_typ;
         }
-        // Authenticated loopback secret; pairing-key proof is a later PR.
+        // Loopback secret skips pairing on receive; public path uses proof at HTTP.
         if self.dev_secret.as_deref().is_some_and(|s| !s.is_empty()) {
             ctx.dev_secret = true;
         }
@@ -155,17 +155,79 @@ fn secrets_match(expected: &str, got: &str) -> bool {
         == 0
 }
 
-fn authorize_msg(state: &AgentState, headers: &[(String, String)]) -> Result<(), HttpOut> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MsgAuth {
+    Secret,
+    Proof,
+}
+
+fn secret_ok(state: &AgentState, headers: &[(String, String)]) -> bool {
     let Some(expected) = state.dev_secret.as_deref().filter(|s| !s.is_empty()) else {
-        return Err(HttpOut::json(401, json!({"error":"unauthorized"})));
+        return false;
     };
     let Some(got) = header_value(headers, DEV_SECRET_HEADER) else {
-        return Err(HttpOut::json(401, json!({"error":"unauthorized"})));
+        return false;
     };
-    if !secrets_match(expected, got) {
-        return Err(HttpOut::json(401, json!({"error":"unauthorized"})));
+    secrets_match(expected, got)
+}
+
+fn proof_hex(headers: &[(String, String)]) -> Option<&str> {
+    if let Some(v) = header_value(headers, p5_live::PROOF_HEADER).filter(|s| !s.is_empty()) {
+        return Some(v);
     }
-    Ok(())
+    let auth = header_value(headers, "authorization")?;
+    let auth = auth.trim();
+    if let Some(rest) = auth.strip_prefix("P5-Msg ") {
+        return Some(rest.trim()).filter(|s| !s.is_empty());
+    }
+    let (scheme, rest) = auth.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case(p5_live::AUTH_SCHEME) {
+        return Some(rest.trim()).filter(|s| !s.is_empty());
+    }
+    None
+}
+
+fn authorize_msg(state: &AgentState, headers: &[(String, String)]) -> Result<MsgAuth, HttpOut> {
+    if secret_ok(state, headers) {
+        return Ok(MsgAuth::Secret);
+    }
+    if proof_hex(headers).is_some() {
+        return Ok(MsgAuth::Proof);
+    }
+    Err(HttpOut::json(401, json!({"error":"unauthorized"})))
+}
+
+fn not_connected(status: u16) -> HttpOut {
+    HttpOut::json(
+        status,
+        json!({"error": REASON_NOT_CONNECTED, "reason": REASON_NOT_CONNECTED}),
+    )
+}
+
+fn verify_pairing_proof(
+    ctx: &SmContext,
+    headers: &[(String, String)],
+    body: &[u8],
+    from: &PostalAddr,
+) -> Result<(), HttpOut> {
+    let Some(proof) = proof_hex(headers) else {
+        return Err(not_connected(401));
+    };
+    let Some(ts) = header_value(headers, p5_live::TIMESTAMP_HEADER).filter(|s| !s.is_empty())
+    else {
+        return Err(not_connected(401));
+    };
+    let Some(nonce) = header_value(headers, p5_live::NONCE_HEADER).filter(|s| !s.is_empty()) else {
+        return Err(not_connected(401));
+    };
+    let Some(entry) = ctx.roster.get(from) else {
+        return Err(not_connected(401));
+    };
+    if entry.trust != Trust::Trusted {
+        return Err(not_connected(403));
+    }
+    p5_live::verify_post_msg(&entry.public_key_pem, body, proof, ts, nonce)
+        .map_err(|_| not_connected(401))
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,9 +251,10 @@ fn default_mode() -> String {
 }
 
 fn handle_msg(state: &AgentState, headers: &[(String, String)], body: &[u8]) -> HttpOut {
-    if let Err(out) = authorize_msg(state, headers) {
-        return out;
-    }
+    let auth = match authorize_msg(state, headers) {
+        Ok(auth) => auth,
+        Err(out) => return out,
+    };
     let parsed: MsgBody = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return HttpOut::json(400, json!({"error":"bad_request"})),
@@ -226,6 +289,11 @@ fn handle_msg(state: &AgentState, headers: &[(String, String)], body: &[u8]) -> 
             return HttpOut::json(400, json!({"error":"bad_address","hint": err.to_string()}));
         }
     };
+    if auth == MsgAuth::Proof {
+        if let Err(out) = verify_pairing_proof(&ctx, headers, body, &from) {
+            return out;
+        }
+    }
     let mode = match parsed.mode.parse::<DeliveryMode>() {
         Ok(m) => m,
         Err(_) => {
@@ -508,7 +576,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use p5_core::{HomeRow, Homes, Mailbox, PeerType, ToolFlags};
+    use p5_core::{HomeRow, Homes, Mailbox, PeerType, Roster, RosterEntry, ToolFlags, Trust};
+    use p5_crypto::{proof_create, KeyPair};
 
     use crate::session_map::LiveSession;
 
@@ -723,6 +792,99 @@ mod tests {
                 .session_id,
             "live-10"
         );
+    }
+
+    fn save_trusted_peer(root: &Path, from: &str, kp: &KeyPair) {
+        save_peer(root, from, kp, Trust::Trusted);
+    }
+
+    fn save_peer(root: &Path, from: &str, kp: &KeyPair, trust: Trust) {
+        let mut roster = Roster::load(root).unwrap();
+        roster.insert(
+            addr(from),
+            RosterEntry {
+                typ: PeerType::Session,
+                fingerprint: kp.fingerprint(),
+                public_key_pem: kp.public_key_pem(),
+                trust,
+                pair_id: "p1".into(),
+                sand_uuid: None,
+                tools: ToolFlags::default(),
+            },
+        );
+        roster.save(root).unwrap();
+    }
+
+    fn proof_headers(kp: &KeyPair, body: &[u8], id: &str) -> Vec<(String, String)> {
+        let sha = p5_live::sha256_hex(body);
+        let ts = "1710000000";
+        let nonce = "n1";
+        let proof = proof_create(kp, "POST", p5_live::MSG_PATH, &sha, ts, nonce).unwrap();
+        let hex = p5_live::to_hex(&proof);
+        vec![
+            (p5_live::PROOF_HEADER.into(), hex.clone()),
+            (p5_live::TIMESTAMP_HEADER.into(), ts.into()),
+            (p5_live::NONCE_HEADER.into(), nonce.into()),
+            (
+                "authorization".into(),
+                format!("{} {hex}", p5_live::AUTH_SCHEME),
+            ),
+            (IDEMPOTENCY_HEADER.into(), id.into()),
+        ]
+    }
+
+    #[test]
+    fn post_msg_accepts_pairing_proof_without_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kp = KeyPair::generate();
+        save_trusted_peer(tmp.path(), "jarvis::other.postal.bot", &kp);
+        let state = state_with_home(tmp.path(), None);
+        let body = sample_msg(SAMPLE_ID);
+        let headers = proof_headers(&kp, &body, SAMPLE_ID);
+        let out = handle_http(&state, "POST", "/p5/msg", &headers, &body);
+        assert_eq!(out.status, 200, "{}", out.body);
+        let item = Mailbox::new(tmp.path()).read_inbox(SAMPLE_ID).unwrap();
+        assert_eq!(item.body, "hello scout");
+        assert_eq!(item.from, addr("jarvis::other.postal.bot"));
+    }
+
+    #[test]
+    fn post_msg_proof_unknown_or_bad_sig_is_not_connected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kp = KeyPair::generate();
+        let state = state_with_home(tmp.path(), None);
+        let body = sample_msg(SAMPLE_ID);
+        let headers = proof_headers(&kp, &body, SAMPLE_ID);
+        let unknown = handle_http(&state, "POST", "/p5/msg", &headers, &body);
+        assert_eq!(unknown.status, 401, "{}", unknown.body);
+        let v: Value = serde_json::from_str(&unknown.body).unwrap();
+        assert_eq!(v["reason"], "not_connected");
+
+        save_trusted_peer(tmp.path(), "jarvis::other.postal.bot", &kp);
+        let other = KeyPair::generate();
+        let bad = proof_headers(&other, &body, SAMPLE_ID);
+        let rejected = handle_http(&state, "POST", "/p5/msg", &bad, &body);
+        assert_eq!(rejected.status, 401, "{}", rejected.body);
+        let v: Value = serde_json::from_str(&rejected.body).unwrap();
+        assert_eq!(v["reason"], "not_connected");
+        assert!(Mailbox::new(tmp.path())
+            .list_inbox(None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn post_msg_untrusted_proof_is_403() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kp = KeyPair::generate();
+        save_peer(tmp.path(), "jarvis::other.postal.bot", &kp, Trust::Pending);
+        let state = state_with_home(tmp.path(), None);
+        let body = sample_msg(SAMPLE_ID);
+        let headers = proof_headers(&kp, &body, SAMPLE_ID);
+        let out = handle_http(&state, "POST", "/p5/msg", &headers, &body);
+        assert_eq!(out.status, 403, "{}", out.body);
+        let v: Value = serde_json::from_str(&out.body).unwrap();
+        assert_eq!(v["reason"], "not_connected");
     }
 
     #[test]

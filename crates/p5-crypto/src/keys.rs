@@ -33,17 +33,27 @@ impl KeyPair {
         }
     }
 
+    /// Load `<root>/keys/identity.pem`. Missing file is `Ok(None)` — never create.
+    pub fn load(root: &Path) -> Result<Option<Self>, CryptoError> {
+        let path = identity_path(root);
+        match fs::read_to_string(&path) {
+            Ok(pem) => {
+                reassert_key_perms(&path)?;
+                Self::from_pkcs8_pem(&pem).map(Some)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Load `<root>/keys/identity.pem`, or create it (0600) if missing.
     pub fn load_or_create(root: &Path) -> Result<Self, CryptoError> {
         let path = identity_path(root);
         ensure_keys_dir(path.parent().unwrap_or(root))?;
         loop {
-            match fs::read_to_string(&path) {
-                Ok(pem) => {
-                    reassert_key_perms(&path)?;
-                    return Self::from_pkcs8_pem(&pem);
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            match Self::load(root)? {
+                Some(kp) => return Ok(kp),
+                None => {
                     let kp = Self::generate();
                     match kp.save_private(&path) {
                         Ok(()) => return Ok(kp),
@@ -55,7 +65,6 @@ impl KeyPair {
                         Err(e) => return Err(e),
                     }
                 }
-                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -243,6 +252,13 @@ fn write_private_pem(path: &Path, pem: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_missing_is_none_and_does_not_create() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(KeyPair::load(dir.path()).unwrap().is_none());
+        assert!(!identity_path(dir.path()).exists());
+    }
 
     #[test]
     fn load_or_create_persists_and_unix_mode_0600() {

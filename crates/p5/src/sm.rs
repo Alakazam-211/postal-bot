@@ -544,13 +544,7 @@ fn send_live(
 }
 
 fn load_identity(root: &std::path::Path) -> Option<KeyPair> {
-    let path = root
-        .join(p5_crypto::KEYS_DIR)
-        .join(p5_crypto::IDENTITY_FILE);
-    if !path.is_file() {
-        return None;
-    }
-    KeyPair::load_or_create(root).ok()
+    KeyPair::load(root).ok().flatten()
 }
 
 /// Inbound payload for the session receiver (local path; later `POST /p5/msg`).
@@ -779,7 +773,7 @@ fn release_turn_slot(ctx: &SmContext, from: &PostalAddr, at: Instant) {
 }
 
 fn pairing_allowed(ctx: &SmContext, inbound: &Inbound) -> bool {
-    // Local dest or a configured loopback secret; pairing-key proof is later.
+    // Local dest or loopback secret. Public inbound checks proof in http.rs.
     if ctx.dest_is_local(&inbound.to) || ctx.dev_secret {
         return true;
     }
@@ -1004,6 +998,26 @@ mod tests {
         assert!(ctx.mailbox.read_sent(id).unwrap().last_error.is_none());
     }
 
+    #[test]
+    fn remote_without_identity_does_not_dial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let peer =
+            p5_live::mock::HttpsPeer::spawn(200, r#"{"already":false,"status":"delivered"}"#);
+        let mut ctx = SmContext::new(tmp.path());
+        ctx.live_base = Some(peer.base_url.clone());
+        ctx.live =
+            LiveClient::with_root_der(std::time::Duration::from_secs(2), &peer.cert_der).unwrap();
+        let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
+        assert_eq!(resp.status.as_deref(), Some("queued"));
+        assert!(peer.recorded().is_empty());
+        assert!(ctx
+            .mailbox
+            .read_sent(resp.id.as_deref().unwrap())
+            .unwrap()
+            .last_error
+            .is_none());
+    }
+
     fn remote_peer_msg() -> MsgRequest {
         msg("scout::peer.postal.bot", "hello scout")
     }
@@ -1061,6 +1075,40 @@ mod tests {
             sent.last_error
         );
         assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn live_401_unauthorized_stays_queued() {
+        let tmp = tempfile::tempdir().unwrap();
+        let peer = p5_live::mock::HttpsPeer::spawn(401, r#"{"error":"unauthorized"}"#);
+        let ctx = live_ctx_https(tmp.path(), &peer);
+        let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.status.as_deref(), Some("queued"));
+        let id = resp.id.as_deref().unwrap();
+        let sent = ctx.mailbox.read_sent(id).unwrap();
+        assert_eq!(sent.status, DeliveryStatus::Queued);
+        assert_eq!(sent.last_error.as_deref(), Some("401"));
+        assert!(sent.hold_id.is_none());
+    }
+
+    #[test]
+    fn live_401_not_connected_is_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let peer = p5_live::mock::HttpsPeer::spawn(
+            401,
+            r#"{"error":"not_connected","reason":"not_connected"}"#,
+        );
+        let ctx = live_ctx_https(tmp.path(), &peer);
+        let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.reason.as_deref(), Some(REASON_NOT_CONNECTED));
+        assert_eq!(resp.status.as_deref(), Some("failed"));
+        let id = resp.id.as_deref().unwrap();
+        assert_eq!(
+            ctx.mailbox.read_sent(id).unwrap().status,
+            DeliveryStatus::Failed
+        );
     }
 
     #[test]

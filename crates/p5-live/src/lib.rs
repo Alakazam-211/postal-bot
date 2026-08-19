@@ -10,7 +10,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use p5_crypto::{proof_create, KeyPair};
+use p5_crypto::{proof_create, proof_verify, CryptoError, KeyPair};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use ureq::ErrorKind;
@@ -201,10 +201,22 @@ fn classify_http(code: u16, body: String) -> LiveResult {
         return queued(err, host_down);
     }
     if code == 401 || code == 403 {
-        return LiveResult::Permanent {
-            reason: "not_connected",
-            hint: body,
-        };
+        // Bare unauthorized (no proof / WAF) is retryable. Pairing rejection
+        // is `reason`/`error` = `not_connected` after a proof was checked.
+        if json_eq(&body, "not_connected") {
+            return LiveResult::Permanent {
+                reason: "not_connected",
+                hint: body,
+            };
+        }
+        if json_eq(&body, "gated") {
+            return LiveResult::Permanent {
+                reason: "gated",
+                hint: body,
+            };
+        }
+        let err = if code == 401 { "401" } else { "403" };
+        return queued(err, false);
     }
     if code == 409 {
         return LiveResult::Permanent {
@@ -256,7 +268,58 @@ fn queued(last_error: impl Into<String>, hold_later: bool) -> LiveResult {
     }
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+fn json_eq(body: &str, want: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    ["reason", "error"]
+        .iter()
+        .any(|k| v.get(*k).and_then(|x| x.as_str()) == Some(want))
+}
+
+/// SHA-256 of the exact POST body, lowercase hex (proof transcript).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    to_hex(&Sha256::digest(bytes))
+}
+
+/// Verify a `POST /p5/msg` pairing-key proof against the peer's SPKI.
+pub fn verify_post_msg(
+    spki_pem: &str,
+    body: &[u8],
+    proof_hex: &str,
+    timestamp: &str,
+    nonce: &str,
+) -> Result<(), CryptoError> {
+    let sha = sha256_hex(body);
+    let proof = from_hex(proof_hex).ok_or(CryptoError::Proof)?;
+    proof_verify(spki_pem, "POST", MSG_PATH, &sha, timestamp, nonce, &proof)
+}
+
+pub fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || s.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = hex_digit(bytes[i])?;
+        let lo = hex_digit(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Some(out)
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
+}
+
+pub fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
@@ -309,8 +372,8 @@ mod tests {
         let nonce = rec[0].header(NONCE_HEADER).unwrap();
         let auth = rec[0].header("authorization").unwrap();
         assert_eq!(auth, format!("{AUTH_SCHEME} {proof}"));
-        let sha = to_hex(&Sha256::digest(rec[0].body.as_bytes()));
-        let sig = from_hex(proof);
+        let sha = sha256_hex(rec[0].body.as_bytes());
+        let sig = from_hex(proof).unwrap();
         proof_verify(
             &key.public_key_pem(),
             "POST",
@@ -395,6 +458,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unauthorized_401_stays_queued() {
+        let key = KeyPair::generate();
+        let peer = mock::HttpsPeer::spawn(401, r#"{"error":"unauthorized"}"#);
+        let client = LiveClient::with_root_der(Duration::from_secs(2), &peer.cert_der).unwrap();
+        let got = client.send(&key, &sample(&peer.base_url));
+        assert_eq!(
+            got,
+            LiveResult::Queued {
+                last_error: "401".into(),
+                hold_later: false,
+            }
+        );
+    }
+
+    #[test]
+    fn not_connected_401_is_permanent() {
+        let key = KeyPair::generate();
+        let peer =
+            mock::HttpsPeer::spawn(401, r#"{"error":"not_connected","reason":"not_connected"}"#);
+        let client = LiveClient::with_root_der(Duration::from_secs(2), &peer.cert_der).unwrap();
+        match client.send(&key, &sample(&peer.base_url)) {
+            LiveResult::Permanent { reason, .. } => assert_eq!(reason, "not_connected"),
+            other => panic!("expected permanent, got {other:?}"),
+        }
+    }
+
     fn sample(base: &str) -> LiveRequest {
         LiveRequest {
             base_url: base.into(),
@@ -405,12 +495,5 @@ mod tests {
             mode: "live".into(),
             body: "hello scout".into(),
         }
-    }
-
-    fn from_hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
     }
 }

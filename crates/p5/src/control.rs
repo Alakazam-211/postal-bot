@@ -15,7 +15,8 @@ use crate::sm::{send_msg, MsgRequest, MsgResponse};
 pub const SOCK_NAME: &str = "agent.sock";
 pub const PID_NAME: &str = "agent.pid";
 const MAX_FRAME: u32 = 1024 * 1024;
-pub const UDS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Must outlive a live POST so the CLI waits for the agent's MsgResponse.
+pub const UDS_TIMEOUT: Duration = Duration::from_secs(p5_live::DEFAULT_TIMEOUT.as_secs() + 2);
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -297,6 +298,11 @@ mod tests {
             no_wake: false,
             from: Some("alice::acme.postal.bot".into()),
         }
+    }
+
+    #[test]
+    fn uds_timeout_outlives_live_http() {
+        assert!(UDS_TIMEOUT >= p5_live::DEFAULT_TIMEOUT + Duration::from_secs(2));
     }
 
     #[test]
