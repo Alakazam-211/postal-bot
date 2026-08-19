@@ -38,7 +38,7 @@ impl FromStr for PeerType {
             "session" => Ok(Self::Session),
             "turn" => Ok(Self::Turn),
             // live/tray are delivery modes, not roster types
-            "live" | "tray" => Err(TypeParseError::ModeNotType),
+            "live" | "tray" => Err(TypeParseError::WrongKind),
             _ => Err(TypeParseError::Unknown),
         }
     }
@@ -75,7 +75,7 @@ impl FromStr for DeliveryMode {
         match s.trim() {
             "live" => Ok(Self::Live),
             "tray" => Ok(Self::Tray),
-            "session" | "turn" => Err(TypeParseError::ModeNotType),
+            "session" | "turn" => Err(TypeParseError::WrongKind),
             _ => Err(TypeParseError::Unknown),
         }
     }
@@ -86,16 +86,14 @@ impl FromStr for DeliveryMode {
 pub enum TypeParseError {
     Unknown,
     /// `live`/`tray` are modes; `session`/`turn` are types.
-    ModeNotType,
+    WrongKind,
 }
 
 impl fmt::Display for TypeParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unknown => f.write_str("unknown type or mode"),
-            Self::ModeNotType => {
-                f.write_str("session/turn are types; live/tray are delivery modes")
-            }
+            Self::WrongKind => f.write_str("session/turn are types; live/tray are delivery modes"),
         }
     }
 }
@@ -118,17 +116,29 @@ mod tests {
     fn delivery_mode_is_not_a_peer_type() {
         assert_eq!(
             "live".parse::<PeerType>().unwrap_err(),
-            TypeParseError::ModeNotType
+            TypeParseError::WrongKind
         );
         assert_eq!(
             "tray".parse::<PeerType>().unwrap_err(),
-            TypeParseError::ModeNotType
+            TypeParseError::WrongKind
         );
         assert_eq!("live".parse::<DeliveryMode>().unwrap(), DeliveryMode::Live);
         assert_eq!("tray".parse::<DeliveryMode>().unwrap(), DeliveryMode::Tray);
         assert_eq!(
             "session".parse::<DeliveryMode>().unwrap_err(),
-            TypeParseError::ModeNotType
+            TypeParseError::WrongKind
+        );
+        assert_eq!(
+            "turn".parse::<DeliveryMode>().unwrap_err(),
+            TypeParseError::WrongKind
+        );
+        assert_eq!(
+            "Session".parse::<PeerType>().unwrap_err(),
+            TypeParseError::Unknown
+        );
+        assert_eq!(
+            "LIVE".parse::<DeliveryMode>().unwrap_err(),
+            TypeParseError::Unknown
         );
     }
 }

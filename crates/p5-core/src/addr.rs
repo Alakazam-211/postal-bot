@@ -9,12 +9,12 @@ const HOST_SUFFIX: &str = ".postal.bot";
 /// Canonical Postal address. Display form and map key.
 ///
 /// Example: `scout::acme.postal.bot`
+///
+/// `parse` ASCII-lowercases handle and host so mixed-case input is one identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PostalAddr {
-    /// Application identity (`scout`). Not a DNS label.
-    pub handle: String,
-    /// Enrolled server (`acme.postal.bot`).
-    pub host: String,
+    handle: String,
+    host: String,
 }
 
 impl PostalAddr {
@@ -49,6 +49,16 @@ impl PostalAddr {
         let handle = parse_handle(handle)?;
         let host = parse_host(host)?;
         Ok(Self { handle, host })
+    }
+
+    /// Application identity (`scout`). Not a DNS label.
+    pub fn handle(&self) -> &str {
+        &self.handle
+    }
+
+    /// Enrolled server (`acme.postal.bot`).
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
     pub fn live_base_url(&self) -> String {
@@ -114,10 +124,11 @@ fn parse_handle(handle: &str) -> Result<String, AddrError> {
     if handle.is_empty() {
         return Err(AddrError::EmptyHandle);
     }
-    if !is_handle(handle) {
+    let handle = handle.to_ascii_lowercase();
+    if !is_handle(&handle) {
         return Err(AddrError::InvalidHandle);
     }
-    Ok(handle.to_string())
+    Ok(handle)
 }
 
 fn is_handle(s: &str) -> bool {
@@ -160,14 +171,27 @@ fn is_base_label(label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn parse_good_addr() {
         let addr = PostalAddr::parse("scout::acme.postal.bot", None).unwrap();
-        assert_eq!(addr.handle, "scout");
-        assert_eq!(addr.host, "acme.postal.bot");
+        assert_eq!(addr.handle(), "scout");
+        assert_eq!(addr.host(), "acme.postal.bot");
         assert_eq!(addr.to_string(), "scout::acme.postal.bot");
         assert_eq!(addr.live_base_url(), "https://acme.postal.bot");
+    }
+
+    #[test]
+    fn parse_canonicalizes_case() {
+        let mixed = PostalAddr::parse("Scout::ACME.POSTAL.BOT", None).unwrap();
+        let lower = PostalAddr::parse("scout::acme.postal.bot", None).unwrap();
+        assert_eq!(mixed.to_string(), "scout::acme.postal.bot");
+        assert_eq!(mixed, lower);
+        assert_eq!(mixed.live_base_url(), "https://acme.postal.bot");
+        let mut set = HashSet::new();
+        set.insert(mixed);
+        assert!(set.contains(&lower));
     }
 
     #[test]
@@ -244,7 +268,30 @@ mod tests {
     #[test]
     fn from_str_matches_parse() {
         let addr: PostalAddr = "scout::acme.postal.bot".parse().unwrap();
-        assert_eq!(addr.handle, "scout");
+        assert_eq!(addr.handle(), "scout");
         assert!("scout".parse::<PostalAddr>().is_err());
+    }
+
+    #[test]
+    fn reject_invalid_handle_and_host_shapes() {
+        let cases = [
+            ("scout::ab.postal.bot", AddrError::InvalidHost),
+            ("scout::acme.k2.dev", AddrError::InvalidHost),
+            ("scout!::acme.postal.bot", AddrError::InvalidHandle),
+            ("bad.handle::acme.postal.bot", AddrError::InvalidHandle),
+            ("scout::-acme.postal.bot", AddrError::InvalidHost),
+            ("scout::acme-.postal.bot", AddrError::InvalidHost),
+        ];
+        for (input, err) in cases {
+            assert_eq!(PostalAddr::parse(input, None).unwrap_err(), err, "{input}");
+        }
+    }
+
+    #[test]
+    fn accept_three_char_label() {
+        let addr = PostalAddr::parse("scout::www.postal.bot", None).unwrap();
+        assert_eq!(addr.host(), "www.postal.bot");
+        assert_eq!(addr.to_string(), "scout::www.postal.bot");
+        assert_eq!(addr.live_base_url(), "https://www.postal.bot");
     }
 }
