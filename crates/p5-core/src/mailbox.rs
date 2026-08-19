@@ -3,14 +3,13 @@
 //! On-disk shape is cover markdown plus optional `<id>.files/` sidecars
 //! (K2 inbox layout, different API: a mailbox root, not a workspace path).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ulid::Ulid;
@@ -23,8 +22,6 @@ pub const MAX_AUTO_ATTEMPTS: u32 = 12;
 pub const MAX_BODY_BYTES: u64 = 256 * 1024;
 /// CLI / caller exit when file transfer is refused (`tools.files=off`).
 pub const EXIT_GATED: i32 = 3;
-
-static ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Delivery status on a sent row (K5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,14 +122,26 @@ pub struct Mailbox {
 pub enum MailboxError {
     Io(io::Error),
     Gated,
-    NotFound { id: String },
+    NotFound {
+        id: String,
+    },
     InvalidId,
     InvalidHandle,
     Parse(String),
-    TooLarge { size: u64 },
+    TooLarge {
+        size: u64,
+    },
     Addr(AddrError),
-    NotAFile { path: PathBuf },
-    NotRetryable { status: DeliveryStatus },
+    NotAFile {
+        path: PathBuf,
+    },
+    NotRetryable {
+        status: DeliveryStatus,
+    },
+    InvalidTransition {
+        from: DeliveryStatus,
+        to: DeliveryStatus,
+    },
 }
 
 impl MailboxError {
@@ -160,6 +169,9 @@ impl fmt::Display for MailboxError {
             Self::NotAFile { path } => write!(f, "not a readable file: {}", path.display()),
             Self::NotRetryable { status } => {
                 write!(f, "cannot retry a {status} message")
+            }
+            Self::InvalidTransition { from, to } => {
+                write!(f, "illegal status transition: {from} -> {to}")
             }
         }
     }
@@ -294,8 +306,7 @@ impl Mailbox {
         };
         let mut item = item;
         item.sidecar_names = copy_sidecars(&self.sent_files_dir(&item.id), &req.files)?;
-        self.write_sent(&item)?;
-        self.write_outbox(&item)?;
+        self.commit_queued(&item)?;
         Ok(item)
     }
 
@@ -343,15 +354,24 @@ impl Mailbox {
     }
 
     pub fn list_outbox(&self) -> Result<Vec<MailItem>, MailboxError> {
-        let ids = md_stems(&self.outbox_dir())?;
-        let mut items = Vec::with_capacity(ids.len());
-        for id in ids {
+        // Sent queued rows are authoritative so a crash after write_sent still flushes.
+        let mut items: Vec<MailItem> = self
+            .list_sent()?
+            .into_iter()
+            .filter(|item| item.status == DeliveryStatus::Queued)
+            .collect();
+        let seen: HashSet<String> = items.iter().map(|item| item.id.clone()).collect();
+        for id in md_stems(&self.outbox_dir())? {
+            if seen.contains(&id) {
+                continue;
+            }
             match self.read_sent(&id) {
-                Ok(item) if item.status == DeliveryStatus::Queued => items.push(item),
                 Ok(_) => {}
                 Err(MailboxError::NotFound { .. }) => {
                     if let Ok(item) = read_cover(&self.outbox_dir().join(format!("{id}.md"))) {
-                        items.push(item);
+                        if item.status == DeliveryStatus::Queued {
+                            items.push(item);
+                        }
                     }
                 }
                 Err(err) => return Err(err),
@@ -416,6 +436,12 @@ impl Mailbox {
         hold_id: Option<String>,
     ) -> Result<MailItem, MailboxError> {
         let mut item = self.read_sent(id)?;
+        if !can_transition(item.status, status) {
+            return Err(MailboxError::InvalidTransition {
+                from: item.status,
+                to: status,
+            });
+        }
         item.status = status;
         if hold_id.is_some() {
             item.hold_id = hold_id;
@@ -455,6 +481,7 @@ impl Mailbox {
             jitter_unit(&item.id, item.attempts),
         );
         item.next_attempt_at = Some(now + delay);
+        // Sent already exists — never delete it if outbox write flaps.
         self.write_sent(&item)?;
         self.write_outbox(&item)?;
         Ok(item)
@@ -484,6 +511,20 @@ impl Mailbox {
                     && item.next_attempt_at.map(|t| t <= now).unwrap_or(true)
             })
             .collect())
+    }
+
+    fn commit_queued(&self, item: &MailItem) -> Result<(), MailboxError> {
+        self.write_sent(item)?;
+        if let Err(err) = self.write_outbox(item) {
+            self.rollback_sent(&item.id);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn rollback_sent(&self, id: &str) {
+        let _ = fs::remove_file(self.sent_dir().join(format!("{id}.md")));
+        let _ = fs::remove_dir_all(self.sent_files_dir(id));
     }
 
     fn write_sent(&self, item: &MailItem) -> Result<(), MailboxError> {
@@ -597,14 +638,16 @@ impl Mailbox {
 }
 
 fn mint_id() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let ms = now.as_millis() as u64;
-    let n = u128::from(ID_SEQ.fetch_add(1, Ordering::Relaxed));
-    let pid = u128::from(std::process::id());
-    let random = (pid << 48) ^ (n << 16) ^ u128::from(now.subsec_nanos());
-    Ulid::from_parts(ms, random).to_string()
+    Ulid::new().to_string()
+}
+
+fn can_transition(from: DeliveryStatus, to: DeliveryStatus) -> bool {
+    use DeliveryStatus::{Acked, Delivered, Failed, Held, Queued};
+    from == to
+        || matches!(
+            (from, to),
+            (Queued, Delivered | Held | Failed) | (Held, Acked | Failed) | (Delivered, Acked)
+        )
 }
 
 fn parse_id(id: &str) -> Result<Ulid, MailboxError> {
@@ -1092,6 +1135,23 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_mints_distinct_random_ulids() {
+        let (mb, _tmp) = tmp();
+        let a = mb.enqueue(send(Vec::new(), true)).unwrap();
+        let b = mb.enqueue(send(Vec::new(), true)).unwrap();
+        assert_ne!(a.id, b.id);
+        let ua = Ulid::from_string(&a.id).unwrap();
+        let ub = Ulid::from_string(&b.id).unwrap();
+        assert_ne!(ua.random(), 0);
+        assert_ne!(ua.random(), ub.random());
+        // Old mint_id was (pid << 48) ^ (n << 16) ^ nanos, n starting at 1.
+        let pid = u128::from(std::process::id());
+        let old_shape = (pid << 48) ^ (1u128 << 16);
+        assert_ne!(ua.random(), old_shape);
+        assert_ne!(ub.random(), old_shape);
+    }
+
+    #[test]
     fn files_off_refuses_sidecar_without_sent_row() {
         let (mb, tmp) = tmp();
         let src = tmp.0.join("note.bin");
@@ -1228,6 +1288,61 @@ mod tests {
         assert_eq!(held.status, DeliveryStatus::Held);
         assert_eq!(held.hold_id.as_deref(), Some("hold-1"));
         assert!(mb.list_outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn queued_sent_without_outbox_still_lists() {
+        let (mb, _tmp) = tmp();
+        let item = mb.enqueue(send(Vec::new(), true)).unwrap();
+        fs::remove_file(mb.root().join("outbox").join(format!("{}.md", item.id))).unwrap();
+        let listed = mb.list_outbox().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, item.id);
+        assert_eq!(listed[0].status, DeliveryStatus::Queued);
+        let due = mb
+            .due_outbox(SystemTime::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(due.len(), 1);
+    }
+
+    #[test]
+    fn enqueue_rolls_back_sent_if_outbox_write_fails() {
+        let (mb, _tmp) = tmp();
+        mb.ensure().unwrap();
+        let outbox = mb.root().join("outbox");
+        fs::remove_dir_all(&outbox).unwrap();
+        fs::write(&outbox, b"not-a-dir").unwrap();
+        let err = mb.enqueue(send(Vec::new(), true)).unwrap_err();
+        assert!(matches!(err, MailboxError::Io(_)));
+        assert!(mb.list_sent().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mark_rejects_illegal_transitions() {
+        let (mb, _tmp) = tmp();
+        let item = mb.enqueue(send(Vec::new(), true)).unwrap();
+        mb.mark(&item.id, DeliveryStatus::Delivered, None).unwrap();
+        let err = mb.mark_held(&item.id, "hold-x").unwrap_err();
+        assert!(matches!(
+            err,
+            MailboxError::InvalidTransition {
+                from: DeliveryStatus::Delivered,
+                to: DeliveryStatus::Held,
+            }
+        ));
+        mb.mark(&item.id, DeliveryStatus::Acked, None).unwrap();
+        let err = mb.mark(&item.id, DeliveryStatus::Queued, None).unwrap_err();
+        assert!(matches!(
+            err,
+            MailboxError::InvalidTransition {
+                from: DeliveryStatus::Acked,
+                to: DeliveryStatus::Queued,
+            }
+        ));
+        assert_eq!(
+            mb.read_sent(&item.id).unwrap().status,
+            DeliveryStatus::Acked
+        );
     }
 
     #[test]
