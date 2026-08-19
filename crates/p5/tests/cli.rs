@@ -1,8 +1,10 @@
-use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
-use p5_core::{DeliveryMode, Mailbox, PeerType, PostalAddr, ReceiveRequest, SendRequest};
+use p5_core::{
+    DeliveryMode, HomeRow, Homes, Mailbox, PeerType, PostalAddr, ReceiveRequest, SendRequest,
+    ToolFlags,
+};
 
 fn p5() -> Command {
     Command::new(env!("CARGO_BIN_EXE_p5"))
@@ -21,12 +23,8 @@ fn stdout(args: &[&str]) -> String {
     String::from_utf8(out.stdout).expect("utf8")
 }
 
-fn stdout_home(home: &PathBuf, args: &[&str]) -> String {
-    let out = p5()
-        .env("P5_HOME", home)
-        .args(args)
-        .output()
-        .unwrap_or_else(|err| panic!("run p5 {args:?}: {err}"));
+fn stdout_home(home: &Path, args: &[&str]) -> String {
+    let out = run_home(home, args, &[]);
     assert!(
         out.status.success(),
         "p5 {args:?} failed: {}",
@@ -35,24 +33,41 @@ fn stdout_home(home: &PathBuf, args: &[&str]) -> String {
     String::from_utf8(out.stdout).expect("utf8")
 }
 
-struct Tmp(PathBuf);
-
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+fn run_home(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
+    let mut cmd = p5();
+    cmd.env("P5_HOME", home).args(args);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
     }
+    cmd.output()
+        .unwrap_or_else(|err| panic!("run p5 {args:?}: {err}"))
 }
 
-fn tmp_home() -> Tmp {
-    let path = std::env::temp_dir().join(format!(
-        "p5-cli-mb-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&path).unwrap();
-    Tmp(path)
+fn add_home(root: &Path, address: &str, wake: bool) {
+    let address: PostalAddr = address.parse().unwrap();
+    let host = address.host().to_string();
+    let mut homes = Homes::load(root).unwrap();
+    homes
+        .insert(HomeRow {
+            address,
+            session_id: Some("sess-1".into()),
+            cwd: root.to_path_buf(),
+            inbox_root: None,
+            launch: vec!["claude".into()],
+            harness: Some("claude".into()),
+            tools: ToolFlags {
+                files: false,
+                live_inject: true,
+                wake,
+            },
+            enrolled_host: host,
+        })
+        .unwrap();
+    homes.save(root).unwrap();
+}
+
+fn tmp_home() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
 }
 
 fn alice() -> PostalAddr {
@@ -94,6 +109,7 @@ fn help_prints_product_and_commands() {
     assert!(text.contains("inbox"));
     assert!(text.contains("sent"));
     assert!(text.contains("outbox"));
+    assert!(text.contains("msg"));
     assert!(!text.contains("k2 "));
 }
 
@@ -108,15 +124,15 @@ fn long_help_flag_works() {
 #[test]
 fn sent_and_outbox_list_empty() {
     let home = tmp_home();
-    assert!(stdout_home(&home.0, &["sent", "list"]).is_empty());
-    assert!(stdout_home(&home.0, &["outbox"]).is_empty());
-    assert!(stdout_home(&home.0, &["inbox", "list"]).is_empty());
+    assert!(stdout_home(home.path(), &["sent", "list"]).is_empty());
+    assert!(stdout_home(home.path(), &["outbox"]).is_empty());
+    assert!(stdout_home(home.path(), &["inbox", "list"]).is_empty());
 }
 
 #[test]
 fn sent_outbox_inbox_list_and_read() {
     let home = tmp_home();
-    let mb = Mailbox::new(&home.0);
+    let mb = Mailbox::new(home.path());
     let sent = mb
         .enqueue(SendRequest {
             to: scout(),
@@ -144,20 +160,20 @@ fn sent_outbox_inbox_list_and_read() {
         })
         .unwrap();
 
-    let sent_list = stdout_home(&home.0, &["sent", "list"]);
+    let sent_list = stdout_home(home.path(), &["sent", "list"]);
     assert!(sent_list.contains(&sent.id));
     assert!(sent_list.contains("queued"));
     assert!(sent_list.contains("scout::acme.postal.bot"));
 
-    let outbox = stdout_home(&home.0, &["outbox", "list"]);
+    let outbox = stdout_home(home.path(), &["outbox", "list"]);
     assert!(outbox.contains(&sent.id));
     assert!(outbox.contains("queued"));
 
-    let inbox_list = stdout_home(&home.0, &["inbox"]);
+    let inbox_list = stdout_home(home.path(), &["inbox"]);
     assert!(inbox_list.contains(&inbox.id));
     assert!(inbox_list.contains("alice::acme.postal.bot"));
 
-    let cover = stdout_home(&home.0, &["inbox", "read", &inbox.id]);
+    let cover = stdout_home(home.path(), &["inbox", "read", &inbox.id]);
     assert!(cover.contains("incoming cover"));
     assert!(cover.contains("status: acked"));
 }
@@ -166,11 +182,197 @@ fn sent_outbox_inbox_list_and_read() {
 fn inbox_read_missing_exits_nonzero() {
     let home = tmp_home();
     let out = p5()
-        .env("P5_HOME", &home.0)
+        .env("P5_HOME", home.path())
         .args(["inbox", "read", "01ARZ3NDEKTSV4RRFFQ69G5FAV"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("not found"));
+}
+
+#[test]
+fn msg_local_home_delivers() {
+    let home = tmp_home();
+    add_home(home.path(), "scout::acme.postal.bot", true);
+    let out = stdout_home(
+        home.path(),
+        &[
+            "msg",
+            "scout::acme.postal.bot",
+            "hello scout",
+            "--from",
+            "alice::acme.postal.bot",
+        ],
+    );
+    assert!(out.contains("delivered"));
+    assert!(out.contains("scout::acme.postal.bot"));
+    let id = out.split_whitespace().next().unwrap();
+    let sent = stdout_home(home.path(), &["sent", "list"]);
+    assert!(sent.contains(id));
+    assert!(sent.contains("delivered"));
+    assert!(stdout_home(home.path(), &["outbox"]).is_empty());
+    let inbox = stdout_home(home.path(), &["inbox"]);
+    assert!(inbox.contains(id));
+    assert!(inbox.contains("alice::acme.postal.bot"));
+    let cover = stdout_home(home.path(), &["inbox", "read", id]);
+    assert!(cover.contains("hello scout"));
+}
+
+#[test]
+fn msg_json_local_deliver() {
+    let home = tmp_home();
+    add_home(home.path(), "scout::acme.postal.bot", true);
+    let out = stdout_home(
+        home.path(),
+        &[
+            "msg",
+            "--json",
+            "scout::acme.postal.bot",
+            "json body",
+            "--from",
+            "alice::acme.postal.bot",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(v["success"], true);
+    assert_eq!(v["status"], "delivered");
+    assert_eq!(v["to"], "scout::acme.postal.bot");
+    assert_eq!(v["reason"], serde_json::Value::Null);
+    assert!(v["id"].as_str().unwrap().len() == 26);
+}
+
+#[test]
+fn msg_remote_stays_queued() {
+    let home = tmp_home();
+    let out = stdout_home(
+        home.path(),
+        &[
+            "msg",
+            "scout::acme.postal.bot",
+            "later",
+            "--from",
+            "alice::acme.postal.bot",
+        ],
+    );
+    assert!(out.contains("queued"));
+    let sent = stdout_home(home.path(), &["sent"]);
+    assert!(sent.contains("queued"));
+    let outbox = stdout_home(home.path(), &["outbox"]);
+    assert!(outbox.contains("queued"));
+    assert!(stdout_home(home.path(), &["inbox"]).is_empty());
+}
+
+#[test]
+fn msg_no_wake_is_dormant() {
+    let home = tmp_home();
+    add_home(home.path(), "scout::acme.postal.bot", true);
+    let out = run_home(
+        home.path(),
+        &[
+            "msg",
+            "--no-wake",
+            "scout::acme.postal.bot",
+            "shh",
+            "--from",
+            "alice::acme.postal.bot",
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("dormant_no_wake"));
+    assert!(stdout_home(home.path(), &["inbox"]).is_empty());
+    let sent = stdout_home(home.path(), &["sent"]);
+    assert!(sent.contains("failed"));
+}
+
+#[test]
+fn msg_local_recv_without_home_is_no_agent() {
+    let home = tmp_home();
+    let out = run_home(
+        home.path(),
+        &[
+            "msg",
+            "scout::acme.postal.bot",
+            "anyone",
+            "--from",
+            "alice::acme.postal.bot",
+        ],
+        &[("P5_LOCAL_RECV", "1")],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no_agent"));
+    let sent = stdout_home(home.path(), &["sent"]);
+    assert!(sent.contains("failed"));
+}
+
+#[test]
+fn msg_wake_off_is_gated() {
+    let home = tmp_home();
+    add_home(home.path(), "scout::acme.postal.bot", false);
+    let out = run_home(
+        home.path(),
+        &[
+            "msg",
+            "scout::acme.postal.bot",
+            "wake me",
+            "--from",
+            "alice::acme.postal.bot",
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(3));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("gated"));
+}
+
+#[test]
+fn msg_bad_address_exits_2() {
+    let home = tmp_home();
+    let out = run_home(
+        home.path(),
+        &["msg", "scout@acme.postal.bot", "nope"],
+        &[("P5_FROM", "alice::acme.postal.bot")],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bad_address") || err.contains('@'));
+}
+
+#[test]
+fn inbox_respond_is_msg_to_from() {
+    let home = tmp_home();
+    add_home(home.path(), "alice::acme.postal.bot", true);
+    add_home(home.path(), "scout::acme.postal.bot", true);
+    let sent = stdout_home(
+        home.path(),
+        &[
+            "msg",
+            "scout::acme.postal.bot",
+            "ping",
+            "--from",
+            "alice::acme.postal.bot",
+        ],
+    );
+    let id = sent.split_whitespace().next().unwrap();
+    let reply = stdout_home(
+        home.path(),
+        &[
+            "inbox",
+            "respond",
+            id,
+            "pong",
+            "--from",
+            "scout::acme.postal.bot",
+        ],
+    );
+    assert!(reply.contains("delivered"));
+    assert!(reply.contains("alice::acme.postal.bot"));
+    let reply_id = reply.split_whitespace().next().unwrap();
+    let cover = stdout_home(home.path(), &["inbox", "read", reply_id]);
+    assert!(cover.contains("pong"));
+    assert!(cover.contains("alice::acme.postal.bot"));
+    assert!(cover.contains("scout::acme.postal.bot"));
 }

@@ -10,3 +10,9 @@ publish = false
 [dependencies]
 clap.workspace = true
 p5-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"

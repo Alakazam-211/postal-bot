@@ -1,6 +1,11 @@
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use p5_core::{default_root, DeliveryMode, MailItem, Mailbox, MailboxError, PeerType};
 
+mod session_map;
+mod sm;
+
+use sm::{send_msg, MsgRequest, MsgResponse, SmContext, SmError};
+
 const PRODUCT: &str = "Postal";
 const SITE: &str = "postal.bot";
 const COMMAND: &str = "p5";
@@ -29,6 +34,22 @@ enum Commands {
         /// Help topic
         topic: Option<HelpTopic>,
     },
+    /// Send a message (local copy first; auto-wakes)
+    Msg {
+        /// Destination `handle::sub.postal.bot`
+        addr: String,
+        /// Message body
+        text: String,
+        /// Do not wake a dormant session
+        #[arg(long)]
+        no_wake: bool,
+        /// Print a JSON object
+        #[arg(long)]
+        json: bool,
+        /// Display From (not identity)
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Local inbox (cover markdown + optional sidecars)
     Inbox {
         #[command(subcommand)]
@@ -52,6 +73,22 @@ enum InboxAction {
     List { folder: Option<String> },
     /// Print a cover
     Read { id: String },
+    /// Reply to the item's From (`p5 msg <from>`)
+    Respond {
+        /// Inbox item id
+        id: String,
+        /// Message body
+        text: String,
+        /// Do not wake a dormant session
+        #[arg(long)]
+        no_wake: bool,
+        /// Print a JSON object
+        #[arg(long)]
+        json: bool,
+        /// Display From (not identity)
+        #[arg(long)]
+        from: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -160,6 +197,78 @@ fn inbox_cmd(action: Option<InboxAction>) -> Result<(), MailboxError> {
             print!("{}", mb.read_inbox_cover(&id)?);
             Ok(())
         }
+        Some(InboxAction::Respond { .. }) => {
+            unreachable!("respond is handled in main")
+        }
+    }
+}
+
+fn emit_msg(resp: &MsgResponse, json: bool) {
+    if json {
+        println!("{}", resp.to_json());
+        return;
+    }
+    if resp.success {
+        println!("{}", resp.pretty_line());
+    } else {
+        eprintln!("{}", resp.pretty_line());
+    }
+}
+
+fn run_msg(req: MsgRequest, json: bool) {
+    let ctx = match SmContext::load_default() {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            fail_sm(err, json);
+        }
+    };
+    match send_msg(&ctx, &req) {
+        Ok(resp) => {
+            emit_msg(&resp, json);
+            std::process::exit(resp.exit_code());
+        }
+        Err(err) => fail_sm(err, json),
+    }
+}
+
+fn fail_sm(err: SmError, json: bool) -> ! {
+    if json {
+        let resp = MsgResponse {
+            success: false,
+            id: None,
+            to: None,
+            status: None,
+            target_session_id: None,
+            attempts: 0,
+            reason: Some("error".into()),
+            hint: Some(err.to_string()),
+            woke: false,
+            wake_ms: None,
+            already: false,
+        };
+        println!("{}", resp.to_json());
+    } else {
+        eprintln!("{err}");
+    }
+    std::process::exit(err.exit_code());
+}
+
+fn inbox_respond(id: String, text: String, no_wake: bool, json: bool, from: Option<String>) {
+    let mb = mailbox();
+    match mb.read_inbox(&id) {
+        Ok(item) => run_msg(
+            MsgRequest {
+                to: item.from.to_string(),
+                body: text,
+                no_wake,
+                from,
+            },
+            json,
+        ),
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(err.exit_code());
+        }
     }
 }
 
@@ -199,6 +308,31 @@ fn main() {
         Commands::Help {
             topic: Some(HelpTopic::Types),
         } => print!("{}", help_types_text()),
+        Commands::Msg {
+            addr,
+            text,
+            no_wake,
+            json,
+            from,
+        } => run_msg(
+            MsgRequest {
+                to: addr,
+                body: text,
+                no_wake,
+                from,
+            },
+            json,
+        ),
+        Commands::Inbox {
+            action:
+                Some(InboxAction::Respond {
+                    id,
+                    text,
+                    no_wake,
+                    json,
+                    from,
+                }),
+        } => inbox_respond(id, text, no_wake, json, from),
         Commands::Inbox { action } => run_mailbox(inbox_cmd(action)),
         Commands::Sent { action } => run_mailbox(sent_cmd(action)),
         Commands::Outbox { action } => run_mailbox(outbox_cmd(action)),
@@ -244,6 +378,7 @@ mod tests {
         assert!(text.contains("inbox"));
         assert!(text.contains("sent"));
         assert!(text.contains("outbox"));
+        assert!(text.contains("msg"));
         assert!(!text.contains("k2 "));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
     }

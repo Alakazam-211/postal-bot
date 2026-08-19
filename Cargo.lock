@@ -244,6 +244,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "p5-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
