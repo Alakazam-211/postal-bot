@@ -2,61 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Postal — paid</title>
-  <style>
-    :root { color-scheme: dark; --ink:#e8e4d9; --muted:#9a9588; --paper:#12110f; --line:#2e2c27; --go:#7d9a62; --link:#d4c4a0; }
-    body { margin:0; background:var(--paper); color:var(--ink); font:17px/1.55 "Iowan Old Style", Palatino, serif; }
-    code, pre { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.86em; }
-    a { color: var(--link); }
-    .wrap { max-width: 32rem; margin: 0 auto; padding: 2.4rem 1.4rem; }
-    .ok { color: var(--go); letter-spacing: 0.08em; text-transform: uppercase; font: 650 0.75rem/1 ui-sans-serif, system-ui, sans-serif; }
-    pre { background:#0a0908; border:1px solid var(--line); padding:0.9rem 1rem; border-radius:6px; overflow:auto; }
-    .muted { color: var(--muted); }
-  </style>
+  <meta http-equiv="refresh" content="0; url=/account" />
+  <title>Postal — account</title>
+  <script>location.replace("/account");</script>
 </head>
 <body>
-  <main class="wrap">
-    <p class="ok" id="status">Checking payment…</p>
-    <h1 id="title">Redeem on your server</h1>
-    <p class="muted" id="detail"></p>
-    <pre id="cmd">p5 billing redeem</pre>
-    <p><a href="/">Home</a> · <a href="/pay">Pay</a></p>
-  </main>
-  <script>
-    (function () {
-      var params = new URLSearchParams(location.search);
-      var id = params.get("session_id") || params.get("id") || "";
-      var status = document.getElementById("status");
-      var title = document.getElementById("title");
-      var detail = document.getElementById("detail");
-      var cmd = document.getElementById("cmd");
-      if (!id) {
-        status.textContent = "Missing session";
-        title.textContent = "No checkout session";
-        return;
-      }
-      cmd.textContent = "p5 billing redeem " + id;
-      fetch("/api/session?id=" + encodeURIComponent(id))
-        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-        .then(function (res) {
-          if (!res.ok || !res.j.paid) {
-            status.textContent = "Not paid yet";
-            title.textContent = "Checkout incomplete";
-            detail.textContent = (res.j && res.j.error) || "Finish payment, then refresh.";
-            return;
-          }
-          status.textContent = "Paid";
-          title.textContent = (res.j.host || "subdomain") + " is unlimited";
-          detail.textContent = res.j.until_unix
-            ? "Run this on the box that owns that label. Plan renews yearly."
-            : "Run this on the box that owns that label.";
-        })
-        .catch(function () {
-          status.textContent = "Could not verify";
-          detail.textContent = "You can still redeem if Stripe showed success.";
-        });
-    })();
-  </script>
+  <p>Billing is your k2.dev account. <a href="/account">Continue</a>.</p>
 </body>
 </html>

@@ -1,9 +1,13 @@
-//! Per-subdomain free tier (100 messages / UTC month) and paid unlimited.
+//! Account meter: 100 messages + 2 subdomains free, then $2.99/mo.
 //!
-//! Meter key is the enrolled host (`label.postal.bot`), not the handle.
-//! Plane `GET /postal/usage` wins when the control plane has cut it; otherwise
-//! the local sent ledger. Existing mail from before first billing touch does
-//! not count (meter epoch). `P5_BILLING=0` shows usage but does not block send.
+//! Same account as k2.dev (K2X). Extra labels are the Connect SKU
+//! ($2.99/mo). Buying a label on k2.dev or postal.bot syncs. Stripe
+//! lives on K2 Web — this CLI does not take cards.
+//!
+//! Message meter key is the enrolled host. Plane `GET /postal/usage`
+//! when `P5_USAGE_PLANE=1`; else the local sent ledger. Mail from
+//! before billing first ran does not count. `P5_BILLING=0` shows
+//! usage but does not block send.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,8 +15,10 @@ use p5_core::{Homes, Mailbox, PostalAddr};
 use p5_plane::{BillingFile, PlaneClient, PlaneConfig, PostalFile, UsageReport};
 
 pub const FREE_LIMIT: u32 = 100;
-pub const PRICE_USD: &str = "9.99";
-pub const PAY_URL: &str = "https://www.postal.bot/pay";
+pub const FREE_SUBDOMAINS: u32 = 2;
+pub const PRICE_USD: &str = "2.99";
+pub const PAY_URL: &str = "https://www.postal.bot/account";
+pub const SIGNUP_URL: &str = "https://k2.dev/signup";
 pub const SITE_URL: &str = "https://www.postal.bot";
 pub const PLAN_FREE: &str = "free";
 pub const PLAN_UNLIMITED: &str = "unlimited";
@@ -56,28 +62,35 @@ pub fn usage_text(report: &UsageReport) -> String {
         .unwrap_or_default();
     format!(
         "\
-host:      {host}
-period:    {period} (UTC)
-plan:      {plan}
-sent:      {sent}
-included:  {limit}
-remaining: {remaining}{until}
-pay:       {pay}
+host:       {host}
+period:     {period} (UTC)
+plan:       {plan}
+sent:       {sent}
+included:   {limit} messages
+remaining:  {remaining}
+subdomains: {subs} / {sub_inc} free{until}
+account:    {pay}
 ",
         host = report.host,
         period = report.period,
         plan = report.plan,
         sent = report.sent,
         limit = report.limit,
+        subs = report.subdomains,
+        sub_inc = if report.subdomain_included == 0 {
+            FREE_SUBDOMAINS
+        } else {
+            report.subdomain_included
+        },
         pay = pay_url(),
     )
 }
 
 pub fn quota_hint(report: &UsageReport) -> String {
     format!(
-        "{FREE_LIMIT} messages/month free on {}. Remaining {}. Unlimited is ${PRICE_USD}/year: {}",
-        report.host,
+        "{FREE_LIMIT} messages/month and {FREE_SUBDOMAINS} subdomains free. Remaining {} on {}. Extra labels ${PRICE_USD}/mo (same as k2.dev): {}",
         report.remaining,
+        report.host,
         pay_url()
     )
 }
@@ -111,6 +124,12 @@ pub fn collect_with(
                     if plane.host.trim().is_empty() {
                         plane.host = host;
                     }
+                    if plane.subdomain_included == 0 {
+                        plane.subdomain_included = FREE_SUBDOMAINS;
+                    }
+                    if plane.subdomains == 0 {
+                        plane.subdomains = subdomain_count(homes);
+                    }
                     return Ok(plane);
                 }
                 Err(p5_plane::PlaneError::NotFound)
@@ -120,7 +139,13 @@ pub fn collect_with(
             }
         }
     }
-    Ok(local_report(mailbox, &cfg.file.billing, &host, now))
+    Ok(local_report(
+        mailbox,
+        homes,
+        &cfg.file.billing,
+        &host,
+        now,
+    ))
 }
 
 /// Plane `GET /postal/usage` is not cut yet. Opt in with `P5_USAGE_PLANE=1`.
@@ -190,7 +215,13 @@ fn enrolled_host(homes: &Homes, cfg_addr: Option<&str>) -> String {
     String::new()
 }
 
-fn local_report(mailbox: &Mailbox, billing: &BillingFile, host: &str, now: u64) -> UsageReport {
+fn local_report(
+    mailbox: &Mailbox,
+    homes: &Homes,
+    billing: &BillingFile,
+    host: &str,
+    now: u64,
+) -> UsageReport {
     let (year, month) = utc_ym(now);
     let period = format!("{year:04}-{month:02}");
     let month_start = start_of_utc_month_unix(now);
@@ -233,7 +264,20 @@ fn local_report(mailbox: &Mailbox, billing: &BillingFile, host: &str, now: u64) 
         remaining,
         plan: plan.into(),
         until_unix: billing.until_unix,
+        subdomains: subdomain_count(homes),
+        subdomain_included: FREE_SUBDOMAINS,
     }
+}
+
+fn subdomain_count(homes: &Homes) -> u32 {
+    let mut seen = std::collections::BTreeSet::new();
+    for (_, row) in homes.iter() {
+        let h = row.enrolled_host.trim();
+        if !h.is_empty() {
+            seen.insert(h.to_ascii_lowercase());
+        }
+    }
+    seen.len() as u32
 }
 
 fn now_unix() -> u64 {
@@ -363,6 +407,8 @@ mod tests {
         assert_eq!(report.host, "acme.postal.bot");
         assert_eq!(report.sent, 1);
         assert_eq!(report.remaining, FREE_LIMIT - 1);
+        assert_eq!(report.subdomains, 1);
+        assert_eq!(report.subdomain_included, FREE_SUBDOMAINS);
         assert!(allow_send(&report));
     }
 
@@ -395,17 +441,17 @@ mod tests {
     fn zero_remaining_free_is_blocked() {
         let report = UsageReport {
             host: "acme.postal.bot".into(),
-            period: "2026-08".into(),
-            sent: FREE_LIMIT,
-            limit: FREE_LIMIT,
             remaining: 0,
             plan: PLAN_FREE.into(),
-            until_unix: None,
+            sent: FREE_LIMIT,
+            limit: FREE_LIMIT,
+            ..Default::default()
         };
         assert!(!allow_send(&report));
         let hint = quota_hint(&report);
-        assert!(hint.contains("$9.99"));
+        assert!(hint.contains("$2.99"));
         assert!(hint.contains("acme.postal.bot"));
+        assert!(hint.contains("2 subdomains"));
     }
 
     #[test]
@@ -435,13 +481,17 @@ mod tests {
             limit: FREE_LIMIT,
             remaining: 88,
             plan: PLAN_FREE.into(),
-            until_unix: None,
+            subdomains: 1,
+            subdomain_included: FREE_SUBDOMAINS,
+            ..Default::default()
         };
         let text = usage_text(&report);
         assert!(text.contains("rosson.postal.bot"));
         assert!(text.contains("88"));
         assert!(text.contains("100"));
-        assert!(text.contains("postal.bot/pay"));
+        assert!(text.contains("1 / 2 free"));
+        assert!(text.contains("postal.bot/account"));
+        assert!(!text.contains("9.99"));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
     }
 }

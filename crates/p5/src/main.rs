@@ -110,7 +110,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Paid plan ($9.99/year unlimited after 100 free messages/month)
+    /// Account plan (2 free subdomains, 100 free messages, $2.99/mo extra)
     Billing {
         #[command(subcommand)]
         action: Option<BillingAction>,
@@ -229,7 +229,7 @@ enum AgentAction {
 enum BillingAction {
     /// Print plan, remaining, and the payment URL
     Show,
-    /// Apply a Stripe Checkout session (`cs_…`) from postal.bot/pay
+    /// Apply a paid entitlement id from the k2.dev / postal.bot account
     Redeem {
         /// Checkout session id
         session: String,
@@ -243,7 +243,7 @@ enum HelpTopic {
     /// Last-mile plugins (`homes.harness`): k2, grok, exec
     #[value(name = "last-mile", alias = "plugins", alias = "grok")]
     LastMile,
-    /// Free 100 messages/month per subdomain; $9.99/year unlimited
+    /// 100 messages + 2 subdomains free; extra labels $2.99/mo (k2.dev account)
     Usage,
 }
 
@@ -340,24 +340,26 @@ the plugin ran but Sand auth failed — not a pairing failure.
 fn help_usage_text() -> String {
     format!(
         "\
-Usage — 100 messages per enrolled subdomain per UTC month are free.
-Unlimited is ${price}/year for that subdomain. See {pay}
+Usage — same account as k2.dev. Free: {msgs} messages/month and {subs}
+subdomains. Extra labels ${price}/mo (K2 Connect SKU). Unlimited
+messages ${price}/mo. See {pay}
 
-  p5 usage           sent / remaining / plan for this host
+  p5 usage           sent / remaining / subdomains for this host
   p5 usage --json
-  p5 billing         same readout plus the pay URL
-  p5 billing redeem cs_…   after Stripe Checkout on {pay}
+  p5 billing         same readout plus the account URL
 
-Meter key is the server hostname (label.postal.bot), not the handle.
-Local sent ledger is the meter until K2 Web cuts GET /postal/usage
-(then P5_USAGE_PLANE=1). Mail from before billing first ran on this
-box does not count.
+A label bought on k2.dev or postal.bot syncs (K2X subdomains).
+Create the account at {signup}. Stripe stays on K2 Web. Mail from
+before billing first ran on this box does not count.
 
-Over the free cap, p5 msg exits 3 (quota) until you redeem or the
-month rolls. P5_BILLING=0 shows usage but does not block send.
+Over the free message cap, p5 msg exits 3 (quota). P5_BILLING=0
+shows usage but does not block send.
 ",
+        msgs = crate::billing::FREE_LIMIT,
+        subs = crate::billing::FREE_SUBDOMAINS,
         price = crate::billing::PRICE_USD,
         pay = crate::billing::pay_url(),
+        signup = crate::billing::SIGNUP_URL,
     )
 }
 
@@ -741,10 +743,12 @@ mod tests {
     fn help_usage_names_free_tier_and_price() {
         let text = help_usage_text();
         assert!(text.contains("100"));
-        assert!(text.contains("9.99"));
+        assert!(text.contains("2.99"));
         assert!(text.contains("p5 usage"));
-        assert!(text.contains("postal.bot/pay"));
+        assert!(text.contains("postal.bot/account"));
         assert!(text.contains("subdomain"));
+        assert!(text.contains("k2.dev"));
+        assert!(!text.contains("9.99"));
         assert!(!text.contains("[k2g]"));
     }
 }

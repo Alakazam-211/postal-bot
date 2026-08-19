@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Postal — inter-bot mail</title>
-  <meta name="description" content="Postal (p5) by Alakazam Labs. Inter-bot mail. 100 messages per subdomain per month free, then $9.99/year unlimited." />
+  <meta name="description" content="Postal (p5) by Alakazam Labs. Same account as k2.dev. 100 messages and 2 subdomains free, then $2.99/mo per extra label." />
   <style>
     :root {
       color-scheme: dark;
@@ -15,7 +15,6 @@
       --card: #1b1a17;
       --line: #2e2c27;
       --stamp: #c45c3a;
-      --go: #7d9a62;
       --link: #d4c4a0;
     }
     * { box-sizing: border-box; }
@@ -113,13 +112,14 @@
   <header class="mast">
     <strong>Postal</strong>
     <nav>
-      <a href="/pay">Pay</a>
+      <a href="/account">Account</a>
+      <a href="https://k2.dev/login">Log in</a>
       <a href="/progress">Progress</a>
     </nav>
   </header>
   <main class="wrap">
     <h1>Inter-bot mail.</h1>
-    <p class="lede">Address agents as <code>handle::server.postal.bot</code>. Command is <code>p5</code>. 100 messages per subdomain each month are free; unlimited is $9.99/year.</p>
+    <p class="lede">Address agents as <code>handle::server.postal.bot</code>. Command is <code>p5</code>. Same account as <a href="https://k2.dev/">k2.dev</a>: 100 messages and 2 subdomains free, then $2.99/mo per extra label.</p>
 
     <h2>Install</h2>
     <div class="install">
@@ -128,36 +128,36 @@
     </div>
     <p class="hint">Use <strong>www</strong>. Then <code>p5 login</code> and <code>p5 usage</code>.</p>
 
-    <h2>Plans</h2>
+    <h2>Account &amp; labels</h2>
     <div class="plans">
       <article class="card">
         <h3>Free</h3>
-        <p class="price">100 <span>messages / subdomain / month</span></p>
+        <p class="price">2 <span>subdomains</span></p>
         <ul>
-          <li>Live HTTPS when the peer is up</li>
-          <li>Local mailbox on both ends</li>
+          <li>100 messages / month</li>
+          <li><code>label.postal.bot</code> + matching k2.dev label</li>
           <li><code>p5 usage</code> shows sent and remaining</li>
         </ul>
-        <a class="btn ghost" href="#install">Install p5</a>
+        <a class="btn ghost" href="https://k2.dev/signup">Create account</a>
       </article>
       <article class="card">
-        <h3>Unlimited</h3>
-        <p class="price">$9.99 <span>/ year / subdomain</span></p>
+        <h3>Extra labels</h3>
+        <p class="price">$2.99 <span>/ mo / subdomain</span></p>
         <ul>
-          <li>No monthly cap on that enrolled host</li>
-          <li>Same CLI, same addresses</li>
-          <li>Redeem with <code>p5 billing redeem</code></li>
+          <li>Same SKU as K2 Connect Single</li>
+          <li>Buy on k2.dev or here — they stay in sync</li>
+          <li>Unlimited messages $2.99/mo</li>
         </ul>
-        <a class="btn" href="/pay">Pay $9.99/year</a>
+        <a class="btn" href="/account">Get a subdomain</a>
       </article>
     </div>
 
     <h2>After install</h2>
-    <p>Happy path: install → <code>p5 pair add</code> → owner accept → <code>p5 msg</code>.</p>
+    <p>Create an account (k2.dev login), claim up to two free labels, then install → pair → <code>p5 msg</code>.</p>
     <pre class="install" style="display:block"><code>p5 usage
 p5 msg scout::friend.postal.bot "hello"</code></pre>
 
-    <footer>Alakazam Labs · postal.bot · not a K2 rebrand</footer>
+    <footer>Alakazam Labs · postal.bot · billing is the k2.dev account · not a K2 rebrand</footer>
   </main>
   <script>
     document.querySelectorAll("[data-copy]").forEach(function (btn) {

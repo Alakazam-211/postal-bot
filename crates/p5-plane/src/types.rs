@@ -137,8 +137,8 @@ pub struct HoldList {
 
 /// `GET /postal/usage` — messages this UTC month on one enrolled host.
 ///
-/// Free: 100 / subdomain / month. Paid: unlimited for the year.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// Free: 100 messages + 2 subdomains. Extra labels $2.99/mo (K2 Connect SKU).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct UsageReport {
     pub host: String,
     /// `YYYY-MM` UTC.
@@ -150,6 +150,12 @@ pub struct UsageReport {
     pub plan: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until_unix: Option<u64>,
+    /// Enrolled labels on this account / this box.
+    #[serde(default)]
+    pub subdomains: u32,
+    /// Free included labels (2).
+    #[serde(default)]
+    pub subdomain_included: u32,
 }
 
 /// `GET {www}/api/session?id=cs_…` after Stripe Checkout.

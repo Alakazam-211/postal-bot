@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Postal — account &amp; subdomains</title>
+  <meta name="description" content="Create a k2.dev account, claim two free postal.bot subdomains, extra labels $2.99/mo. Labels sync with k2.dev." />
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8e4d9;
+      --muted: #9a9588;
+      --dim: #6f6b62;
+      --paper: #12110f;
+      --card: #1b1a17;
+      --line: #2e2c27;
+      --stamp: #c45c3a;
+      --link: #d4c4a0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 17px/1.55 "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
+    }
+    code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.86em; }
+    a { color: var(--link); }
+    header.mast {
+      border-bottom: 1px solid var(--line);
+      padding: 1.25rem 1.5rem 1.1rem;
+      display: flex;
+      justify-content: space-between;
+      background: #0e0d0b;
+    }
+    header.mast strong { letter-spacing: 0.08em; font-size: 0.78rem; text-transform: uppercase; }
+    .wrap { max-width: 32rem; margin: 0 auto; padding: 2.4rem 1.4rem 5rem; }
+    h1 { font-size: 2rem; letter-spacing: -0.03em; margin: 0 0 0.5rem; }
+    .lede { color: var(--muted); margin: 0 0 1.5rem; }
+    .row { display: flex; gap: 0.7rem; flex-wrap: wrap; margin: 1.1rem 0 1.6rem; }
+    a.btn {
+      display: inline-block;
+      text-decoration: none;
+      background: var(--stamp);
+      color: #fff;
+      border-radius: 999px;
+      padding: 0.55rem 0.95rem;
+      font: 650 0.78rem/1 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    a.btn.ghost { background: transparent; color: var(--link); border: 1px solid var(--line); }
+    ul { color: var(--muted); padding-left: 1.15rem; }
+    li { margin: 0.35rem 0; }
+    .hint { color: var(--dim); font-size: 0.9rem; margin-top: 1.4rem; }
+  </style>
+</head>
+<body>
+  <header class="mast">
+    <strong><a href="/" style="color:inherit;text-decoration:none">Postal</a></strong>
+    <a href="/">Home</a>
+  </header>
+  <main class="wrap">
+    <h1>One account. Two zones.</h1>
+    <p class="lede">Postal uses the same login as <a href="https://k2.dev/">k2.dev</a>. Claim a label once; it is <code>label.k2.dev</code> and <code>label.postal.bot</code>. K2 Web holds billing keys — we do not take cards here.</p>
+    <div class="row">
+      <a class="btn" href="https://k2.dev/signup">Create account</a>
+      <a class="btn ghost" href="https://k2.dev/login">Log in</a>
+    </div>
+    <ul>
+      <li>Free: <strong>2 subdomains</strong> and <strong>100 messages / month</strong></li>
+      <li>Then <strong>$2.99/mo per extra subdomain</strong> (K2 Connect Single)</li>
+      <li>Unlimited messages <strong>$2.99/mo</strong></li>
+      <li>Buy a label on k2.dev or Postal — they stay in sync</li>
+    </ul>
+    <p>After the account exists: <code>curl -fsSL https://www.postal.bot/install.sh | sh</code> then <code>p5 login</code> and <code>p5 usage</code>.</p>
+    <p class="hint">No $9.99 plan. Stripe and Connect tokens stay on K2 Web.</p>
+  </main>
+</body>
+</html>

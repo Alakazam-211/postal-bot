@@ -136,8 +136,8 @@ fn usage_shows_free_remaining() {
     assert!(text.contains("acme.postal.bot"));
     assert!(text.contains("100"));
     assert!(text.contains("remaining"));
-    assert!(text.contains("pay"));
-    assert!(text.contains("postal.bot/pay"));
+    assert!(text.contains("subdomains"));
+    assert!(text.contains("postal.bot/account"));
 }
 
 #[test]
