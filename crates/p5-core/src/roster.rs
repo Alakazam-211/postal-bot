@@ -97,7 +97,16 @@ impl Roster {
 
     /// Missing file is an empty roster (v0 first write).
     pub fn load(root: &Path) -> Result<Self, StoreError> {
-        let entries: BTreeMap<PostalAddr, RosterEntry> = load_json(root, ROSTER_FILE)?;
+        // String keys first: PostalAddr parse lowercases, so mixed-case aliases
+        // would otherwise last-win in a BTreeMap<PostalAddr, _>.
+        let raw: BTreeMap<String, RosterEntry> = load_json(root, ROSTER_FILE)?;
+        let mut entries = BTreeMap::new();
+        for (key, entry) in raw {
+            let addr = PostalAddr::parse(&key, None)?;
+            if entries.insert(addr.clone(), entry).is_some() {
+                return Err(StoreError::DuplicateRoster(addr));
+            }
+        }
         Ok(Self { entries })
     }
 
@@ -214,7 +223,35 @@ mod tests {
             }
         }"#;
         fs::write(dir.path().join(ROSTER_FILE), json).unwrap();
-        assert!(matches!(Roster::load(dir.path()), Err(StoreError::Json(_))));
+        assert!(matches!(Roster::load(dir.path()), Err(StoreError::Addr(_))));
+    }
+
+    #[test]
+    fn roster_rejects_canonical_duplicate_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{
+            "Scout::acme.postal.bot": {
+                "typ": "session",
+                "fingerprint": "fp-mixed",
+                "public_key_pem": "pem",
+                "trust": "pending",
+                "pair_id": "p1"
+            },
+            "scout::acme.postal.bot": {
+                "typ": "turn",
+                "fingerprint": "fp-lower",
+                "public_key_pem": "pem",
+                "trust": "trusted",
+                "pair_id": "p2"
+            }
+        }"#;
+        fs::write(dir.path().join(ROSTER_FILE), json).unwrap();
+        match Roster::load(dir.path()) {
+            Err(StoreError::DuplicateRoster(a)) => {
+                assert_eq!(a, addr("scout::acme.postal.bot"));
+            }
+            other => panic!("expected DuplicateRoster, got {other:?}"),
+        }
     }
 
     #[test]

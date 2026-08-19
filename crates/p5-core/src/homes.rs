@@ -28,6 +28,19 @@ pub struct HomeRow {
     pub enrolled_host: String,
 }
 
+impl HomeRow {
+    /// `enrolled_host` is the denormalized `::` host; it must equal `address.host()`.
+    pub fn check_enrolled_host(&self) -> Result<(), StoreError> {
+        if self.enrolled_host != self.address.host() {
+            return Err(StoreError::HostMismatch {
+                address: self.address.clone(),
+                enrolled_host: self.enrolled_host.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Durable homes table. JSON array on disk, keyed in memory by address.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Homes {
@@ -52,8 +65,9 @@ impl Homes {
     }
 
     /// Insert or replace the row for `row.address`.
-    pub fn insert(&mut self, row: HomeRow) -> Option<HomeRow> {
-        self.rows.insert(row.address.clone(), row)
+    pub fn insert(&mut self, row: HomeRow) -> Result<Option<HomeRow>, StoreError> {
+        row.check_enrolled_host()?;
+        Ok(self.rows.insert(row.address.clone(), row))
     }
 
     pub fn remove(&mut self, addr: &PostalAddr) -> Option<HomeRow> {
@@ -69,6 +83,7 @@ impl Homes {
         let rows: Vec<HomeRow> = load_json(root, HOMES_FILE)?;
         let mut map = BTreeMap::new();
         for row in rows {
+            row.check_enrolled_host()?;
             let addr = row.address.clone();
             if map.insert(addr.clone(), row).is_some() {
                 return Err(StoreError::DuplicateHome(addr));
@@ -79,6 +94,9 @@ impl Homes {
 
     pub fn save(&self, root: &Path) -> Result<(), StoreError> {
         let rows: Vec<&HomeRow> = self.rows.values().collect();
+        for row in &rows {
+            row.check_enrolled_host()?;
+        }
         save_json(root, HOMES_FILE, &rows)
     }
 }
@@ -115,11 +133,12 @@ mod tests {
         let mut homes = Homes::new();
         let row = sample_row();
         let key = row.address.clone();
-        homes.insert(row.clone());
+        homes.insert(row.clone()).unwrap();
         homes.save(dir.path()).unwrap();
         assert!(dir.path().join(HOMES_FILE).is_file());
         let loaded = Homes::load(dir.path()).unwrap();
         assert_eq!(loaded.get(&key), Some(&row));
+        assert_eq!(loaded.get(&key).unwrap().enrolled_host, key.host());
         assert_eq!(loaded.len(), 1);
     }
 
@@ -134,7 +153,7 @@ mod tests {
     fn homes_json_has_no_peer_typ() {
         let dir = tempfile::tempdir().unwrap();
         let mut homes = Homes::new();
-        homes.insert(sample_row());
+        homes.insert(sample_row()).unwrap();
         homes.save(dir.path()).unwrap();
         let raw = fs::read_to_string(dir.path().join(HOMES_FILE)).unwrap();
         assert!(!raw.contains("\"typ\""));
@@ -208,6 +227,45 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec![HOMES_FILE]);
+    }
+
+    #[test]
+    fn enrolled_host_must_match_address_host() {
+        let mut row = sample_row();
+        row.enrolled_host = "evil.postal.bot".into();
+        let mut homes = Homes::new();
+        match homes.insert(row.clone()) {
+            Err(StoreError::HostMismatch {
+                address,
+                enrolled_host,
+            }) => {
+                assert_eq!(address, row.address);
+                assert_eq!(enrolled_host, "evil.postal.bot");
+            }
+            other => panic!("expected HostMismatch, got {other:?}"),
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"
+        [
+          {
+            "address": "scout::acme.postal.bot",
+            "cwd": "/srv/scout",
+            "enrolled_host": "evil.postal.bot"
+          }
+        ]
+        "#;
+        fs::write(dir.path().join(HOMES_FILE), json).unwrap();
+        match Homes::load(dir.path()) {
+            Err(StoreError::HostMismatch {
+                address,
+                enrolled_host,
+            }) => {
+                assert_eq!(address, addr("scout::acme.postal.bot"));
+                assert_eq!(enrolled_host, "evil.postal.bot");
+            }
+            other => panic!("expected HostMismatch, got {other:?}"),
+        }
     }
 
     #[test]

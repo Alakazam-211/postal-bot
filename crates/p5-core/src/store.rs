@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::PostalAddr;
+use crate::{AddrError, PostalAddr};
 
 pub const HOMES_FILE: &str = "homes.json";
 pub const ROSTER_FILE: &str = "roster.json";
@@ -38,7 +38,14 @@ pub fn ensure_dir(root: &Path) -> io::Result<()> {
 pub enum StoreError {
     Io(io::Error),
     Json(serde_json::Error),
+    Addr(AddrError),
     DuplicateHome(PostalAddr),
+    DuplicateRoster(PostalAddr),
+    /// `enrolled_host` must be the `::` right-hand side of `address`.
+    HostMismatch {
+        address: PostalAddr,
+        enrolled_host: String,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -46,7 +53,16 @@ impl fmt::Display for StoreError {
         match self {
             Self::Io(e) => write!(f, "postal store io: {e}"),
             Self::Json(e) => write!(f, "postal store json: {e}"),
+            Self::Addr(e) => write!(f, "postal store addr: {e}"),
             Self::DuplicateHome(addr) => write!(f, "duplicate homes row for {addr}"),
+            Self::DuplicateRoster(addr) => write!(f, "duplicate roster entry for {addr}"),
+            Self::HostMismatch {
+                address,
+                enrolled_host,
+            } => write!(
+                f,
+                "enrolled_host {enrolled_host:?} does not match {address}"
+            ),
         }
     }
 }
@@ -56,7 +72,8 @@ impl std::error::Error for StoreError {
         match self {
             Self::Io(e) => Some(e),
             Self::Json(e) => Some(e),
-            Self::DuplicateHome(_) => None,
+            Self::Addr(e) => Some(e),
+            Self::DuplicateHome(_) | Self::DuplicateRoster(_) | Self::HostMismatch { .. } => None,
         }
     }
 }
@@ -70,6 +87,12 @@ impl From<io::Error> for StoreError {
 impl From<serde_json::Error> for StoreError {
     fn from(e: serde_json::Error) -> Self {
         Self::Json(e)
+    }
+}
+
+impl From<AddrError> for StoreError {
+    fn from(e: AddrError) -> Self {
+        Self::Addr(e)
     }
 }
 
