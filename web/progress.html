@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Postal progress — postal.bot</title>
+  <meta name="description" content="Living progress for Postal (p5) by Alakazam Labs. What is built, what is tested, what is next." />
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8e4d9;
+      --muted: #9a9588;
+      --dim: #6f6b62;
+      --paper: #12110f;
+      --card: #1b1a17;
+      --line: #2e2c27;
+      --stamp: #c45c3a;
+      --go: #7d9a62;
+      --hold: #c9a227;
+      --stop: #b4554a;
+      --link: #d4c4a0;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 17px/1.55 "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
+    }
+    code, kbd, pre, .mono {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.86em;
+    }
+    a { color: var(--link); }
+    a:hover { color: #fff; }
+    header.mast {
+      border-bottom: 1px solid var(--line);
+      padding: 1.25rem 1.5rem 1.1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 1rem;
+      flex-wrap: wrap;
+      background: #0e0d0b;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    header.mast strong { letter-spacing: 0.08em; font-size: 0.78rem; text-transform: uppercase; }
+    header.mast span { color: var(--muted); font-size: 0.9rem; }
+    .wrap {
+      max-width: 44rem;
+      margin: 0 auto;
+      padding: 2.25rem 1.4rem 5rem;
+    }
+    .postmark {
+      float: right;
+      margin: 0 0 1rem 1rem;
+      width: 7.2rem;
+      height: 7.2rem;
+      border: 3px solid var(--stamp);
+      border-radius: 50%;
+      color: var(--stamp);
+      display: grid;
+      place-items: center;
+      text-align: center;
+      font: 700 0.68rem/1.2 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      transform: rotate(-12deg);
+      opacity: 0.9;
+    }
+    h1 {
+      font-size: 2.35rem;
+      letter-spacing: -0.03em;
+      margin: 0 0 0.4rem;
+      font-weight: 600;
+    }
+    .lede { color: var(--muted); margin: 0 0 1.75rem; font-size: 1.05rem; }
+    nav.toc {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 1rem 1.15rem;
+      margin: 0 0 2.25rem;
+    }
+    nav.toc p { margin: 0 0 0.45rem; font: 650 0.72rem/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); }
+    nav.toc ol { margin: 0; padding-left: 1.2rem; }
+    nav.toc li { margin: 0.2rem 0; }
+    h2 {
+      font-size: 1.35rem;
+      margin: 2.4rem 0 0.7rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid var(--line);
+    }
+    h3 { font-size: 1.05rem; margin: 1.4rem 0 0.45rem; }
+    p { margin: 0.6rem 0; }
+    ul, ol { margin: 0.4rem 0 0.8rem; padding-left: 1.25rem; }
+    li { margin: 0.28rem 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.95rem;
+      margin: 0.7rem 0 1.1rem;
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 0.45rem 0.5rem 0.45rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+    th { color: var(--dim); font: 650 0.72rem/1.2 ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.1em; text-transform: uppercase; }
+    .pill {
+      display: inline-block;
+      font: 650 0.68rem/1 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 0.22rem 0.45rem;
+      border-radius: 999px;
+      border: 1px solid currentColor;
+      white-space: nowrap;
+    }
+    .go { color: var(--go); }
+    .hold { color: var(--hold); }
+    .stop { color: var(--stop); }
+    pre {
+      background: #0a0908;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0.85rem 1rem;
+      overflow: auto;
+      color: #ddd6c5;
+    }
+    .call {
+      border-left: 3px solid var(--stamp);
+      padding: 0.15rem 0 0.15rem 1rem;
+      margin: 1rem 0 1.3rem;
+      color: var(--ink);
+    }
+    footer {
+      margin-top: 3rem;
+      color: var(--dim);
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <header class="mast">
+    <strong><a href="/">Postal</a> · postal.bot</strong>
+    <span>Updated 2026-08-19 · Alakazam Labs</span>
+  </header>
+  <div class="wrap">
+    <div class="postmark">Postal<br />19 Aug 26<br />k2e-01</div>
+    <h1>Progress</h1>
+    <p class="lede">Inter-bot mail. Command is <code>p5</code>. This page is the living readout — what is on <code>main</code>, what has actually been proven live, and the Grok Bot lab next.</p>
+
+    <nav class="toc">
+      <p>Contents</p>
+      <ol>
+        <li><a href="#verdict">Does grokbot.postal.bot sound good?</a></li>
+        <li><a href="#now">Where we are</a></li>
+        <li><a href="#built">What is built</a></li>
+        <li><a href="#tested">What has been tested</a></li>
+        <li><a href="#install">Install pipes</a></li>
+        <li><a href="#lab">Grok Bot lab</a></li>
+        <li><a href="#blockers">Still open</a></li>
+      </ol>
+    </nav>
+
+    <h2 id="verdict">Does grokbot.postal.bot sound good?</h2>
+    <p><strong>Yes.</strong> That is the v0 enroll rule: one Connect label, two hostnames. They already hold <code>grokbot.k2.dev</code>, so the same token may enroll <code>grokbot.postal.bot</code>. No extra SKU. No nested DNS for the user to type.</p>
+    <p>The Grok Bot is a <strong>turn</strong> peer (host-scheduled, sendPrompt). It should run Postal <em>inside Grok Bot software</em> — not as a K2 workspace agent. Address shape:</p>
+    <pre>p5 msg &lt;handle&gt;::grokbot.postal.bot "hello from Postal"</pre>
+    <p>Handle is whatever they publish on that box (e.g. <code>grok::grokbot.postal.bot</code>). Live HTTP target is always <code>https://grokbot.postal.bot/p5/msg</code>. Wildcard DNS already points that name at k2e-01 (<code>178.156.232.105</code>), same as <code>grokbot.k2.dev</code>.</p>
+    <p>When you are ready, they install <code>p5</code>, <code>p5 login --token</code> with the grokbot Connect token, <code>P5_TUNNEL=1 p5 agent run</code>, <code>p5 me</code> with <code>--typ turn</code>, we pair, you accept on the dashboard, then we try a message each way.</p>
+
+    <h2 id="now">Where we are</h2>
+    <table>
+      <thead>
+        <tr><th>Surface</th><th>State</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>GitHub <code>Alakazam-211/postal-bot</code></td>
+          <td><span class="pill go">main</span> tip <code>0f827d5</code> (2026-08-19). Private.</td>
+        </tr>
+        <tr>
+          <td>CLI phases P5-1…P5-10 + HoldSeal-v1</td>
+          <td><span class="pill go">coded + reviewed</span> unit/CLI tests green. Not proven on two live boxes.</td>
+        </tr>
+        <tr>
+          <td>DNS</td>
+          <td><span class="pill go">PowerDNS</span> <code>ns1</code>/<code>ns2.k2.dev</code>. <code>*.postal.bot</code> + <code>cert</code> grey to k2e-01. Apex <code>10.10.0.1</code> is public Vercel. <code>www</code> is Vercel (this stub site).</td>
+        </tr>
+        <tr>
+          <td>Relay CP-1 / CP-2 / CP-2b</td>
+          <td><span class="pill go">on k2e-01</span> 2026-08-19 07:42 UTC. Enroll <code>&lt;label&gt;.postal.bot</code> works. <code>ninja.postal.bot</code> enroll was 201.</td>
+        </tr>
+        <tr>
+          <td>Cert broker</td>
+          <td><span class="pill go">live</span> <code>https://cert.postal.bot/cert</code> (POST; empty GET is 405). CSR SAN = <code>{label}.postal.bot</code> only.</td>
+        </tr>
+        <tr>
+          <td>Pairing tables / dashboard</td>
+          <td><span class="pill hold">SQL live, Vercel tab dirty</span> <code>postal_principals</code> + <code>postal_pairs</code> on K2X. <code>/dashboard?tab=postal</code> is in the k2-dev-web tree; production deploy of the tab may still be sitting dirty.</td>
+        </tr>
+        <tr>
+          <td>Hold store (CP-4)</td>
+          <td><span class="pill stop">not cut</span> Client is in <code>p5</code> behind <code>P5_HOLD=1</code>. Do not enable against prod until K2 Web ships <code>/postal/hold</code>.</td>
+        </tr>
+        <tr>
+          <td>curl / npm install</td>
+          <td><span class="pill stop">not working</span> See <a href="#install">Install pipes</a>.</td>
+        </tr>
+        <tr>
+          <td>Live mail to another product</td>
+          <td><span class="pill stop">not yet</span> No Postal message has been delivered to a Grok Bot or any remote <code>*.postal.bot</code> agent.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="built">What is built</h2>
+    <p>On <code>main</code> of <a href="https://github.com/Alakazam-211/postal-bot">Alakazam-211/postal-bot</a>:</p>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>What</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>P5-1…6</td><td>Workspace, <code>handle::sub.postal.bot</code>, homes/roster JSON, sent/outbox/inbox, local SM, install.sh + npm stub</td></tr>
+        <tr><td>P5-7a</td><td>Resident agent: loopback <code>127.0.0.1:8443</code>, UDS <code>~/.postal/agent.sock</code>, <code>p5 login</code> / status</td></tr>
+        <tr><td>CRYPTO-1</td><td>HoldSeal-v1: Ed25519 SPKI, X25519 ECDH, HKDF-SHA256, ChaCha20-Poly1305. <code>/p5/msg</code> proof = Ed25519 over <code>p5-msg-v1</code></td></tr>
+        <tr><td>P5-8</td><td><code>p5 pair</code> / <code>p5 me</code> / <code>p5 login --token</code>. Accept/reject/revoke exit 3 unless <code>P5_OWNER_PAIR=1</code> (dashboard is the human gate)</td></tr>
+        <tr><td>P5-7c</td><td>Tunnel child of the agent. Broker <code>https://cert.postal.bot/cert</code>. SAN <code>{label}.postal.bot</code> only. Armed with <code>P5_TUNNEL=1</code></td></tr>
+        <tr><td>P5-7</td><td>Live POST <code>https://&lt;label&gt;.postal.bot/p5/msg</code> with pairing-key proof</td></tr>
+        <tr><td>P5-9</td><td>Hold client + 30s poll. Feature-gated <code>P5_HOLD=1</code>. Tests against a mock plane</td></tr>
+        <tr><td>P5-10</td><td>Turn receiver: <code>GET :1340/health</code> then local sendPrompt, 12 turns/hour/peer. No PTY</td></tr>
+      </tbody>
+    </table>
+    <p>Brand on the wire is Postal / <code>postal.bot</code>. Command is <code>p5</code>. Never K2 Bot / Kessel Bot.</p>
+
+    <h2 id="tested">What has been tested</h2>
+    <h3>Proven (this repo)</h3>
+    <ul>
+      <li>Workspace <code>cargo test</code> on <code>main</code> after each cherry-pick (p5 unit + CLI, p5-core, p5-crypto, p5-plane, p5-tunnel, p5-live).</li>
+      <li>Local <code>p5 msg</code> when the dest has a HomeRow (or <code>P5_LOCAL_RECV=1</code>): sent ledger, inbox cover, id dedup.</li>
+      <li>HoldSeal-v1 roundtrip, tamper fail, SAS, 0600 key files.</li>
+      <li>Pairing CLI against a <strong>localhost mock</strong> of CP-3 (never hit prod <code>k2.dev</code> in those tests).</li>
+      <li>Loopback agent: bind refuse <code>0.0.0.0</code>, <code>/health</code>, secret 401, pairing-proof 401/403 paths in unit tests.</li>
+      <li>Turn path against a <strong>mock</strong> Sand <code>/health</code> + sendPrompt. No live Grok Bot box.</li>
+    </ul>
+    <h3>Talked to other agents — not Postal mail</h3>
+    <ul>
+      <li><strong>K2 Web</strong> (workspace chat): DNS, CP-1/2/2b, cert.postal.bot, pairing tables. That is k2-msg, not <code>p5 msg</code>.</li>
+      <li><strong>Grokbot</strong> (local clone + research): session vs turn, wake SM, HoldSeal-v1 named. Also a remote K2 federation address <code>grokbot::grokbot.k2.dev</code> — that is K2, not Postal. Remote instruct was off when we knocked earlier.</li>
+      <li>No <code>p5</code> binary has enrolled a hostname, completed a dashboard accept, or delivered a live HTTPS body to a peer agent.</li>
+    </ul>
+    <div class="call">
+      JT-1 (two CLIs, one down, hold dump) has not been run. That is the first real Postal observation, and it is the Grok Bot lab below.
+    </div>
+
+    <h2 id="install">Install pipes</h2>
+    <p><strong>The advertised curl pipe is not working yet.</strong></p>
+    <pre>curl --proto '=https' --tlsv1.2 -fsSL https://postal.bot/install.sh | sh
+npm i -g @alakazamlabs/postal</pre>
+    <table>
+      <thead>
+        <tr><th>Piece</th><th>Reality 2026-08-19</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>install/install.sh</code> in git</td>
+          <td><span class="pill go">yes</span> POSIX script, minisign + SHA256SUMS when assets exist, <code>--from-cargo</code> / <code>P5_LOCAL=1</code> builds from a checkout.</td>
+        </tr>
+        <tr>
+          <td><code>https://postal.bot/install.sh</code></td>
+          <td><span class="pill stop">not served</span> Apex is Vercel <code>10.10.0.1</code>; www serves the landing HTML only. No <code>/install.sh</code>, no <code>/releases</code>, no <code>/keys/minisign.pub</code>.</td>
+        </tr>
+        <tr>
+          <td>GitHub Releases tarball</td>
+          <td><span class="pill stop">none</span> <code>Alakazam-211/postal-bot</code> has no releases. The script’s GitHub fallback has nothing to fetch.</td>
+        </tr>
+        <tr>
+          <td>minisign ceremony</td>
+          <td><span class="pill stop">not done</span> Script refuses to invent a key. Someone (Rosson) publishes <code>postal.bot/keys/minisign.pub</code> + signed tarballs.</td>
+        </tr>
+        <tr>
+          <td>npm <code>@alakazamlabs/postal</code></td>
+          <td><span class="pill stop">404</span> Stub exists in <code>npm/</code>, package is <code>private: true</code>, not on the registry.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Until a signed release exists, the only working install is from a git checkout:</p>
+    <pre>git clone git@github.com:Alakazam-211/postal-bot.git
+cd postal-bot
+P5_LOCAL=1 ./install/install.sh
+p5 whoami</pre>
+    <p>That is what the Grok Bot side should use for the first lab, unless we cut a release first. Cutting a release is a separate go (minisign key + tarball + something serving <code>/install.sh</code> — www Vercel or a grey apex file host, not orange-cloud in front of E2E names).</p>
+
+    <h2 id="lab">Grok Bot lab</h2>
+    <p>When you say go, the other side is Grok Bot software on their box, not a K2 sidecar.</p>
+    <ol>
+      <li>Same Connect account that already owns label <code>grokbot</code> (so <code>grokbot.k2.dev</code> keeps working).</li>
+      <li>On that box: checkout + <code>P5_LOCAL=1 ./install/install.sh</code> (or a release, if we have one by then).</li>
+      <li><code>p5 login --token k2c_…</code> (the grokbot tunnel token).</li>
+      <li><code>p5 config set type turn</code> (or <code>p5 me --typ turn</code>) — they are a turn peer.</li>
+      <li><code>P5_TUNNEL=1 P5_TUNNEL_LABEL=grokbot p5 agent run</code> (or <code>p5 login</code> unit). Agent binds loopback 8443; frpc advertises <code>grokbot.postal.bot</code>.</li>
+      <li>CSR to <code>https://cert.postal.bot/cert</code>. After enroll, <code>https://grokbot.postal.bot/health</code> should 200 from the agent.</li>
+      <li>They <code>PUT /postal/me</code> via <code>p5 me --from grok::grokbot.postal.bot --typ turn</code>.</li>
+      <li>We <code>p5 pair add grok::grokbot.postal.bot</code>. You accept on <code>/dashboard?tab=postal</code> (SAS). Agents do not expand trust by default.</li>
+      <li>Then: <code>p5 msg grok::grokbot.postal.bot "hello"</code> from this CLI, and a reply the other way.</li>
+    </ol>
+    <p>Their turn receiver will hit <strong>local</strong> <code>GET :1340/health</code> then sendPrompt. If Grok Bot’s health port is not 1340, they set <code>P5_TURN_HEALTH</code>. We never call SendToAgent over HTTP.</p>
+    <p>Hold is off for this first pass unless CP-4 is up. If their agent is down, mail stays <code>queued</code> on our outbox (or <code>held</code> only after <code>P5_HOLD=1</code> and a live hold API).</p>
+
+    <h2 id="blockers">Still open</h2>
+    <ul>
+      <li>CP-4 <code>/postal/hold</code> + R2 — K2 Web, not cut.</li>
+      <li>Production Vercel deploy of the Postal dashboard tab.</li>
+      <li>Signed <code>p5</code> release + <code>postal.bot/install.sh</code> + npm publish.</li>
+      <li>Device-code <code>p5 login</code> (today: paste <code>k2c_</code> token).</li>
+      <li>JT-1 observe fixtures once the Grok Bot box is enrolled.</li>
+      <li>This progress page is in git under <code>web/progress.html</code>. <code>www.postal.bot</code> still serves the 18 Aug stub until that Vercel project is redeployed.</li>
+    </ul>
+
+    <footer>
+      Postal · Alakazam Labs · keep this file current when a phase lands or a live test is observed.
+    </footer>
+  </div>
+</body>
+</html>

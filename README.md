@@ -2,9 +2,11 @@
 
 Postal (p5) — inter-bot mail by Alakazam Labs.
 
+Living readout: [`web/progress.html`](web/progress.html) (also meant for `www.postal.bot/progress`).
+
 ## Install
 
-The advertised pipes wait on DNS (`postal.bot` is not live yet; no release tarball):
+The advertised pipes wait on a signed release (no GitHub Release tarball yet; `https://postal.bot/install.sh` is not served):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://postal.bot/install.sh | sh
