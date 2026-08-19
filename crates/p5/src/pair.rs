@@ -65,6 +65,7 @@ impl PairCtx {
         Err(PairError::NoIdentity)
     }
 
+    /// Our declared type. Defaults to session — this CLI's identity, not a peer guess.
     fn resolve_typ(&self, typ_flag: Option<&str>) -> Result<PeerType, PairError> {
         if let Some(raw) = typ_flag.map(str::trim).filter(|s| !s.is_empty()) {
             return parse_typ(raw);
@@ -128,9 +129,7 @@ pub fn run_add(addr: String, from: Option<String>, typ: Option<String>) -> Resul
     let client = ctx.client()?;
     let _me = client.put_me(&from_addr.to_string(), &pem, typ)?;
     let add = client.add_pair(&from_addr.to_string(), &to.to_string(), typ, &pem)?;
-    if let Ok(lists) = client.list_pairs(false) {
-        let _ = sync_roster(&ctx.root, &lists, &ctx.configured_addrs(from.as_deref()));
-    }
+    refresh_roster(&client, &ctx.root, &ctx.configured_addrs(from.as_deref()))?;
     print_add(&add.id, &from_addr, &to, add.sas.as_deref(), add.created);
     Ok(())
 }
@@ -138,7 +137,7 @@ pub fn run_add(addr: String, from: Option<String>, typ: Option<String>) -> Resul
 pub fn run_list(inbox_only: bool) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let lists = ctx.client()?.list_pairs(inbox_only)?;
-    let _ = sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None));
+    sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None))?;
     if inbox_only {
         print_views(&lists.inbox);
         return Ok(());
@@ -152,7 +151,9 @@ pub fn run_list(inbox_only: bool) -> Result<(), PairError> {
 pub fn run_show(id: String) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let lists = ctx.client()?.list_pairs(false)?;
-    let _ = sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None));
+    if let Err(err) = sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None)) {
+        eprintln!("postal roster: {err}");
+    }
     let view = lists.find(&id).ok_or(PairError::NotFound(id.clone()))?;
     print_show(&ctx, view)?;
     Ok(())
@@ -169,9 +170,7 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
         None => resolve_sas(&ctx, view)?,
     };
     client.accept(&id, &sas)?;
-    if let Ok(lists) = client.list_pairs(false) {
-        let _ = sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None));
-    }
+    refresh_roster(&client, &ctx.root, &ctx.configured_addrs(None))?;
     println!("ok");
     Ok(())
 }
@@ -181,9 +180,7 @@ pub fn run_reject(id: String) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let client = ctx.client()?;
     client.reject(&id)?;
-    if let Ok(lists) = client.list_pairs(false) {
-        let _ = sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None));
-    }
+    refresh_roster(&client, &ctx.root, &ctx.configured_addrs(None))?;
     println!("ok");
     Ok(())
 }
@@ -193,9 +190,7 @@ pub fn run_revoke(id: String) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let client = ctx.client()?;
     client.revoke(&id)?;
-    if let Ok(lists) = client.list_pairs(false) {
-        let _ = sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None));
-    }
+    refresh_roster(&client, &ctx.root, &ctx.configured_addrs(None))?;
     println!("ok");
     Ok(())
 }
@@ -238,6 +233,19 @@ fn publish_handles(
     Ok(out)
 }
 
+fn refresh_roster(
+    client: &PlaneClient,
+    root: &Path,
+    self_addrs: &[PostalAddr],
+) -> Result<(), PairError> {
+    let lists = match client.list_pairs(false) {
+        Ok(lists) => lists,
+        Err(_) => return Ok(()),
+    };
+    sync_roster(root, &lists, self_addrs)?;
+    Ok(())
+}
+
 fn sync_roster(
     root: &Path,
     lists: &PairLists,
@@ -246,45 +254,39 @@ fn sync_roster(
     let mut roster = Roster::load(root)?;
     let selves: BTreeSet<_> = self_addrs.iter().cloned().collect();
     for p in &lists.sent {
-        apply_view(&mut roster, &selves, p, &p.to, None, Trust::Pending);
+        apply_view(&mut roster, &selves, p, Trust::Pending);
     }
     for p in &lists.inbox {
-        apply_view(&mut roster, &selves, p, &p.from, p.from_typ, Trust::Pending);
+        apply_view(&mut roster, &selves, p, Trust::Pending);
     }
     for p in &lists.friends {
-        let trust = Trust::from_pair_status(&p.status).unwrap_or(Trust::Trusted);
-        apply_view(&mut roster, &selves, p, &p.from, p.from_typ, trust);
+        let Some(trust) = Trust::from_pair_status(&p.status) else {
+            continue;
+        };
+        apply_view(&mut roster, &selves, p, trust);
     }
     roster.save(root)
 }
 
-fn apply_view(
-    roster: &mut Roster,
-    selves: &BTreeSet<PostalAddr>,
-    view: &PairView,
-    peer_raw: &str,
-    typ: Option<PeerType>,
-    trust: Trust,
-) {
-    let Ok(addr) = PostalAddr::parse(peer_raw, None) else {
+fn apply_view(roster: &mut Roster, selves: &BTreeSet<PostalAddr>, view: &PairView, trust: Trust) {
+    let Some(peer) = peer_of_view(selves, view) else {
         return;
     };
-    if selves.contains(&addr) {
-        return;
-    }
-    let fp = view.fingerprint.clone().or_else(|| {
-        view.public_key_pem
-            .as_deref()
-            .and_then(|pem| fingerprint_spki_pem(pem).ok())
-    });
-    let _ = roster.merge_peer(
-        addr,
-        typ,
-        fp,
-        view.public_key_pem.clone(),
-        trust,
-        view.id.clone(),
-    );
+    let from = parse_view_addr(&view.from);
+    let peer_is_from = from.as_ref() == Some(&peer);
+    // fromTyp / from-side SPKI describe `from` only. Never copy our typ or key onto `to`.
+    let typ = if peer_is_from { view.from_typ } else { None };
+    let (fp, pem) = if peer_is_from {
+        let fp = view.fingerprint.clone().or_else(|| {
+            view.public_key_pem
+                .as_deref()
+                .and_then(|pem| fingerprint_spki_pem(pem).ok())
+        });
+        (fp, view.public_key_pem.clone())
+    } else {
+        (None, None)
+    };
+    let _ = roster.merge_peer(peer, typ, fp, pem, trust, view.id.clone());
 }
 
 fn resolve_sas(ctx: &PairCtx, view: Option<&PairView>) -> Result<String, PairError> {
@@ -309,12 +311,17 @@ fn local_sas(ctx: &PairCtx, view: &PairView) -> Option<LocalSas> {
     let kp = ctx.keys().ok()?;
     let local_fp = kp.fingerprint();
     let roster = Roster::load(&ctx.root).ok();
-    let peer_raw = peer_of(ctx, view);
-    let pem = view.public_key_pem.clone().or_else(|| {
-        let addr = PostalAddr::parse(&peer_raw, None).ok()?;
+    let peer = peer_of(ctx, view)?;
+    let from = parse_view_addr(&view.from);
+    let view_pem = if from.as_ref() == Some(&peer) {
+        view.public_key_pem.clone().filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    let pem = view_pem.or_else(|| {
         roster
             .as_ref()
-            .and_then(|r| r.get(&addr).map(|e| e.public_key_pem.clone()))
+            .and_then(|r| r.get(&peer).map(|e| e.public_key_pem.clone()))
             .filter(|s| !s.is_empty())
     })?;
     let peer_fp = fingerprint_spki_pem(&pem).ok()?;
@@ -325,17 +332,26 @@ fn local_sas(ctx: &PairCtx, view: &PairView) -> Option<LocalSas> {
     })
 }
 
-fn peer_of(ctx: &PairCtx, view: &PairView) -> String {
-    let selves: BTreeSet<String> = ctx
-        .configured_addrs(None)
-        .into_iter()
-        .map(|a| a.to_string())
-        .collect();
-    if selves.contains(&view.from) {
-        view.to.clone()
-    } else {
-        view.from.clone()
+fn peer_of(ctx: &PairCtx, view: &PairView) -> Option<PostalAddr> {
+    let selves: BTreeSet<_> = ctx.configured_addrs(None).into_iter().collect();
+    peer_of_view(&selves, view)
+}
+
+fn peer_of_view(selves: &BTreeSet<PostalAddr>, view: &PairView) -> Option<PostalAddr> {
+    let from = parse_view_addr(&view.from)?;
+    let to = parse_view_addr(&view.to)?;
+    let from_ours = selves.contains(&from);
+    let to_ours = selves.contains(&to);
+    match (from_ours, to_ours) {
+        (true, false) => Some(to),
+        (false, true) => Some(from),
+        (false, false) => Some(from),
+        (true, true) => None,
     }
+}
+
+fn parse_view_addr(raw: &str) -> Option<PostalAddr> {
+    PostalAddr::parse(raw, None).ok()
 }
 
 fn print_add(id: &str, from: &PostalAddr, to: &PostalAddr, sas: Option<&str>, created: bool) {

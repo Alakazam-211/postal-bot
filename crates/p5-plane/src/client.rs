@@ -36,10 +36,7 @@ impl PlaneClient {
         public_key_pem: &str,
         typ: PeerType,
     ) -> Result<MeResponse, PlaneError> {
-        debug_assert!(
-            !public_key_pem.contains("PRIVATE"),
-            "refusing to even construct a private-key PUT"
-        );
+        refuse_private_pem(public_key_pem)?;
         self.send_json(
             "PUT",
             "/postal/me",
@@ -67,7 +64,7 @@ impl PlaneClient {
         typ: PeerType,
         public_key_pem: &str,
     ) -> Result<PairAddResponse, PlaneError> {
-        debug_assert!(!public_key_pem.contains("PRIVATE"));
+        refuse_private_pem(public_key_pem)?;
         self.send_json(
             "POST",
             "/postal/pair",
@@ -81,7 +78,7 @@ impl PlaneClient {
     }
 
     pub fn accept(&self, id: &str, sas: &str) -> Result<(), PlaneError> {
-        let path = format!("/postal/pair/{id}/accept");
+        let path = pair_action_path(id, "accept")?;
         let _: serde_json::Value = self.send_json(
             "POST",
             &path,
@@ -93,13 +90,13 @@ impl PlaneClient {
     }
 
     pub fn reject(&self, id: &str) -> Result<(), PlaneError> {
-        let path = format!("/postal/pair/{id}/reject");
+        let path = pair_action_path(id, "reject")?;
         let _: serde_json::Value = self.send_json("POST", &path, Some(&serde_json::json!({})))?;
         Ok(())
     }
 
     pub fn revoke(&self, id: &str) -> Result<(), PlaneError> {
-        let path = format!("/postal/pair/{id}/revoke");
+        let path = pair_action_path(id, "revoke")?;
         let _: serde_json::Value = self.send_json("POST", &path, Some(&serde_json::json!({})))?;
         Ok(())
     }
@@ -129,6 +126,28 @@ impl PlaneClient {
 
 fn trim_slash(s: String) -> String {
     s.trim_end_matches('/').to_string()
+}
+
+fn refuse_private_pem(pem: &str) -> Result<(), PlaneError> {
+    if pem.contains("PRIVATE") || pem.contains("BEGIN PRIVATE") {
+        return Err(PlaneError::PrivateKey);
+    }
+    Ok(())
+}
+
+/// Pair ids are a path segment. Reject anything that could change the target.
+fn pair_action_path(id: &str, action: &str) -> Result<String, PlaneError> {
+    if !is_safe_pair_id(id) {
+        return Err(PlaneError::BadPairId);
+    }
+    Ok(format!("/postal/pair/{id}/{action}"))
+}
+
+fn is_safe_pair_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 fn status_err(code: u16, resp: ureq::Response) -> PlaneError {
@@ -172,6 +191,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::Duration;
 
     struct Recorded {
         method: String,
@@ -180,55 +200,66 @@ mod tests {
         body: String,
     }
 
+    fn parse_http(buf: &[u8]) -> Option<Recorded> {
+        let raw = std::str::from_utf8(buf).ok()?;
+        let (head, rest) = raw.split_once("\r\n\r\n")?;
+        let mut lines = head.split("\r\n");
+        let start = lines.next()?;
+        let mut parts = start.split_whitespace();
+        let method = parts.next()?.to_string();
+        let path = parts.next()?.to_string();
+        let mut auth = String::new();
+        let mut content_len = 0usize;
+        for line in lines {
+            if let Some((k, v)) = line.split_once(':') {
+                if k.eq_ignore_ascii_case("authorization") {
+                    auth = v.trim().to_string();
+                }
+                if k.eq_ignore_ascii_case("content-length") {
+                    content_len = v.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        if rest.len() < content_len {
+            return None;
+        }
+        Some(Recorded {
+            method,
+            path,
+            auth,
+            body: rest[..content_len].to_string(),
+        })
+    }
+
     fn spawn_ok(status: u16, body: &str) -> (String, Arc<Mutex<Vec<Recorded>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let rec = Arc::new(Mutex::new(Vec::new()));
         let rec2 = rec.clone();
         let body = body.to_string();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
+            let _ = ready_tx.send(());
             if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = vec![0u8; 8192];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let raw = String::from_utf8_lossy(&buf[..n]);
-                let mut lines = raw.split("\r\n");
-                let start = lines.next().unwrap_or("");
-                let mut parts = start.split_whitespace();
-                let method = parts.next().unwrap_or("").to_string();
-                let path = parts.next().unwrap_or("").to_string();
-                let mut auth = String::new();
-                let mut content_len = 0usize;
-                for line in lines.by_ref() {
-                    if line.is_empty() {
-                        break;
+                let _ = stream.set_nonblocking(false);
+                stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                let rec = loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => break parse_http(&buf),
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if let Some(r) = parse_http(&buf) {
+                                break Some(r);
+                            }
+                        }
+                        Err(_) => break parse_http(&buf),
                     }
-                    if let Some(v) = line
-                        .split_once(':')
-                        .filter(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-                        .map(|(_, v)| v.trim().to_string())
-                    {
-                        auth = v;
-                    }
-                    if let Some(v) = line
-                        .split_once(':')
-                        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-                        .and_then(|(_, v)| v.trim().parse().ok())
-                    {
-                        content_len = v;
-                    }
-                }
-                let rest = lines.next().unwrap_or("");
-                let req_body = if content_len > 0 {
-                    rest.chars().take(content_len).collect()
-                } else {
-                    rest.to_string()
                 };
-                rec2.lock().unwrap().push(Recorded {
-                    method,
-                    path,
-                    auth,
-                    body: req_body,
-                });
+                if let Some(r) = rec {
+                    rec2.lock().unwrap().push(r);
+                }
                 let resp = format!(
                     "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -236,6 +267,7 @@ mod tests {
                 let _ = stream.write_all(resp.as_bytes());
             }
         });
+        ready_rx.recv().unwrap();
         (format!("http://{addr}"), rec)
     }
 
@@ -278,5 +310,41 @@ mod tests {
         assert!(body["public_key_pem"].as_str().unwrap().contains("PUBLIC"));
         assert!(!body.to_string().contains("PRIVATE"));
         assert_eq!(body.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn put_me_refuses_private_pem_without_http() {
+        let c = PlaneClient::new("http://127.0.0.1:1", "k2c_test");
+        let pem = "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n";
+        let err = c
+            .put_me("alice::acme.postal.bot", pem, PeerType::Session)
+            .unwrap_err();
+        assert!(matches!(err, PlaneError::PrivateKey));
+        assert!(matches!(
+            c.add_pair(
+                "alice::acme.postal.bot",
+                "scout::acme.postal.bot",
+                PeerType::Session,
+                pem
+            )
+            .unwrap_err(),
+            PlaneError::PrivateKey
+        ));
+    }
+
+    #[test]
+    fn pair_id_rejects_path_escape() {
+        let c = PlaneClient::new("http://127.0.0.1:1", "k2c_test");
+        for id in ["../x", "a/b", "a?b", "a#b", "", "pair/1", "id with space"] {
+            assert!(
+                matches!(c.accept(id, "000000").unwrap_err(), PlaneError::BadPairId),
+                "{id}"
+            );
+            assert!(matches!(c.reject(id).unwrap_err(), PlaneError::BadPairId));
+            assert!(matches!(c.revoke(id).unwrap_err(), PlaneError::BadPairId));
+        }
+        assert!(is_safe_pair_id("pair-1"));
+        assert!(is_safe_pair_id("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(!is_safe_pair_id("../x"));
     }
 }

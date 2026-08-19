@@ -17,6 +17,10 @@ pub enum PlaneError {
         message: String,
     },
     Transport(String),
+    /// Wire lock: never PUT/POST a private PEM.
+    PrivateKey,
+    /// Pair id is interpolated into the URL path.
+    BadPairId,
 }
 
 impl PlaneError {
@@ -39,6 +43,8 @@ impl fmt::Display for PlaneError {
             Self::NotFound => f.write_str("plane: not found"),
             Self::Http { status, message } => write!(f, "plane {status}: {message}"),
             Self::Transport(msg) => write!(f, "plane transport: {msg}"),
+            Self::PrivateKey => f.write_str("refusing to upload a private key"),
+            Self::BadPairId => f.write_str("pair id contains invalid characters"),
         }
     }
 }

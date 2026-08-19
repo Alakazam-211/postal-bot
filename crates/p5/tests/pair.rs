@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use p5_core::{PeerType, PostalAddr, Roster, Trust};
+use p5_core::{PeerType, PostalAddr, Roster, RosterEntry, ToolFlags, Trust};
 use p5_crypto::{fingerprint_spki_pem, sas_code, KeyPair};
 use p5_plane::PairView;
 
@@ -16,8 +16,17 @@ fn p5() -> Command {
     Command::new(env!("CARGO_BIN_EXE_p5"))
 }
 
+fn isolate_pair_env(cmd: &mut Command) {
+    cmd.env_remove("P5_OWNER_PAIR")
+        .env_remove("P5_TYP")
+        .env_remove("P5_FROM")
+        .env_remove("P5_CONNECT_TOKEN")
+        .env_remove("P5_PLANE_URL");
+}
+
 fn run_home(home: &Path, url: &str, args: &[&str], extra: &[(&str, &str)]) -> std::process::Output {
     let mut cmd = p5();
+    isolate_pair_env(&mut cmd);
     cmd.env("P5_HOME", home)
         .env("P5_PLANE_URL", url)
         .env("P5_CONNECT_TOKEN", "k2c_test")
@@ -92,12 +101,21 @@ impl MockPlane {
     fn set_inbox(&self, inbox: Vec<PairView>) {
         self.state.lock().unwrap().inbox = inbox;
     }
+
+    fn set_sent(&self, sent: Vec<PairView>) {
+        self.state.lock().unwrap().sent = sent;
+    }
+
+    fn set_friends(&self, friends: Vec<PairView>) {
+        self.state.lock().unwrap().friends = friends;
+    }
 }
 
 fn handle_conn(
     mut stream: std::net::TcpStream,
     state: &Arc<Mutex<MockState>>,
 ) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let rec = match read_http(&mut stream) {
         Some(r) => r,
@@ -239,20 +257,32 @@ fn view(
     typ: PeerType,
     pem: &str,
 ) -> PairView {
+    view_opt(id, from, to, status, Some(sas), Some(typ), Some(pem))
+}
+
+fn view_opt(
+    id: &str,
+    from: &str,
+    to: &str,
+    status: &str,
+    sas: Option<&str>,
+    typ: Option<PeerType>,
+    pem: Option<&str>,
+) -> PairView {
     PairView {
         id: id.into(),
         from: from.into(),
         to: to.into(),
         from_handle: Some(from.split("::").next().unwrap_or(from).into()),
         from_host: Some(from.split("::").nth(1).unwrap_or("").into()),
-        from_typ: Some(typ),
+        from_typ: typ,
         owner_email: None,
         owner_name: None,
-        sas: Some(sas.into()),
+        sas: sas.map(str::to_string),
         status: status.into(),
         epoch: 0,
-        public_key_pem: Some(pem.into()),
-        fingerprint: fingerprint_spki_pem(pem).ok(),
+        public_key_pem: pem.map(str::to_string),
+        fingerprint: pem.and_then(|p| fingerprint_spki_pem(p).ok()),
     }
 }
 
@@ -449,7 +479,12 @@ fn pair_reject_and_revoke_are_gated() {
     let home = tmp_home();
     let mock = MockPlane::start();
     for verb in ["reject", "revoke"] {
-        let out = run_home(home.path(), &mock.url, &["pair", verb, "pair-1"], &[]);
+        let out = run_home(
+            home.path(),
+            &mock.url,
+            &["pair", verb, "pair-1"],
+            &[("P5_OWNER_PAIR", "0")],
+        );
         assert_eq!(out.status.code(), Some(3), "{verb}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains("gated"), "{verb}");
@@ -458,11 +493,43 @@ fn pair_reject_and_revoke_are_gated() {
 }
 
 #[test]
+fn pair_reject_and_revoke_with_owner_flag() {
+    let home = tmp_home();
+    for (verb, suffix) in [
+        ("reject", "/postal/pair/pair-1/reject"),
+        ("revoke", "/postal/pair/pair-1/revoke"),
+    ] {
+        let mock = MockPlane::start();
+        let out = run_home(
+            home.path(),
+            &mock.url,
+            &["pair", verb, "pair-1"],
+            &[("P5_OWNER_PAIR", "1")],
+        );
+        assert!(
+            out.status.success(),
+            "{verb} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let reqs = mock.requests();
+        assert!(
+            reqs.iter().any(|r| r.method == "POST" && r.path == suffix),
+            "{verb}: expected POST {suffix}, got {reqs:?}"
+        );
+        assert!(reqs.iter().all(|r| !r.body.contains("PRIVATE")));
+    }
+}
+
+#[test]
 fn login_writes_connect_token() {
     let home = tmp_home();
-    let out = p5()
+    let mock = MockPlane::start();
+    let mut cmd = p5();
+    isolate_pair_env(&mut cmd);
+    let out = cmd
         .env("P5_HOME", home.path())
         .env("P5_LOGIN_NO_START", "1")
+        .env("P5_PLANE_URL", &mock.url)
         .args(["login", "--token", "k2c_saved"])
         .output()
         .unwrap();
@@ -471,6 +538,120 @@ fn login_writes_connect_token() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let cfg = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+    assert!(
+        mock.requests().is_empty(),
+        "login without an addr must not hit the plane: {:?}",
+        mock.requests()
+    );
+    let cfg_path = home.path().join("config.toml");
+    let cfg = std::fs::read_to_string(&cfg_path).unwrap();
     assert!(cfg.contains("k2c_saved"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&cfg_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}
+
+#[test]
+fn sent_without_peer_typ_does_not_invent_roster() {
+    let home = tmp_home();
+    let mock = MockPlane::start();
+    let ours = KeyPair::load_or_create(home.path()).unwrap();
+    mock.set_sent(vec![view_opt(
+        "pair-sent",
+        "alice::acme.postal.bot",
+        "scout::acme.postal.bot",
+        "pending",
+        None,
+        None,
+        Some(&ours.public_key_pem()),
+    )]);
+    let out = run_home(home.path(), &mock.url, &["pair", "list"], &[]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let roster = Roster::load(home.path()).unwrap();
+    let scout: PostalAddr = "scout::acme.postal.bot".parse().unwrap();
+    assert!(
+        roster.get(&scout).is_none(),
+        "must not guess typ for outbound peer"
+    );
+}
+
+#[test]
+fn friends_from_us_updates_peer_trust_not_keys() {
+    let home = tmp_home();
+    let mock = MockPlane::start();
+    let peer = KeyPair::generate();
+    let ours = KeyPair::load_or_create(home.path()).unwrap();
+    let scout: PostalAddr = "scout::acme.postal.bot".parse().unwrap();
+    let mut roster = Roster::new();
+    roster.insert(
+        scout.clone(),
+        RosterEntry {
+            typ: PeerType::Turn,
+            fingerprint: peer.fingerprint(),
+            public_key_pem: peer.public_key_pem(),
+            trust: Trust::Pending,
+            pair_id: "old".into(),
+            sand_uuid: None,
+            tools: ToolFlags::default(),
+        },
+    );
+    roster.save(home.path()).unwrap();
+
+    mock.set_friends(vec![view(
+        "pair-f",
+        "Alice::acme.postal.bot",
+        "Scout::acme.postal.bot",
+        "trusted",
+        "000000",
+        PeerType::Session,
+        &ours.public_key_pem(),
+    )]);
+    let out = run_home(home.path(), &mock.url, &["pair", "list"], &[]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let loaded = Roster::load(home.path()).unwrap();
+    let row = loaded.get(&scout).expect("existing peer kept");
+    assert_eq!(row.typ, PeerType::Turn);
+    assert_eq!(row.trust, Trust::Trusted);
+    assert_eq!(row.pair_id, "pair-f");
+    assert_eq!(row.public_key_pem, peer.public_key_pem());
+    assert_eq!(row.fingerprint, peer.fingerprint());
+}
+
+#[test]
+fn unknown_friends_status_is_skipped() {
+    let home = tmp_home();
+    let mock = MockPlane::start();
+    let peer = KeyPair::generate();
+    mock.set_friends(vec![view(
+        "pair-x",
+        "scout::acme.postal.bot",
+        "alice::acme.postal.bot",
+        "accepted",
+        "000000",
+        PeerType::Session,
+        &peer.public_key_pem(),
+    )]);
+    let out = run_home(home.path(), &mock.url, &["pair", "list"], &[]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let roster = Roster::load(home.path()).unwrap();
+    let scout: PostalAddr = "scout::acme.postal.bot".parse().unwrap();
+    assert!(
+        roster.get(&scout).is_none(),
+        "unknown status must not fail-open as trusted"
+    );
 }

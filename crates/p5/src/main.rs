@@ -102,7 +102,7 @@ enum Commands {
         /// Display / pairing address (`handle::sub.postal.bot`)
         #[arg(long)]
         from: Option<String>,
-        /// Peer type: session or turn
+        /// Our type: session or turn (default session — this CLI's identity)
         #[arg(long)]
         typ: Option<String>,
     },
@@ -117,7 +117,7 @@ enum PairAction {
         /// Our address
         #[arg(long)]
         from: Option<String>,
-        /// Our type: session or turn
+        /// Our type: session or turn (default session — this CLI's identity)
         #[arg(long)]
         typ: Option<String>,
     },
