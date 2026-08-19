@@ -110,6 +110,18 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
     let uds_state = Arc::clone(&state);
     let uds_handle = thread::spawn(move || control::serve_uds(listener, uds_state));
 
+    // frpc is this process's child. Broker miss still serves loopback.
+    let mut tunnel = p5_tunnel::start_from_env(root, local.port());
+    state.tunnel_up.store(tunnel.is_up(), Ordering::Relaxed);
+    if tunnel.is_up() {
+        eprintln!("postal tunnel up");
+    } else if p5_tunnel::enabled() {
+        eprintln!(
+            "postal tunnel down: {}",
+            tunnel.reason().unwrap_or("unknown")
+        );
+    }
+
     eprintln!(
         "postal agent listening http={local} uds={}",
         sock_path(root).display()
@@ -117,7 +129,10 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
 
     while !state.stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
+        state.tunnel_up.store(tunnel.is_up(), Ordering::Relaxed);
     }
+    tunnel.stop();
+    state.tunnel_up.store(false, Ordering::Relaxed);
     http_server.unblock();
     let _ = http_handle.join();
     let _ = uds_handle.join();

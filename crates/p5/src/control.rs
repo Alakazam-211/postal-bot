@@ -128,7 +128,11 @@ fn handle_client(stream: &mut UnixStream, state: &AgentState) -> Result<(), Stri
         ControlReq::Status => ControlResp::Status {
             ok: true,
             agent: "up".into(),
-            tunnel: "down".into(),
+            tunnel: if state.tunnel_up.load(Ordering::Relaxed) {
+                "up".into()
+            } else {
+                "down".into()
+            },
             http: state.http_bind.to_string(),
         },
         ControlReq::Stop => {

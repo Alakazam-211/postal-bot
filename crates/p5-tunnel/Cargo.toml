@@ -1,0 +1,21 @@
+[package]
+name = "p5-tunnel"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Postal tunnel client: CSR SAN policy, cert.postal.bot broker, frpc child"
+publish = false
+
+[dependencies]
+p5-core.workspace = true
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

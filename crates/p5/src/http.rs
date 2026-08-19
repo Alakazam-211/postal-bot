@@ -87,6 +87,8 @@ pub struct AgentState {
     pub http_bind: SocketAddr,
     pub dev_secret: Option<String>,
     pub stop: Arc<AtomicBool>,
+    /// Live frpc child. `p5 status` reads this; start failures stay `false`.
+    pub tunnel_up: Arc<AtomicBool>,
 }
 
 impl AgentState {
@@ -101,6 +103,7 @@ impl AgentState {
             http_bind,
             dev_secret,
             stop: Arc::new(AtomicBool::new(false)),
+            tunnel_up: Arc::new(AtomicBool::new(false)),
         }
     }
 

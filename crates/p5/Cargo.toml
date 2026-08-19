@@ -12,6 +12,7 @@ clap.workspace = true
 p5-core.workspace = true
 p5-crypto.workspace = true
 p5-plane.workspace = true
+p5-tunnel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook = "0.3"

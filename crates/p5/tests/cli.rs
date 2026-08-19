@@ -397,6 +397,57 @@ fn login_writes_unit_file() {
 }
 
 #[test]
+fn agent_run_tunnel_unreachable_still_serves() {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let home = tmp_home();
+    let mut child = p5()
+        .env("P5_HOME", home.path())
+        .env("P5_TUNNEL", "1")
+        .env("P5_TUNNEL_LABEL", "acme")
+        .env("P5_CERT_BROKER", "http://127.0.0.1:1/cert")
+        .env("P5_HTTP_BIND", "127.0.0.1:0")
+        .args(["agent", "run"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let sock = home.path().join("agent.sock");
+    let mut up = false;
+    for _ in 0..80 {
+        if sock.exists() {
+            up = true;
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let mut err = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                use std::io::Read;
+                let _ = stderr.read_to_string(&mut err);
+            }
+            panic!("agent exited before listen: {status}; stderr={err}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(up, "agent.sock never appeared");
+
+    let text = stdout_home(home.path(), &["status"]);
+    assert!(text.contains("agent: up"), "{text}");
+    assert!(text.contains("tunnel: down"), "{text}");
+
+    let stop = run_home(home.path(), &["agent", "stop"], &[]);
+    assert!(
+        stop.status.success(),
+        "stop stderr={}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let _ = child.wait();
+}
+
+#[test]
 fn agent_run_refuses_unspecified_bind() {
     let home = tmp_home();
     let out = run_home(
