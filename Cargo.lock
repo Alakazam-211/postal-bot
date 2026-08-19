@@ -121,7 +121,12 @@ name = "p5"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "p5-core",
 ]
+
+[[package]]
+name = "p5-core"
+version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"

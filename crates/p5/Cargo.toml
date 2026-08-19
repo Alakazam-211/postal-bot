@@ -9,3 +9,4 @@ publish = false
 
 [dependencies]
 clap.workspace = true
+p5-core.workspace = true

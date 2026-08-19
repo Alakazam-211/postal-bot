@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/p5"]
+members = ["crates/p5", "crates/p5-core"]
 
 [workspace.package]
 edition = "2021"
@@ -9,3 +9,4 @@ repository = "https://github.com/Alakazam-211/postal-bot"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+p5-core = { path = "crates/p5-core" }

@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use p5_core::{DeliveryMode, PeerType};
 
 const PRODUCT: &str = "Postal";
 const SITE: &str = "postal.bot";
@@ -43,21 +44,27 @@ fn whoami_text() -> String {
     )
 }
 
-fn help_types_text() -> &'static str {
-    "\
+fn help_types_text() -> String {
+    let session = PeerType::Session.as_str();
+    let turn = PeerType::Turn.as_str();
+    let live = DeliveryMode::Live.as_str();
+    let tray = DeliveryMode::Tray.as_str();
+    format!(
+        "\
 Bot types (one word on the wire / in p5 config):
 
-  session  Lives in a terminal harness. Attach if live; if asleep,
+  {session}  Lives in a terminal harness. Attach if live; if asleep,
            resume from a saved session file + cwd.
 
-  turn     Host-scheduled agent (Grok Bot / Sand). A message is a
+  {turn}     Host-scheduled agent (Grok Bot / Sand). A message is a
            new user turn. No always-on process.
 
 Delivery modes (not types):
 
-  live     Short inject (session only).
-  tray     Durable package + optional knock.
+  {live}     Short inject (session only).
+  {tray}     Durable package + optional knock.
 "
+    )
 }
 
 fn help_text() -> String {
