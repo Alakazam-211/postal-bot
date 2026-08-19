@@ -13,7 +13,7 @@ mod live;
 mod types;
 
 pub use client::PlaneClient;
-pub use config::{PlaneConfig, PostalFile, CONFIG_FILE};
+pub use config::{BillingFile, PlaneConfig, PostalFile, CONFIG_FILE};
 pub use error::PlaneError;
 pub use hold::{
     decode_ciphertext, encode_ciphertext, hold_poll_delay, refuse_plaintext, seal_envelope,
@@ -22,7 +22,7 @@ pub use hold::{
 pub use live::{live_send, LiveSend};
 pub use types::{
     AcceptRequest, HoldEnvelope, HoldList, HoldPutResponse, MeRequest, MeResponse, PairAddRequest,
-    PairAddResponse, PairLists, PairView,
+    PairAddResponse, PairLists, PairView, UsageReport, CheckoutView,
 };
 
 /// Default plane origin (K2 Web).

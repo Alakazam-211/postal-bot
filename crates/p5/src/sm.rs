@@ -37,6 +37,7 @@ pub const REASON_NO_IDENTITY: &str = "no_identity";
 pub const REASON_ERROR: &str = "error";
 pub const REASON_HOST_DOWN: &str = "host_down";
 pub const REASON_RATE_LIMITED: &str = "rate_limited";
+pub const REASON_QUOTA: &str = "quota";
 
 /// CLI / test input for [`send_msg`].
 #[derive(Debug, Clone)]
@@ -71,7 +72,7 @@ impl MsgResponse {
         }
         match self.reason.as_deref() {
             Some(REASON_BAD_ADDRESS) | Some(REASON_TOO_LARGE) => EXIT_USAGE,
-            Some(REASON_GATED) | Some(REASON_NOT_CONNECTED) => EXIT_GATED,
+            Some(REASON_GATED) | Some(REASON_NOT_CONNECTED) | Some(REASON_QUOTA) => EXIT_GATED,
             _ => EXIT_ERROR,
         }
     }
@@ -335,6 +336,21 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         }
         Err(err) => return Err(err),
     };
+
+    if crate::billing::enforce() {
+        match crate::billing::collect(ctx.mailbox.root()) {
+            Ok(report) if !crate::billing::allow_send(&report) => {
+                return Ok(MsgResponse::fail(
+                    None,
+                    Some(&to),
+                    None,
+                    REASON_QUOTA,
+                    crate::billing::quota_hint(&report),
+                ));
+            }
+            _ => {}
+        }
+    }
 
     if req.body.len() as u64 > MAX_BODY_BYTES {
         return Ok(MsgResponse::fail(

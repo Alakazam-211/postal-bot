@@ -5,8 +5,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::{
-    AcceptRequest, HoldEnvelope, HoldList, HoldPutResponse, MeRequest, MeResponse, PairAddRequest,
-    PairAddResponse, PairLists, PlaneError,
+    AcceptRequest, CheckoutView, HoldEnvelope, HoldList, HoldPutResponse, MeRequest, MeResponse,
+    PairAddRequest, PairAddResponse, PairLists, PlaneError, UsageReport,
 };
 
 const TIMEOUT_SECS: u64 = 30;
@@ -142,6 +142,19 @@ impl PlaneClient {
         Ok(())
     }
 
+    /// `GET /postal/usage` for this Connect label. 404 → plane has not cut the meter.
+    pub fn usage(&self) -> Result<UsageReport, PlaneError> {
+        self.send_json("GET", "/postal/usage", None::<&()>)
+    }
+
+    /// Verify a Stripe Checkout session against the Postal site (no Connect token).
+    pub fn checkout_session(
+        api_base: impl Into<String>,
+        session_id: &str,
+    ) -> Result<CheckoutView, PlaneError> {
+        fetch_checkout_session(&api_base.into(), session_id)
+    }
+
     fn send_json<T, B>(&self, method: &str, path: &str, body: Option<&B>) -> Result<T, PlaneError>
     where
         T: DeserializeOwned,
@@ -167,6 +180,34 @@ impl PlaneClient {
 
 fn trim_slash(s: String) -> String {
     s.trim_end_matches('/').to_string()
+}
+
+fn is_checkout_session_id(id: &str) -> bool {
+    let id = id.trim();
+    id.starts_with("cs_")
+        && id.len() < 256
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn fetch_checkout_session(api_base: &str, session_id: &str) -> Result<CheckoutView, PlaneError> {
+    if !is_checkout_session_id(session_id) {
+        return Err(PlaneError::Http {
+            status: 400,
+            message: "bad checkout session id".into(),
+        });
+    }
+    let base = trim_slash(api_base.trim().to_string());
+    let url = format!("{base}/api/session?id={session_id}");
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .build();
+    match agent.get(&url).set("Accept", "application/json").call() {
+        Ok(resp) => resp.into_json().map_err(PlaneError::from),
+        Err(ureq::Error::Status(code, resp)) => Err(status_err(code, resp)),
+        Err(ureq::Error::Transport(t)) => Err(PlaneError::Transport(t.to_string())),
+    }
 }
 
 fn refuse_private_pem(pem: &str) -> Result<(), PlaneError> {

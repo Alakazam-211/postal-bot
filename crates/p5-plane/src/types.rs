@@ -135,6 +135,35 @@ pub struct HoldList {
     pub items: Vec<HoldEnvelope>,
 }
 
+/// `GET /postal/usage` — messages this UTC month on one enrolled host.
+///
+/// Free: 100 / subdomain / month. Paid: unlimited for the year.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UsageReport {
+    pub host: String,
+    /// `YYYY-MM` UTC.
+    pub period: String,
+    pub sent: u32,
+    pub limit: u32,
+    pub remaining: u32,
+    /// `free` or `unlimited`.
+    pub plan: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_unix: Option<u64>,
+}
+
+/// `GET {www}/api/session?id=cs_…` after Stripe Checkout.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CheckoutView {
+    pub paid: bool,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_unix: Option<u64>,
+    #[serde(default)]
+    pub id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

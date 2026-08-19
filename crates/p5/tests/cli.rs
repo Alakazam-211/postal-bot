@@ -115,6 +115,8 @@ fn help_prints_product_and_commands() {
     assert!(text.contains("sent"));
     assert!(text.contains("outbox"));
     assert!(text.contains("msg"));
+    assert!(text.contains("usage"));
+    assert!(text.contains("billing"));
     assert!(!text.contains("k2 "));
 }
 
@@ -124,6 +126,18 @@ fn long_help_flag_works() {
     assert!(text.contains("Postal"));
     assert!(text.contains("whoami"));
     assert!(text.contains("inbox"));
+}
+
+#[test]
+fn usage_shows_free_remaining() {
+    let home = tmp_home();
+    add_home(home.path(), "alice::acme.postal.bot", true);
+    let text = stdout_home(home.path(), &["usage"]);
+    assert!(text.contains("acme.postal.bot"));
+    assert!(text.contains("100"));
+    assert!(text.contains("remaining"));
+    assert!(text.contains("pay"));
+    assert!(text.contains("postal.bot/pay"));
 }
 
 #[test]

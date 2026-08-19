@@ -16,6 +16,53 @@ pub struct PostalFile {
     pub addr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typ: Option<String>,
+    #[serde(default, skip_serializing_if = "BillingFile::is_empty")]
+    pub billing: BillingFile,
+}
+
+/// Local paid-plan entitlement + meter start.
+///
+/// Plane `GET /postal/usage` is source of truth when it exists. This file
+/// holds a Stripe Checkout redeem and the local free-tier epoch so mail
+/// from before billing shipped does not eat the 100/month cap.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BillingFile {
+    /// `free` or `unlimited`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Enrolled host the entitlement applies to (`label.postal.bot`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Unix seconds; subscription current period end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_unix: Option<u64>,
+    /// Stripe Checkout session id (`cs_…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Unix seconds; sent rows created before this do not count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meter_from_unix: Option<u64>,
+}
+
+impl BillingFile {
+    pub fn is_empty(&self) -> bool {
+        self.plan.is_none()
+            && self.host.is_none()
+            && self.until_unix.is_none()
+            && self.session.is_none()
+            && self.meter_from_unix.is_none()
+    }
+
+    pub fn is_unlimited_now(&self, now_unix: u64) -> bool {
+        let plan = self.plan.as_deref().map(str::trim).unwrap_or("free");
+        if !plan.eq_ignore_ascii_case("unlimited") {
+            return false;
+        }
+        match self.until_unix {
+            None => true,
+            Some(until) => until > now_unix,
+        }
+    }
 }
 
 impl PostalFile {
@@ -108,6 +155,7 @@ mod tests {
             connect_token: Some("k2c_test".into()),
             addr: Some("alice::acme.postal.bot".into()),
             typ: Some("session".into()),
+            billing: BillingFile::default(),
         };
         f.save(dir.path()).unwrap();
         let loaded = PostalFile::load(dir.path()).unwrap();
@@ -122,5 +170,25 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn billing_roundtrip_unlimited() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = PostalFile {
+            billing: BillingFile {
+                plan: Some("unlimited".into()),
+                host: Some("acme.postal.bot".into()),
+                until_unix: Some(1_800_000_000),
+                session: Some("cs_test".into()),
+                meter_from_unix: Some(1_787_248_800),
+            },
+            ..Default::default()
+        };
+        f.save(dir.path()).unwrap();
+        let loaded = PostalFile::load(dir.path()).unwrap();
+        assert_eq!(loaded, f);
+        assert!(loaded.billing.is_unlimited_now(1_787_248_800));
+        assert!(!loaded.billing.is_unlimited_now(1_900_000_000));
     }
 }

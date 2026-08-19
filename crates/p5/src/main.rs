@@ -2,6 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use p5_core::{default_root, DeliveryMode, MailItem, Mailbox, MailboxError, PeerType};
 
 mod agent;
+mod billing;
 mod control;
 mod hold;
 mod http;
@@ -103,6 +104,17 @@ enum Commands {
     },
     /// Pull held mail from the plane (one shot; requires `P5_HOLD=1`)
     Recv,
+    /// Messages sent this month on this enrolled subdomain
+    Usage {
+        /// Print a JSON object
+        #[arg(long)]
+        json: bool,
+    },
+    /// Paid plan ($9.99/year unlimited after 100 free messages/month)
+    Billing {
+        #[command(subcommand)]
+        action: Option<BillingAction>,
+    },
     /// Publish this handle's public pairing key (`PUT /postal/me`)
     Me {
         /// Display / pairing address (`handle::sub.postal.bot`)
@@ -213,6 +225,17 @@ enum AgentAction {
     Stop,
 }
 
+#[derive(Debug, Subcommand)]
+enum BillingAction {
+    /// Print plan, remaining, and the payment URL
+    Show,
+    /// Apply a Stripe Checkout session (`cs_…`) from postal.bot/pay
+    Redeem {
+        /// Checkout session id
+        session: String,
+    },
+}
+
 #[derive(Debug, Clone, ValueEnum)]
 enum HelpTopic {
     /// Bot types: session and turn (live/tray are modes)
@@ -220,6 +243,8 @@ enum HelpTopic {
     /// Last-mile plugins (`homes.harness`): k2, grok, exec
     #[value(name = "last-mile", alias = "plugins", alias = "grok")]
     LastMile,
+    /// Free 100 messages/month per subdomain; $9.99/year unlimited
+    Usage,
 }
 
 fn whoami_text() -> String {
@@ -310,6 +335,61 @@ p5 status / agent.log: \"turn gateway HTTP 401\" or \"token missing\" means
 the plugin ran but Sand auth failed — not a pairing failure.
 "
     )
+}
+
+fn help_usage_text() -> String {
+    format!(
+        "\
+Usage — 100 messages per enrolled subdomain per UTC month are free.
+Unlimited is ${price}/year for that subdomain. See {pay}
+
+  p5 usage           sent / remaining / plan for this host
+  p5 usage --json
+  p5 billing         same readout plus the pay URL
+  p5 billing redeem cs_…   after Stripe Checkout on {pay}
+
+Meter key is the server hostname (label.postal.bot), not the handle.
+Local sent ledger is the meter until K2 Web cuts GET /postal/usage
+(then P5_USAGE_PLANE=1). Mail from before billing first ran on this
+box does not count.
+
+Over the free cap, p5 msg exits 3 (quota) until you redeem or the
+month rolls. P5_BILLING=0 shows usage but does not block send.
+",
+        price = crate::billing::PRICE_USD,
+        pay = crate::billing::pay_url(),
+    )
+}
+
+fn run_usage(json: bool) {
+    match crate::billing::collect(&default_root()) {
+        Ok(report) => {
+            if json {
+                println!("{}", serde_json::to_string(&report).expect("usage json"));
+            } else {
+                print!("{}", crate::billing::usage_text(&report));
+            }
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(err.exit_code());
+        }
+    }
+}
+
+fn run_billing(action: Option<BillingAction>) {
+    match action {
+        None | Some(BillingAction::Show) => run_usage(false),
+        Some(BillingAction::Redeem { session }) => {
+            match crate::billing::redeem(&default_root(), &session) {
+                Ok(report) => print!("{}", crate::billing::usage_text(&report)),
+                Err(err) => {
+                    eprintln!("{err}");
+                    std::process::exit(err.exit_code());
+                }
+            }
+        }
+    }
 }
 
 fn help_text() -> String {
@@ -493,6 +573,11 @@ fn main() {
         Commands::Help {
             topic: Some(HelpTopic::LastMile),
         } => print!("{}", help_last_mile_text()),
+        Commands::Help {
+            topic: Some(HelpTopic::Usage),
+        } => print!("{}", help_usage_text()),
+        Commands::Usage { json } => run_usage(json),
+        Commands::Billing { action } => run_billing(action),
         Commands::Msg {
             addr,
             text,
@@ -646,7 +731,20 @@ mod tests {
         assert!(text.contains("pair"));
         assert!(text.contains("me"));
         assert!(text.contains("recv"));
+        assert!(text.contains("usage"));
+        assert!(text.contains("billing"));
         assert!(!text.contains("k2 "));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
+    }
+
+    #[test]
+    fn help_usage_names_free_tier_and_price() {
+        let text = help_usage_text();
+        assert!(text.contains("100"));
+        assert!(text.contains("9.99"));
+        assert!(text.contains("p5 usage"));
+        assert!(text.contains("postal.bot/pay"));
+        assert!(text.contains("subdomain"));
+        assert!(!text.contains("[k2g]"));
     }
 }
