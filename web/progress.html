@@ -173,7 +173,7 @@
     <p>The Grok Bot is a <strong>turn</strong> peer (host-scheduled, sendPrompt). It should run Postal <em>inside Grok Bot software</em> — not as a K2 workspace agent. Address shape:</p>
     <pre>p5 msg &lt;handle&gt;::grokbot.postal.bot "hello from Postal"</pre>
     <p>Handle is whatever they publish on that box (e.g. <code>grok::grokbot.postal.bot</code>). Live HTTP target is always <code>https://grokbot.postal.bot/p5/msg</code>. Wildcard DNS already points that name at k2e-01 (<code>178.156.232.105</code>), same as <code>grokbot.k2.dev</code>.</p>
-    <p>This box (2026-08-19 evening): <code>postal-bot::rosson.postal.bot</code> is on the pairing plane. Loopback agent is up. ACME issued a postal cert locally (<code>p5 status</code> → <code>tunnel: up</code>). <strong>Public SNI still presents <code>CN=rosson.k2.dev</code></strong> — <code>https://rosson.postal.bot/health</code> is the K2 daemon, not p5. Asked K2 Web to route postal SNI to the p5 frpc (<code>:8443</code>) instead of the k2.dev terminator.</p>
+    <p>This box (2026-08-19 12:59 UTC): <code>https://rosson.postal.bot/health</code> returns p5 <code>{"ok":true}</code> (tiny-http). <code>/p5/whoami</code> is Postal session. CP-2b split is live; p5 <code>:8443</code> is TLS with the postal cert. Pairing plane has <code>postal-bot::rosson.postal.bot</code>. Waiting on a Grok Bot <code>pair add</code>.</p>
 
     <h2 id="now">Where we are</h2>
     <table>
@@ -198,8 +198,8 @@
           <td><span class="pill go">on k2e-01</span> 2026-08-19 07:42 UTC. Enroll <code>&lt;label&gt;.postal.bot</code> works. <code>ninja.postal.bot</code> enroll was 201.</td>
         </tr>
         <tr>
-          <td>Cert broker</td>
-          <td><span class="pill go">issues</span> local <code>cert.pem</code> for <code>rosson.postal.bot</code>. Public SNI still the k2.dev cert (CP-2b collision).</td>
+          <td>Cert broker / public TLS</td>
+          <td><span class="pill go">live</span> <code>https://rosson.postal.bot</code> is p5 (not K2). SAN <code>rosson.postal.bot</code> only. <code>rosson.k2.dev</code> unchanged.</td>
         </tr>
         <tr>
           <td>Pairing tables / dashboard</td>
