@@ -244,9 +244,12 @@ fn emit_msg(resp: &MsgResponse, json: bool) {
 
 fn run_msg(req: MsgRequest, json: bool) {
     let root = default_root();
-    if let Some(resp) = control::try_send_msg(&root, &req) {
-        emit_msg(&resp, json);
-        std::process::exit(resp.exit_code());
+    match control::try_send_msg(&root, &req) {
+        control::TrySend::Up(resp) => {
+            emit_msg(&resp, json);
+            std::process::exit(resp.exit_code());
+        }
+        control::TrySend::Down => {}
     }
     eprintln!("{}", control::agent_down_hint());
     let ctx = match SmContext::load_default() {

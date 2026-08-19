@@ -57,13 +57,52 @@ pub fn program_path() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("p5"))
 }
 
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn systemd_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "\"\"".into();
+    }
+    if s.bytes().all(|b| {
+        matches!(
+            b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'_' | b'-'
+        )
+    }) {
+        return s.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        if c == '\\' || c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
 /// launchd plist. `Program` is the `p5` binary; args are `agent run`.
 pub fn launchd_plist_text(program: &Path, p5_home: Option<&Path>) -> String {
-    let program = program.display();
+    let program = xml_escape(&program.to_string_lossy());
     let env = match p5_home {
         Some(home) => format!(
             "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>P5_HOME</key>\n    <string>{}</string>\n  </dict>\n",
-            home.display()
+            xml_escape(&home.to_string_lossy())
         ),
         None => String::new(),
     };
@@ -85,7 +124,10 @@ pub fn launchd_plist_text(program: &Path, p5_home: Option<&Path>) -> String {
 {env}  <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
 </dict>
 </plist>
 "#
@@ -95,9 +137,12 @@ pub fn launchd_plist_text(program: &Path, p5_home: Option<&Path>) -> String {
 /// systemd user unit `p5-agent.service`. ExecStart is `p5 agent run`.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn systemd_unit_text(program: &Path, p5_home: Option<&Path>) -> String {
-    let program = program.display();
+    let program = systemd_quote(&program.to_string_lossy());
     let env = match p5_home {
-        Some(home) => format!("Environment=P5_HOME={}\n", home.display()),
+        Some(home) => {
+            let pair = format!("P5_HOME={}", home.display());
+            format!("Environment={}\n", systemd_quote(&pair))
+        }
         None => String::new(),
     };
     format!(
@@ -156,19 +201,24 @@ pub fn login(no_start: bool) -> Result<PathBuf, ServiceError> {
     Ok(path)
 }
 
-pub fn logout() -> Result<(), ServiceError> {
-    let home = user_home()?;
-    stop_service()?;
-    let path = {
-        #[cfg(target_os = "macos")]
-        {
-            launchd_plist_path(&home)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            systemd_unit_path(&home)
-        }
-    };
+pub fn unit_path(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        launchd_plist_path(home)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        systemd_unit_path(home)
+    }
+}
+
+/// Bootout / disable so KeepAlive cannot respawn, then the caller reaps the pid.
+pub fn unload() -> Result<(), ServiceError> {
+    stop_service()
+}
+
+pub fn remove_unit() -> Result<(), ServiceError> {
+    let path = unit_path(&user_home()?);
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -274,8 +324,18 @@ mod tests {
         assert!(text.contains("<string>p5</string>") || text.contains("/p5</string>"));
         assert!(text.contains("<string>agent</string>"));
         assert!(text.contains("<string>run</string>"));
+        assert!(text.contains("SuccessfulExit"));
+        assert!(!text.contains("<key>KeepAlive</key>\n  <true/>"));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
         assert!(!text.contains("k2 "));
+    }
+
+    #[test]
+    fn launchd_plist_escapes_xml() {
+        let text = launchd_plist_text(Path::new("/tmp/a&b<p5"), Some(Path::new("/tmp/x<y")));
+        assert!(text.contains("&amp;"));
+        assert!(text.contains("&lt;"));
+        assert!(!text.contains("/tmp/a&b<p5"));
     }
 
     #[test]
@@ -286,6 +346,9 @@ mod tests {
         assert!(text.contains("postal.bot"));
         assert!(text.contains("p5"));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
+        let quoted = systemd_unit_text(Path::new("/opt/my p5/p5"), Some(Path::new("/tmp/foo bar")));
+        assert!(quoted.contains("\"/opt/my p5/p5\""));
+        assert!(quoted.contains("\"P5_HOME=/tmp/foo bar\""));
     }
 
     #[test]

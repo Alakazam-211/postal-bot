@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use p5_core::{
     default_root, DeliveryMode, DeliveryStatus, Homes, Mailbox, MailboxError, PeerType, PostalAddr,
@@ -26,6 +27,7 @@ pub const REASON_DORMANT_NO_WAKE: &str = "dormant_no_wake";
 pub const REASON_GATED: &str = "gated";
 pub const REASON_TOO_LARGE: &str = "too_large";
 pub const REASON_NO_IDENTITY: &str = "no_identity";
+pub const REASON_ERROR: &str = "error";
 
 /// CLI / test input for [`send_msg`].
 #[derive(Debug, Clone)]
@@ -125,6 +127,10 @@ impl MsgResponse {
             already: false,
         }
     }
+
+    pub fn from_error(hint: impl Into<String>) -> Self {
+        Self::fail(None, None, None, REASON_ERROR, hint)
+    }
 }
 
 /// Disk + in-memory state for one `p5 msg` / receive.
@@ -133,7 +139,8 @@ pub struct SmContext {
     pub mailbox: Mailbox,
     pub homes: Homes,
     pub roster: Roster,
-    pub sessions: SessionMap,
+    /// Shared with the resident agent when one is running; never clone-and-forget.
+    pub sessions: Arc<Mutex<SessionMap>>,
     /// `P5_LOCAL_RECV=1` — treat dest as this box even without a HomeRow.
     pub local_recv: bool,
     /// Non-empty `P5_DEV_SECRET` — loopback inbound pairing skip.
@@ -147,7 +154,7 @@ impl SmContext {
             mailbox: Mailbox::new(&root),
             homes: Homes::new(),
             roster: Roster::new(),
-            sessions: SessionMap::new(),
+            sessions: Arc::new(Mutex::new(SessionMap::new())),
             local_recv: false,
             dev_secret: false,
         }
@@ -169,6 +176,14 @@ impl SmContext {
 
     pub fn dest_is_local(&self, addr: &PostalAddr) -> bool {
         self.local_recv || self.homes.get(addr).is_some()
+    }
+
+    pub fn live_session(&self, addr: &PostalAddr) -> Option<crate::session_map::LiveSession> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(addr)
+            .cloned()
     }
 }
 
@@ -466,7 +481,7 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
         ));
     }
 
-    let live = ctx.sessions.get(&inbound.to);
+    let live = ctx.live_session(&inbound.to);
     if live.is_none() {
         if inbound.no_wake {
             return Err(permanent(
@@ -535,9 +550,8 @@ fn inbox_has_id(ctx: &SmContext, id: &str) -> Result<bool, ReceiveError> {
 }
 
 fn session_id_hint(ctx: &SmContext, to: &PostalAddr) -> Option<String> {
-    ctx.sessions
-        .get(to)
-        .map(|s| s.session_id.clone())
+    ctx.live_session(to)
+        .map(|s| s.session_id)
         .or_else(|| ctx.homes.get(to).and_then(|h| h.session_id.clone()))
 }
 
@@ -779,8 +793,8 @@ mod tests {
     #[test]
     fn live_session_delivers_even_with_no_wake() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut ctx = ctx_with_home(tmp.path(), true);
-        ctx.sessions.insert(
+        let ctx = ctx_with_home(tmp.path(), true);
+        ctx.sessions.lock().unwrap().insert(
             addr("scout::acme.postal.bot"),
             LiveSession {
                 session_id: "live-9".into(),

@@ -24,7 +24,8 @@ pub const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8443";
 pub const DEV_SECRET_HEADER: &str = "x-p5-dev-secret";
 pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
-const HEADER_LIMIT: usize = 64 * 1024;
+/// JSON envelope on top of [`p5_core::MAX_BODY_BYTES`].
+const MAX_POST_BYTES: usize = p5_core::MAX_BODY_BYTES as usize + 64 * 1024;
 
 #[derive(Debug)]
 pub enum BindError {
@@ -82,7 +83,7 @@ impl HttpOut {
 
 pub struct AgentState {
     pub root: PathBuf,
-    pub sessions: Mutex<SessionMap>,
+    pub sessions: Arc<Mutex<SessionMap>>,
     pub http_bind: SocketAddr,
     pub dev_secret: Option<String>,
     pub stop: Arc<AtomicBool>,
@@ -96,7 +97,7 @@ impl AgentState {
     ) -> Self {
         Self {
             root: root.into(),
-            sessions: Mutex::new(SessionMap::new()),
+            sessions: Arc::new(Mutex::new(SessionMap::new())),
             http_bind,
             dev_secret,
             stop: Arc::new(AtomicBool::new(false)),
@@ -105,11 +106,7 @@ impl AgentState {
 
     pub fn context(&self) -> Result<SmContext, SmError> {
         let mut ctx = SmContext::load(&self.root)?;
-        ctx.sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        ctx.sessions = Arc::clone(&self.sessions);
         // Authenticated loopback secret; pairing-key proof is a later PR.
         if self.dev_secret.as_deref().is_some_and(|s| !s.is_empty()) {
             ctx.dev_secret = true;
@@ -333,6 +330,7 @@ pub fn serve_http(server: Arc<Server>, state: Arc<AgentState>) {
             Ok(Some(mut request)) => {
                 let method = method_str(request.method());
                 let url = request.url().to_string();
+                let path = url.split('?').next().unwrap_or(&url);
                 let headers: Vec<(String, String)> = request
                     .headers()
                     .iter()
@@ -343,29 +341,37 @@ pub fn serve_http(server: Arc<Server>, state: Arc<AgentState>) {
                         )
                     })
                     .collect();
-                let mut body = Vec::new();
-                if body_too_large(request.body_length()) {
-                    let _ = request.respond(
-                        Response::from_string(json!({"error":"too_large"}).to_string())
-                            .with_status_code(StatusCode(413))
-                            .with_header(json_header()),
-                    );
-                    continue;
+                let is_msg = method == "POST" && path == "/p5/msg";
+                if is_msg {
+                    if let Err(out) = authorize_msg(&state, &headers) {
+                        respond(request, out);
+                        continue;
+                    }
+                    if let Err(out) = check_post_length(request.body_length()) {
+                        respond(request, out);
+                        continue;
+                    }
                 }
-                if Read::read_to_end(request.as_reader(), &mut body).is_err() {
-                    let _ = request.respond(
-                        Response::from_string(json!({"error":"bad_request"}).to_string())
-                            .with_status_code(StatusCode(400))
-                            .with_header(json_header()),
-                    );
+                let cap = match request.body_length() {
+                    Some(n) if n > MAX_POST_BYTES => {
+                        respond(request, HttpOut::json(413, json!({"error":"too_large"})));
+                        continue;
+                    }
+                    Some(n) => n,
+                    None if is_msg => {
+                        respond(request, HttpOut::json(413, json!({"error":"too_large"})));
+                        continue;
+                    }
+                    None => 0,
+                };
+                let mut body = Vec::new();
+                let mut limited = Read::take(request.as_reader(), cap as u64);
+                if Read::read_to_end(&mut limited, &mut body).is_err() {
+                    respond(request, HttpOut::json(400, json!({"error":"bad_request"})));
                     continue;
                 }
                 let out = handle_http(&state, &method, &url, &headers, &body);
-                let _ = request.respond(
-                    Response::from_string(out.body)
-                        .with_status_code(StatusCode(out.status))
-                        .with_header(json_header()),
-                );
+                respond(request, out);
             }
             Ok(None) => {}
             Err(_) => {
@@ -377,11 +383,19 @@ pub fn serve_http(server: Arc<Server>, state: Arc<AgentState>) {
     }
 }
 
-fn body_too_large(len: Option<usize>) -> bool {
+fn check_post_length(len: Option<usize>) -> Result<usize, HttpOut> {
     match len {
-        Some(n) => n > HEADER_LIMIT + p5_core::MAX_BODY_BYTES as usize,
-        None => false,
+        Some(n) if n <= MAX_POST_BYTES => Ok(n),
+        _ => Err(HttpOut::json(413, json!({"error":"too_large"}))),
     }
+}
+
+fn respond(request: tiny_http::Request, out: HttpOut) {
+    let _ = request.respond(
+        Response::from_string(out.body)
+            .with_status_code(StatusCode(out.status))
+            .with_header(json_header()),
+    );
 }
 
 fn method_str(method: &Method) -> String {
@@ -416,6 +430,8 @@ mod tests {
     use std::thread;
 
     use p5_core::{HomeRow, Homes, Mailbox, ToolFlags};
+
+    use crate::session_map::LiveSession;
 
     fn addr(s: &str) -> PostalAddr {
         s.parse().unwrap()
@@ -575,6 +591,59 @@ mod tests {
         let headers = msg_headers("s3cret", SAMPLE_ID);
         let out = handle_http(&state, "POST", "/p5/msg", &headers, &sample_msg(SAMPLE_ID));
         assert_eq!(out.status, 401);
+    }
+
+    #[test]
+    fn post_msg_rejects_missing_or_huge_content_length() {
+        assert_eq!(check_post_length(None).unwrap_err().status, 413);
+        assert_eq!(
+            check_post_length(Some(MAX_POST_BYTES + 1))
+                .unwrap_err()
+                .status,
+            413
+        );
+        assert_eq!(check_post_length(Some(8)).unwrap(), 8);
+    }
+
+    #[test]
+    fn context_shares_session_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AgentState::new(
+            tmp.path(),
+            "127.0.0.1:0".parse().unwrap(),
+            Some("s3cret".into()),
+        );
+        state.sessions.lock().unwrap().insert(
+            addr("scout::acme.postal.bot"),
+            LiveSession {
+                session_id: "live-9".into(),
+                ready: true,
+            },
+        );
+        let ctx = state.context().unwrap();
+        assert_eq!(
+            ctx.live_session(&addr("scout::acme.postal.bot"))
+                .unwrap()
+                .session_id,
+            "live-9"
+        );
+        ctx.sessions.lock().unwrap().insert(
+            addr("scout::acme.postal.bot"),
+            LiveSession {
+                session_id: "live-10".into(),
+                ready: true,
+            },
+        );
+        assert_eq!(
+            state
+                .sessions
+                .lock()
+                .unwrap()
+                .get(&addr("scout::acme.postal.bot"))
+                .unwrap()
+                .session_id,
+            "live-10"
+        );
     }
 
     #[test]

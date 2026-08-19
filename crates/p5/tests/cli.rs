@@ -383,6 +383,7 @@ fn login_writes_unit_file() {
         assert!(text.contains("p5"));
         assert!(text.contains("agent"));
         assert!(text.contains("run"));
+        assert!(text.contains("SuccessfulExit"));
     }
     #[cfg(not(target_os = "macos"))]
     {
