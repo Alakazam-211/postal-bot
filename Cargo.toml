@@ -4,6 +4,7 @@ members = [
     "crates/p5",
     "crates/p5-core",
     "crates/p5-crypto",
+    "crates/p5-live",
     "crates/p5-plane",
     "crates/p5-tunnel",
 ]
@@ -17,6 +18,7 @@ repository = "https://github.com/Alakazam-211/postal-bot"
 clap = { version = "4", features = ["derive"] }
 p5-core = { path = "crates/p5-core" }
 p5-crypto = { path = "crates/p5-crypto" }
+p5-live = { path = "crates/p5-live" }
 p5-plane = { path = "crates/p5-plane" }
 p5-tunnel = { path = "crates/p5-tunnel" }
 serde = { version = "1", features = ["derive"] }

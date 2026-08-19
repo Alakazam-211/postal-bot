@@ -11,6 +11,7 @@ publish = false
 clap.workspace = true
 p5-core.workspace = true
 p5-crypto.workspace = true
+p5-live.workspace = true
 p5-plane.workspace = true
 p5-tunnel.workspace = true
 serde.workspace = true
@@ -23,6 +24,7 @@ libc = "0.2"
 
 [dev-dependencies]
 p5-crypto.workspace = true
+p5-live = { workspace = true, features = ["test-util"] }
 p5-plane.workspace = true
 serde_json.workspace = true
 tempfile = "3"

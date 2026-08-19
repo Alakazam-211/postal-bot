@@ -74,6 +74,9 @@ pub struct MailItem {
     pub from: PostalAddr,
     pub status: DeliveryStatus,
     pub hold_id: Option<String>,
+    /// Last live/hold miss (`timeout`, `connection_refused`, `host_down`, …).
+    /// P5-9 uses this to decide HOLD vs stay queued; this crate never HOLDs.
+    pub last_error: Option<String>,
     pub mode: DeliveryMode,
     pub typ: PeerType,
     pub attempts: u32,
@@ -295,6 +298,7 @@ impl Mailbox {
             from: req.from,
             status: DeliveryStatus::Queued,
             hold_id: None,
+            last_error: None,
             mode: req.mode,
             typ: req.typ,
             attempts: 0,
@@ -335,6 +339,7 @@ impl Mailbox {
             from: req.from,
             status: DeliveryStatus::Acked,
             hold_id: req.hold_id,
+            last_error: None,
             mode: req.mode,
             typ: req.typ,
             attempts: 0,
@@ -449,6 +454,9 @@ impl Mailbox {
         if status != DeliveryStatus::Queued {
             item.next_attempt_at = None;
         }
+        if matches!(status, DeliveryStatus::Delivered | DeliveryStatus::Acked) {
+            item.last_error = None;
+        }
         self.write_sent(&item)?;
         if status == DeliveryStatus::Queued {
             self.write_outbox(&item)?;
@@ -460,6 +468,21 @@ impl Mailbox {
 
     pub fn mark_held(&self, id: &str, hold_id: &str) -> Result<MailItem, MailboxError> {
         self.mark(id, DeliveryStatus::Held, Some(hold_id.to_string()))
+    }
+
+    /// Persist a live miss without changing status. Never HOLDs.
+    pub fn record_last_error(
+        &self,
+        id: &str,
+        error: impl Into<String>,
+    ) -> Result<MailItem, MailboxError> {
+        let mut item = self.read_sent(id)?;
+        item.last_error = Some(error.into());
+        self.write_sent(&item)?;
+        if item.status == DeliveryStatus::Queued {
+            self.write_outbox(&item)?;
+        }
+        Ok(item)
     }
 
     /// Count one automatic try. At [`MAX_AUTO_ATTEMPTS`] the row becomes `failed` and leaves outbox.
@@ -834,6 +857,7 @@ fn sibling_sidecars(cover: &Path) -> Vec<String> {
 
 fn render_cover(item: &MailItem) -> String {
     let hold = item.hold_id.as_deref().unwrap_or("");
+    let last_error = item.last_error.as_deref().unwrap_or("");
     let next = item.next_attempt_at.map(format_rfc3339).unwrap_or_default();
     format!(
         "---\n\
@@ -842,6 +866,7 @@ fn render_cover(item: &MailItem) -> String {
          from: {}\n\
          status: {}\n\
          hold_id: {}\n\
+         last_error: {}\n\
          mode: {}\n\
          typ: {}\n\
          attempts: {}\n\
@@ -855,6 +880,7 @@ fn render_cover(item: &MailItem) -> String {
         yaml_string(&item.from.to_string()),
         item.status.as_str(),
         yaml_string(hold),
+        yaml_string(last_error),
         item.mode.as_str(),
         item.typ.as_str(),
         item.attempts,
@@ -878,6 +904,10 @@ fn parse_cover(contents: &str, sidecar_names: Vec<String>) -> Result<MailItem, M
         .unwrap_or(DeliveryStatus::Queued);
     let hold_id = fm
         .get("hold_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let last_error = fm
+        .get("last_error")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let mode = fm
@@ -919,6 +949,7 @@ fn parse_cover(contents: &str, sidecar_names: Vec<String>) -> Result<MailItem, M
         from,
         status,
         hold_id,
+        last_error,
         mode,
         typ,
         attempts,
@@ -1288,6 +1319,22 @@ mod tests {
         assert_eq!(held.status, DeliveryStatus::Held);
         assert_eq!(held.hold_id.as_deref(), Some("hold-1"));
         assert!(mb.list_outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn record_last_error_stays_queued() {
+        let (mb, _tmp) = tmp();
+        let item = mb.enqueue(send(Vec::new(), true)).unwrap();
+        let got = mb.record_last_error(&item.id, "host_down").unwrap();
+        assert_eq!(got.status, DeliveryStatus::Queued);
+        assert_eq!(got.last_error.as_deref(), Some("host_down"));
+        assert_eq!(
+            mb.read_sent(&item.id).unwrap().last_error.as_deref(),
+            Some("host_down")
+        );
+        assert_eq!(mb.list_outbox().unwrap().len(), 1);
+        mb.mark(&item.id, DeliveryStatus::Delivered, None).unwrap();
+        assert_eq!(mb.read_sent(&item.id).unwrap().last_error, None);
     }
 
     #[test]

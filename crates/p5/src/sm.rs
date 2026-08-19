@@ -1,10 +1,10 @@
 //! Sender SM + local session / turn receiver SM.
 //!
-//! Local dest = a HomeRow for the address or `P5_LOCAL_RECV=1`. Remote dest
-//! stays queued unless `P5_HOLD=1`, which tries live HTTPS then hold on a
-//! definite miss. Loopback inbound (`POST /p5/msg`) reuses [`receive_msg`].
-//! We do not spawn harness binaries. Type `turn` is HTTP sendPrompt on the
-//! loopback gateway — never a PTY.
+//! Local dest = a HomeRow for the address or `P5_LOCAL_RECV=1` (UDS / in-process
+//! receiver). Remote dest = `POST https://<host>/p5/msg` with pairing-key proof.
+//! `P5_HOLD=1` then HOLDs on a definite miss. Loopback inbound reuses
+//! [`receive_msg`]. Type `turn` is HTTP sendPrompt on the loopback gateway —
+//! never a PTY.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -12,9 +12,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use p5_core::{
-    default_root, DeliveryMode, DeliveryStatus, Homes, Mailbox, MailboxError, PeerType, PostalAddr,
-    ReceiveRequest, Roster, SendRequest, StoreError, Trust, EXIT_GATED, MAX_BODY_BYTES,
+    default_root, DeliveryMode, DeliveryStatus, Homes, MailItem, Mailbox, MailboxError, PeerType,
+    PostalAddr, ReceiveRequest, Roster, SendRequest, StoreError, Trust, EXIT_GATED, MAX_BODY_BYTES,
 };
+use p5_crypto::KeyPair;
+use p5_live::{LiveClient, LiveRequest, LiveResult};
 use serde::{Deserialize, Serialize};
 
 use crate::session_map::SessionMap;
@@ -162,6 +164,10 @@ pub struct SmContext {
     /// Test / override base for live `POST /p5/msg`.
     pub live_url: Option<String>,
     pub live_timeout: Duration,
+    /// Outbound live POST. Tests inject a short timeout / test CA.
+    pub live: LiveClient,
+    /// Override `https://<host>` (mock HTTPS peer). Production is [`PostalAddr::live_base_url`].
+    pub live_base: Option<String>,
 }
 
 impl SmContext {
@@ -182,6 +188,8 @@ impl SmContext {
             plane_token: None,
             live_url: None,
             live_timeout: Duration::from_secs(5),
+            live: LiveClient::new(),
+            live_base: None,
         }
     }
 
@@ -200,6 +208,7 @@ impl SmContext {
             ctx.plane_token = cfg.token;
         }
         ctx.live_url = env_nonempty("P5_LIVE_URL");
+        ctx.live_base = ctx.live_url.clone();
         Ok(ctx)
     }
 
@@ -279,7 +288,7 @@ pub fn fabric_stamp(from: &PostalAddr, body: &str) -> String {
     format!("[from {from}] [p5] {body}")
 }
 
-/// Sender SM: parse → sent queued first → local receiver or stay queued.
+/// Sender SM: parse → sent queued first → local receiver or live HTTPS.
 pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmError> {
     let default_host = ctx
         .homes
@@ -381,7 +390,10 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
     };
 
     if !ctx.dest_is_local(&to) {
-        return crate::hold::finish_remote(ctx, &item, &to, &from, &req.body);
+        if ctx.hold {
+            return crate::hold::finish_remote(ctx, &item, &to, &from, &req.body);
+        }
+        return send_live(ctx, &item, &from, req, &to);
     }
 
     if typ != Some(PeerType::Session) && typ != Some(PeerType::Turn) {
@@ -456,6 +468,89 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         }
         Err(ReceiveError::Mailbox(err)) => Err(err.into()),
     }
+}
+
+/// Remote dest: pairing-key proof then POST. Without a local identity, do not dial.
+fn send_live(
+    ctx: &SmContext,
+    item: &MailItem,
+    from: &PostalAddr,
+    req: &MsgRequest,
+    to: &PostalAddr,
+) -> Result<MsgResponse, SmError> {
+    let Some(key) = load_identity(ctx.mailbox.root()) else {
+        return Ok(MsgResponse::ok_status(
+            item.id.clone(),
+            to,
+            DeliveryStatus::Queued,
+            item.attempts,
+            None,
+            false,
+        ));
+    };
+    let base = ctx.live_base.clone().unwrap_or_else(|| to.live_base_url());
+    let result = ctx.live.send(
+        &key,
+        &LiveRequest {
+            base_url: base,
+            to: to.to_string(),
+            from: from.to_string(),
+            id: item.id.clone(),
+            wake: !req.no_wake,
+            mode: item.mode.as_str().to_string(),
+            body: req.body.clone(),
+        },
+    );
+    match result {
+        LiveResult::Delivered { already } => {
+            let marked = ctx
+                .mailbox
+                .mark(&item.id, DeliveryStatus::Delivered, None)?;
+            Ok(MsgResponse::ok_status(
+                marked.id,
+                to,
+                DeliveryStatus::Delivered,
+                marked.attempts,
+                None,
+                already,
+            ))
+        }
+        LiveResult::Queued { last_error, .. } => {
+            let marked = ctx.mailbox.record_last_error(&item.id, &last_error)?;
+            let mut resp = MsgResponse::ok_status(
+                marked.id,
+                to,
+                DeliveryStatus::Queued,
+                marked.attempts,
+                None,
+                false,
+            );
+            resp.hint = Some(last_error);
+            Ok(resp)
+        }
+        LiveResult::Permanent { reason, hint } => {
+            let marked = ctx.mailbox.mark(&item.id, DeliveryStatus::Failed, None)?;
+            let mut resp = MsgResponse::fail(
+                Some(marked.id),
+                Some(to),
+                Some(DeliveryStatus::Failed),
+                reason,
+                hint,
+            );
+            resp.attempts = marked.attempts;
+            Ok(resp)
+        }
+    }
+}
+
+fn load_identity(root: &std::path::Path) -> Option<KeyPair> {
+    let path = root
+        .join(p5_crypto::KEYS_DIR)
+        .join(p5_crypto::IDENTITY_FILE);
+    if !path.is_file() {
+        return None;
+    }
+    KeyPair::load_or_create(root).ok()
 }
 
 /// Inbound payload for the session receiver (local path; later `POST /p5/msg`).
@@ -906,6 +1001,82 @@ mod tests {
         );
         assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1);
         assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
+        assert!(ctx.mailbox.read_sent(id).unwrap().last_error.is_none());
+    }
+
+    fn remote_peer_msg() -> MsgRequest {
+        msg("scout::peer.postal.bot", "hello scout")
+    }
+
+    fn live_ctx_https(root: &Path, peer: &p5_live::mock::HttpsPeer) -> SmContext {
+        KeyPair::load_or_create(root).unwrap();
+        let mut ctx = SmContext::new(root);
+        ctx.live_base = Some(peer.base_url.clone());
+        ctx.live =
+            LiveClient::with_root_der(std::time::Duration::from_secs(2), &peer.cert_der).unwrap();
+        ctx
+    }
+
+    #[test]
+    fn live_https_2xx_marks_delivered_and_sends_proof() {
+        let tmp = tempfile::tempdir().unwrap();
+        let peer = p5_live::mock::HttpsPeer::spawn(
+            200,
+            r#"{"already":false,"status":"delivered","typ":"session"}"#,
+        );
+        let ctx = live_ctx_https(tmp.path(), &peer);
+        let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.status.as_deref(), Some("delivered"));
+        let id = resp.id.as_deref().unwrap();
+        let sent = ctx.mailbox.read_sent(id).unwrap();
+        assert_eq!(sent.status, DeliveryStatus::Delivered);
+        assert!(sent.last_error.is_none());
+        assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
+        let rec = peer.recorded();
+        assert_eq!(rec.len(), 1);
+        let proof = rec[0].header(p5_live::PROOF_HEADER).expect("proof header");
+        assert_eq!(proof.len(), 128);
+        assert_eq!(rec[0].header(p5_live::IDEMPOTENCY_HEADER), Some(id));
+    }
+
+    #[test]
+    fn live_timeout_stays_queued() {
+        let tmp = tempfile::tempdir().unwrap();
+        KeyPair::load_or_create(tmp.path()).unwrap();
+        let mut ctx = SmContext::new(tmp.path());
+        ctx.live_base = Some(p5_live::spawn_hang());
+        ctx.live = LiveClient::with_timeout(std::time::Duration::from_millis(250));
+        let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.status.as_deref(), Some("queued"));
+        let id = resp.id.as_deref().unwrap();
+        let sent = ctx.mailbox.read_sent(id).unwrap();
+        assert_eq!(sent.status, DeliveryStatus::Queued);
+        assert!(sent.hold_id.is_none());
+        assert!(
+            sent.last_error.as_deref() == Some("timeout")
+                || sent.last_error.as_deref() == Some("no_status"),
+            "{:?}",
+            sent.last_error
+        );
+        assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn live_503_queued_not_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let peer = p5_live::mock::HttpsPeer::spawn(503, r#"{"error":"host_down"}"#);
+        let ctx = live_ctx_https(tmp.path(), &peer);
+        let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.status.as_deref(), Some("queued"));
+        let id = resp.id.as_deref().unwrap();
+        let sent = ctx.mailbox.read_sent(id).unwrap();
+        assert_eq!(sent.status, DeliveryStatus::Queued);
+        assert_eq!(sent.last_error.as_deref(), Some("host_down"));
+        assert!(sent.hold_id.is_none());
+        assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1);
     }
 
     fn roster_entry(typ: PeerType) -> RosterEntry {
