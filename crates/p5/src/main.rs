@@ -150,7 +150,6 @@ enum PairAction {
         /// Pair id
         id: String,
     },
->>>>>>> d56f3a8 (P5-8: pairing UX against CP-3)
 }
 
 #[derive(Debug, Subcommand)]
