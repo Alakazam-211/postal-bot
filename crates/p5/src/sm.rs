@@ -280,14 +280,16 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         ));
     }
 
-    let typ = peer_typ(ctx, &to);
+    let typ = declared_typ(ctx, &to);
     // Cover-only `p5 msg` is allowed when files are off.
+    // Unknown typ is not declared session (K22). Mailbox still needs a
+    // field; flush must call `declared_typ` again, never this snapshot.
     let item = match ctx.mailbox.enqueue(SendRequest {
         to: to.clone(),
         from: from.clone(),
         body: req.body.clone(),
         mode: DeliveryMode::Live,
-        typ,
+        typ: typ.unwrap_or(PeerType::Session),
         files: Vec::new(),
         files_allowed: false,
         title: None,
@@ -334,8 +336,8 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         ));
     }
 
-    if typ != PeerType::Session {
-        // Turn receiver is P5-10. Do not invent a session / PTY.
+    if typ != Some(PeerType::Session) {
+        // Unknown is not session (K22). Turn receiver is P5-10.
         return Ok(MsgResponse::ok_status(
             item.id,
             &to,
@@ -352,7 +354,7 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         from,
         body: req.body.clone(),
         mode: DeliveryMode::Live,
-        typ,
+        typ: PeerType::Session,
         files: Vec::new(),
         no_wake: req.no_wake,
     };
@@ -437,6 +439,15 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
         ));
     }
 
+    // Auth → dedup id (K20) → gates. A retry of an already-fsynced id is
+    // `{already: true}` even if --no-wake / files-off would refuse a first write.
+    if inbox_has_id(ctx, &inbound.id)? {
+        return Ok(ReceiveOutcome {
+            already: true,
+            target_session_id: session_id_hint(ctx, &inbound.to),
+        });
+    }
+
     let Some(home) = ctx.homes.get(&inbound.to) else {
         return Err(permanent(
             REASON_NO_AGENT,
@@ -468,12 +479,6 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
         return Err(permanent(REASON_GATED, "tools.files=off"));
     }
 
-    let already = match ctx.mailbox.read_inbox(&inbound.id) {
-        Ok(_) => true,
-        Err(MailboxError::NotFound { .. }) | Err(MailboxError::InvalidId) => false,
-        Err(err) => return Err(ReceiveError::Mailbox(err)),
-    };
-
     ctx.mailbox.receive(ReceiveRequest {
         id: inbound.id.clone(),
         to: inbound.to.clone(),
@@ -488,7 +493,7 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
     })?;
 
     Ok(ReceiveOutcome {
-        already,
+        already: false,
         target_session_id: live
             .map(|s| s.session_id.clone())
             .or_else(|| home.session_id.clone()),
@@ -506,11 +511,31 @@ fn pairing_allowed(ctx: &SmContext, inbound: &Inbound) -> bool {
         .is_some_and(|entry| entry.trust == Trust::Trusted)
 }
 
-fn peer_typ(ctx: &SmContext, to: &PostalAddr) -> PeerType {
-    ctx.roster
+/// Peer-declared type (K22). Roster wins. A HomeRow with no roster row is
+/// Session (homes are session-only). `None` is unknown — do not guess.
+pub fn declared_typ(ctx: &SmContext, to: &PostalAddr) -> Option<PeerType> {
+    if let Some(entry) = ctx.roster.get(to) {
+        return Some(entry.typ);
+    }
+    if ctx.homes.get(to).is_some() {
+        return Some(PeerType::Session);
+    }
+    None
+}
+
+fn inbox_has_id(ctx: &SmContext, id: &str) -> Result<bool, ReceiveError> {
+    match ctx.mailbox.read_inbox(id) {
+        Ok(_) => Ok(true),
+        Err(MailboxError::NotFound { .. }) | Err(MailboxError::InvalidId) => Ok(false),
+        Err(err) => Err(ReceiveError::Mailbox(err)),
+    }
+}
+
+fn session_id_hint(ctx: &SmContext, to: &PostalAddr) -> Option<String> {
+    ctx.sessions
         .get(to)
-        .map(|entry| entry.typ)
-        .unwrap_or(PeerType::Session)
+        .map(|s| s.session_id.clone())
+        .or_else(|| ctx.homes.get(to).and_then(|h| h.session_id.clone()))
 }
 
 fn resolve_from(
@@ -665,11 +690,45 @@ mod tests {
         assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
     }
 
+    fn roster_entry(typ: PeerType) -> RosterEntry {
+        RosterEntry {
+            typ,
+            fingerprint: "fp".into(),
+            public_key_pem: "pem".into(),
+            trust: Trust::Trusted,
+            pair_id: "p1".into(),
+            sand_uuid: None,
+            tools: ToolFlags::default(),
+        }
+    }
+
     #[test]
-    fn local_recv_without_home_is_no_agent() {
+    fn local_recv_without_declared_typ_stays_queued() {
         let tmp = tempfile::tempdir().unwrap();
         let mut ctx = SmContext::new(tmp.path());
         ctx.local_recv = true;
+        let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "anyone home")).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.status.as_deref(), Some("queued"));
+        assert_eq!(resp.exit_code(), EXIT_OK);
+        let id = resp.id.as_deref().unwrap();
+        assert_eq!(
+            ctx.mailbox.read_sent(id).unwrap().status,
+            DeliveryStatus::Queued
+        );
+        assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1);
+        assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_recv_declared_session_without_home_is_no_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = SmContext::new(tmp.path());
+        ctx.local_recv = true;
+        ctx.roster.insert(
+            addr("scout::acme.postal.bot"),
+            roster_entry(PeerType::Session),
+        );
         let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "anyone home")).unwrap();
         assert!(!resp.success);
         assert_eq!(resp.reason.as_deref(), Some(REASON_NO_AGENT));
@@ -794,18 +853,8 @@ mod tests {
     fn turn_peer_stays_queued() {
         let tmp = tempfile::tempdir().unwrap();
         let mut ctx = ctx_with_home(tmp.path(), true);
-        ctx.roster.insert(
-            addr("scout::acme.postal.bot"),
-            RosterEntry {
-                typ: PeerType::Turn,
-                fingerprint: "fp".into(),
-                public_key_pem: "pem".into(),
-                trust: Trust::Trusted,
-                pair_id: "p1".into(),
-                sand_uuid: Some("sand-1".into()),
-                tools: ToolFlags::default(),
-            },
-        );
+        ctx.roster
+            .insert(addr("scout::acme.postal.bot"), roster_entry(PeerType::Turn));
         let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "turn later")).unwrap();
         assert!(resp.success);
         assert_eq!(resp.status.as_deref(), Some("queued"));
@@ -870,5 +919,33 @@ mod tests {
         let second = receive_session(&ctx, &again).unwrap();
         assert!(second.already);
         assert_eq!(ctx.mailbox.read_inbox(&inbound.id).unwrap().body, "first");
+
+        let mut no_wake = inbound.clone();
+        no_wake.no_wake = true;
+        let retry_dormant = receive_session(&ctx, &no_wake).unwrap();
+        assert!(retry_dormant.already);
+
+        let src = tmp.path().join("note.bin");
+        fs::write(&src, b"abc").unwrap();
+        let mut with_file = inbound.clone();
+        with_file.files = vec![src];
+        let retry_files = receive_session(&ctx, &with_file).unwrap();
+        assert!(retry_files.already);
+        assert_eq!(ctx.mailbox.read_inbox(&inbound.id).unwrap().body, "first");
+    }
+
+    #[test]
+    fn declared_typ_does_not_guess_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = SmContext::new(tmp.path());
+        let scout = addr("scout::acme.postal.bot");
+        assert_eq!(declared_typ(&ctx, &scout), None);
+        ctx.homes
+            .insert(home("scout::acme.postal.bot", true, true))
+            .unwrap();
+        assert_eq!(declared_typ(&ctx, &scout), Some(PeerType::Session));
+        ctx.roster
+            .insert(scout.clone(), roster_entry(PeerType::Turn));
+        assert_eq!(declared_typ(&ctx, &scout), Some(PeerType::Turn));
     }
 }

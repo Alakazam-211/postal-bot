@@ -288,8 +288,10 @@ fn msg_no_wake_is_dormant() {
 }
 
 #[test]
-fn msg_local_recv_without_home_is_no_agent() {
+fn msg_local_recv_without_declared_typ_stays_queued() {
     let home = tmp_home();
+    // P5_LOCAL_RECV without a roster row or HomeRow is unknown typ (K22):
+    // do not guess session / enter the receiver.
     let out = run_home(
         home.path(),
         &[
@@ -301,11 +303,16 @@ fn msg_local_recv_without_home_is_no_agent() {
         ],
         &[("P5_LOCAL_RECV", "1")],
     );
-    assert_eq!(out.status.code(), Some(1));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("no_agent"));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("queued"));
     let sent = stdout_home(home.path(), &["sent"]);
-    assert!(sent.contains("failed"));
+    assert!(sent.contains("queued"));
+    assert!(stdout_home(home.path(), &["inbox"]).is_empty());
 }
 
 #[test]
