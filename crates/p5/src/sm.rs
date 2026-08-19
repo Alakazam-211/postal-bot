@@ -564,10 +564,12 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
     })
 }
 
-/// Turn receiver SM. HOST UP = gateway `/health`. Then sendPrompt.
+/// Turn receiver SM. HOST UP = gateway `/health`. Then inbox, then sendPrompt.
 ///
 /// No session map, no WAIT_READY, no PTY spawn. SendToAgent is not a public
-/// HTTP verb — we only POST `/api/sendPrompt` on loopback.
+/// HTTP verb — we only POST `/api/sendPrompt` on loopback. Health fail writes
+/// nothing; a durable inbox id is required before sendPrompt so a persist
+/// miss cannot double-bill.
 pub fn receive_turn(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome, ReceiveError> {
     if !pairing_allowed(ctx, inbound) {
         return Err(permanent(
@@ -594,23 +596,7 @@ pub fn receive_turn(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome
         return Err(permanent(REASON_GATED, "tools.files=off"));
     }
 
-    if turn::health_up(&ctx.turn).is_err() {
-        return Err(permanent(
-            REASON_HOST_DOWN,
-            "turn gateway /health is down; sender should HOLD",
-        ));
-    }
-
-    {
-        let mut lim = ctx.turn_limiter.lock().unwrap_or_else(|e| e.into_inner());
-        if !lim.allow(&inbound.from, Instant::now()) {
-            return Err(permanent(
-                REASON_RATE_LIMITED,
-                "12 turns / hour / sending peer",
-            ));
-        }
-    }
-
+    let files_allowed = home.tools.files;
     let agent_id = ctx.turn.resolve_agent_id(
         home.session_id
             .as_deref()
@@ -621,6 +607,41 @@ pub fn receive_turn(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome
             })
             .or(Some(inbound.to.handle())),
     );
+
+    if turn::health_up(&ctx.turn).is_err() {
+        return Err(permanent(
+            REASON_HOST_DOWN,
+            "turn gateway /health is down; sender should HOLD",
+        ));
+    }
+
+    let reserved_at = Instant::now();
+    {
+        let mut lim = ctx.turn_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        if !lim.try_reserve(&inbound.from, reserved_at) {
+            return Err(permanent(
+                REASON_RATE_LIMITED,
+                "12 turns / hour / sending peer",
+            ));
+        }
+    }
+
+    if let Err(err) = ctx.mailbox.receive(ReceiveRequest {
+        id: inbound.id.clone(),
+        to: inbound.to.clone(),
+        from: inbound.from.clone(),
+        body: inbound.body.clone(),
+        mode: inbound.mode,
+        typ: PeerType::Turn,
+        files: inbound.files.clone(),
+        files_allowed,
+        title: None,
+        hold_id: None,
+    }) {
+        release_turn_slot(ctx, &inbound.from, reserved_at);
+        return Err(err.into());
+    }
+
     if turn::send_prompt(
         &ctx.turn,
         &inbound.from,
@@ -630,34 +651,24 @@ pub fn receive_turn(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome
     )
     .is_err()
     {
+        release_turn_slot(ctx, &inbound.from, reserved_at);
         return Err(permanent(
             REASON_HOST_DOWN,
             "turn sendPrompt failed; sender should HOLD",
         ));
     }
 
-    {
-        let mut lim = ctx.turn_limiter.lock().unwrap_or_else(|e| e.into_inner());
-        lim.record(&inbound.from, Instant::now());
-    }
-
-    ctx.mailbox.receive(ReceiveRequest {
-        id: inbound.id.clone(),
-        to: inbound.to.clone(),
-        from: inbound.from.clone(),
-        body: inbound.body.clone(),
-        mode: inbound.mode,
-        typ: PeerType::Turn,
-        files: inbound.files.clone(),
-        files_allowed: home.tools.files,
-        title: None,
-        hold_id: None,
-    })?;
-
     Ok(ReceiveOutcome {
         already: false,
         target_session_id: None,
     })
+}
+
+fn release_turn_slot(ctx: &SmContext, from: &PostalAddr, at: Instant) {
+    ctx.turn_limiter
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .release(from, at);
 }
 
 fn pairing_allowed(ctx: &SmContext, inbound: &Inbound) -> bool {
@@ -686,7 +697,8 @@ pub fn declared_typ(ctx: &SmContext, to: &PostalAddr) -> Option<PeerType> {
 fn inbox_has_id(ctx: &SmContext, id: &str) -> Result<bool, ReceiveError> {
     match ctx.mailbox.read_inbox(id) {
         Ok(_) => Ok(true),
-        Err(MailboxError::NotFound { .. }) | Err(MailboxError::InvalidId) => Ok(false),
+        Err(MailboxError::NotFound { .. }) => Ok(false),
+        // InvalidId is a reject, not a miss — otherwise we sendPrompt then fail persist.
         Err(err) => Err(ReceiveError::Mailbox(err)),
     }
 }
@@ -1243,6 +1255,37 @@ mod tests {
         let second = receive_msg(&ctx, &again).unwrap();
         assert!(second.already);
         assert_eq!(ctx.mailbox.read_inbox(&inbound.id).unwrap().body, "first");
+        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn turn_invalid_id_does_not_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let ctx = ctx_turn(tmp.path(), &sand);
+        let inbound = turn_inbound("not-a-ulid", "alice::acme.postal.bot", "nope");
+        match receive_msg(&ctx, &inbound) {
+            Err(ReceiveError::Mailbox(MailboxError::InvalidId)) => {}
+            other => panic!("expected InvalidId, got {other:?}"),
+        }
+        assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
+        assert!(sand.prompts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn turn_prompt_fail_after_inbox_does_not_reprompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 500);
+        let ctx = ctx_turn(tmp.path(), &sand);
+        let inbound = turn_inbound("01ARZ3NDEKTSV4RRFFQ69G5FAV", "alice::acme.postal.bot", "hi");
+        match receive_msg(&ctx, &inbound) {
+            Err(ReceiveError::Permanent { reason, .. }) => assert_eq!(reason, REASON_HOST_DOWN),
+            other => panic!("expected host_down, got {other:?}"),
+        }
+        assert_eq!(ctx.mailbox.read_inbox(&inbound.id).unwrap().body, "hi");
+        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
+        let retry = receive_msg(&ctx, &inbound).unwrap();
+        assert!(retry.already);
         assert_eq!(sand.prompts.lock().unwrap().len(), 1);
     }
 

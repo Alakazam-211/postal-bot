@@ -103,6 +103,27 @@ impl TurnLimiter {
         self.events.entry(from.clone()).or_default().push(now);
     }
 
+    /// Check and consume one slot under the caller's lock (HTTP + UDS share this map).
+    pub fn try_reserve(&mut self, from: &PostalAddr, now: Instant) -> bool {
+        if !self.allow(from, now) {
+            return false;
+        }
+        self.record(from, now);
+        true
+    }
+
+    /// Drop a reservation that did not become a billed sendPrompt.
+    pub fn release(&mut self, from: &PostalAddr, at: Instant) {
+        if let Some(times) = self.events.get_mut(from) {
+            if let Some(i) = times.iter().rposition(|t| *t == at) {
+                times.remove(i);
+            }
+            if times.is_empty() {
+                self.events.remove(from);
+            }
+        }
+    }
+
     fn prune(&mut self, from: &PostalAddr, now: Instant) {
         if let Some(times) = self.events.get_mut(from) {
             times.retain(|t| now.duration_since(*t) < TURN_WINDOW);
@@ -488,11 +509,13 @@ mod tests {
         let b: PostalAddr = "bob::acme.postal.bot".parse().unwrap();
         let now = Instant::now();
         for _ in 0..TURN_LIMIT_PER_HOUR {
-            assert!(lim.allow(&a, now));
-            lim.record(&a, now);
+            assert!(lim.try_reserve(&a, now));
         }
-        assert!(!lim.allow(&a, now));
-        assert!(lim.allow(&b, now));
+        assert!(!lim.try_reserve(&a, now));
+        assert!(lim.try_reserve(&b, now));
+        lim.release(&a, now);
+        assert!(lim.try_reserve(&a, now));
+        assert!(!lim.try_reserve(&a, now));
     }
 
     #[test]
