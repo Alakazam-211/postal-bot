@@ -11,8 +11,8 @@ is not in this tree’s public contract.
 
 | `homes.harness` | Knock |
 |---|---|
-| `k2` | `POST /cli/workspace/msg` (same route as `k2 msg`). Inject is the mail body; k2 stamps `[from <addr>]`. |
-| `grok` | loopback Grok Bot gateway (type `turn`): Bearer from `~/sand-data/gateway.json`, `POST /api/listAgents` for UUID, then `POST /api/sendPrompt` with `[from <addr>] <body>` (no `[p5]`). |
+| `k2` | `POST /cli/workspace/msg` (same route as `k2 msg`) |
+| `grok` | loopback Grok Bot gateway (type `turn`): Bearer from `~/sand-data/gateway.json`, `POST /api/listAgents` for UUID, then `POST /api/sendPrompt` |
 
 Type `turn` with no other matching plugin defaults to `grok`.
 
