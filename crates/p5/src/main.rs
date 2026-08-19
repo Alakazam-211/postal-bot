@@ -8,6 +8,7 @@ mod pair;
 mod service;
 mod session_map;
 mod sm;
+mod turn;
 
 use pair::{
     finish as finish_pair, run_accept, run_add, run_list, run_login, run_me, run_reject,

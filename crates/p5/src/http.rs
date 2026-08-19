@@ -14,8 +14,10 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::session_map::SessionMap;
 use crate::sm::{
-    declared_typ, receive_msg, Inbound, ReceiveError, SmContext, SmError, REASON_NO_AGENT,
+    declared_typ, receive_msg, Inbound, ReceiveError, SmContext, SmError, REASON_HOST_DOWN,
+    REASON_NO_AGENT, REASON_RATE_LIMITED,
 };
+use crate::turn::{TurnConfig, TurnLimiter};
 
 pub const PRODUCT: &str = "Postal";
 pub const SITE: &str = "postal.bot";
@@ -89,6 +91,10 @@ pub struct AgentState {
     pub stop: Arc<AtomicBool>,
     /// Live frpc child. `p5 status` reads this; start failures stay `false`.
     pub tunnel_up: Arc<AtomicBool>,
+    /// Override for tests; `context` also loads `P5_TYP` / config.toml.
+    pub our_typ: Option<PeerType>,
+    pub turn: TurnConfig,
+    pub turn_limiter: Arc<Mutex<TurnLimiter>>,
 }
 
 impl AgentState {
@@ -104,12 +110,20 @@ impl AgentState {
             dev_secret,
             stop: Arc::new(AtomicBool::new(false)),
             tunnel_up: Arc::new(AtomicBool::new(false)),
+            our_typ: None,
+            turn: TurnConfig::from_env(),
+            turn_limiter: Arc::new(Mutex::new(TurnLimiter::new())),
         }
     }
 
     pub fn context(&self) -> Result<SmContext, SmError> {
         let mut ctx = SmContext::load(&self.root)?;
         ctx.sessions = Arc::clone(&self.sessions);
+        ctx.turn = self.turn.clone();
+        ctx.turn_limiter = Arc::clone(&self.turn_limiter);
+        if self.our_typ.is_some() {
+            ctx.our_typ = self.our_typ;
+        }
         // Authenticated loopback secret; pairing-key proof is a later PR.
         if self.dev_secret.as_deref().is_some_and(|s| !s.is_empty()) {
             ctx.dev_secret = true;
@@ -119,8 +133,7 @@ impl AgentState {
 
     pub fn our_typ(&self) -> Option<String> {
         let ctx = self.context().ok()?;
-        ctx.homes.iter().next()?;
-        Some(PeerType::Session.as_str().to_string())
+        ctx.our_declared_typ().map(|t| t.as_str().to_string())
     }
 }
 
@@ -246,6 +259,30 @@ fn handle_msg(state: &AgentState, headers: &[(String, String)], body: &[u8]) -> 
         Err(ReceiveError::Permanent { reason, hint }) if reason == REASON_NO_AGENT => {
             HttpOut::json(
                 409,
+                json!({
+                    "already": false,
+                    "typ": declared_typ(&ctx, &inbound.to).map(|t| t.as_str().to_string()),
+                    "status": "failed",
+                    "reason": reason,
+                    "hint": hint,
+                }),
+            )
+        }
+        Err(ReceiveError::Permanent { reason, hint }) if reason == REASON_HOST_DOWN => {
+            HttpOut::json(
+                503,
+                json!({
+                    "already": false,
+                    "typ": declared_typ(&ctx, &inbound.to).map(|t| t.as_str().to_string()),
+                    "status": "failed",
+                    "reason": reason,
+                    "hint": hint,
+                }),
+            )
+        }
+        Err(ReceiveError::Permanent { reason, hint }) if reason == REASON_RATE_LIMITED => {
+            HttpOut::json(
+                429,
                 json!({
                     "already": false,
                     "typ": declared_typ(&ctx, &inbound.to).map(|t| t.as_str().to_string()),
@@ -471,7 +508,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use p5_core::{HomeRow, Homes, Mailbox, ToolFlags};
+    use p5_core::{HomeRow, Homes, Mailbox, PeerType, ToolFlags};
 
     use crate::session_map::LiveSession;
 
@@ -856,5 +893,103 @@ mod tests {
         stop.stop.store(true, Ordering::Relaxed);
         server.unblock();
         serve.join().unwrap();
+    }
+
+    fn turn_state(root: &Path, secret: Option<&str>, sand: &crate::turn::MockSand) -> AgentState {
+        let mut state = state_with_home(root, secret);
+        state.our_typ = Some(PeerType::Turn);
+        state.turn = sand.config();
+        state
+    }
+
+    #[test]
+    fn whoami_reports_turn_from_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let state = turn_state(tmp.path(), Some("s3cret"), &sand);
+        let who = handle_http(&state, "GET", "/p5/whoami", &[], b"");
+        assert_eq!(who.status, 200);
+        let v: Value = serde_json::from_str(&who.body).unwrap();
+        assert_eq!(v["typ"], "turn");
+        assert_eq!(v["product"], "Postal");
+        assert_eq!(v["command"], "p5");
+    }
+
+    #[test]
+    fn post_msg_turn_sendprompt_and_host_down() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let state = turn_state(tmp.path(), Some("s3cret"), &sand);
+        let headers = msg_headers("s3cret", SAMPLE_ID);
+        let first = handle_http(&state, "POST", "/p5/msg", &headers, &sample_msg(SAMPLE_ID));
+        assert_eq!(first.status, 200, "{}", first.body);
+        let v: Value = serde_json::from_str(&first.body).unwrap();
+        assert_eq!(v["already"], false);
+        assert_eq!(v["status"], "delivered");
+        assert_eq!(v["typ"], "turn");
+        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
+        assert_eq!(
+            sand.prompts.lock().unwrap()[0]["prompt"],
+            "[from jarvis::other.postal.bot] [p5] hello scout"
+        );
+
+        let down = crate::turn::MockSand::spawn(503, 200);
+        let mut dead = state_with_home(tmp.path(), Some("s3cret"));
+        dead.our_typ = Some(PeerType::Turn);
+        dead.turn = down.config();
+        let id2 = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
+        let headers2 = msg_headers("s3cret", id2);
+        let body2 = serde_json::to_vec(&json!({
+            "to": "scout",
+            "from": "jarvis::other.postal.bot",
+            "id": id2,
+            "wake": true,
+            "mode": "live",
+            "body": "later",
+        }))
+        .unwrap();
+        let out = handle_http(&dead, "POST", "/p5/msg", &headers2, &body2);
+        assert_eq!(out.status, 503, "{}", out.body);
+        let v: Value = serde_json::from_str(&out.body).unwrap();
+        assert_eq!(v["reason"], "host_down");
+        assert!(down.prompts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn post_msg_turn_rate_limit_429() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let state = turn_state(tmp.path(), Some("s3cret"), &sand);
+        for i in 0..12u32 {
+            let id = format!("01ARZ3NDEKTSV4RRFFQ69G5F{i:02}");
+            let headers = msg_headers("s3cret", &id);
+            let body = serde_json::to_vec(&json!({
+                "to": "scout",
+                "from": "jarvis::other.postal.bot",
+                "id": id,
+                "wake": true,
+                "mode": "live",
+                "body": "n",
+            }))
+            .unwrap();
+            let out = handle_http(&state, "POST", "/p5/msg", &headers, &body);
+            assert_eq!(out.status, 200, "{}", out.body);
+        }
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5F99";
+        let headers = msg_headers("s3cret", id);
+        let body = serde_json::to_vec(&json!({
+            "to": "scout",
+            "from": "jarvis::other.postal.bot",
+            "id": id,
+            "wake": true,
+            "mode": "live",
+            "body": "overflow",
+        }))
+        .unwrap();
+        let out = handle_http(&state, "POST", "/p5/msg", &headers, &body);
+        assert_eq!(out.status, 429, "{}", out.body);
+        let v: Value = serde_json::from_str(&out.body).unwrap();
+        assert_eq!(v["reason"], "rate_limited");
+        assert_eq!(sand.prompts.lock().unwrap().len(), 12);
     }
 }

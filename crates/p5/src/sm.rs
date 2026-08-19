@@ -1,12 +1,14 @@
-//! Sender SM + local session receiver SM.
+//! Sender SM + local session / turn receiver SM.
 //!
 //! No public bind, no hold PUT, no pairing plane. Local dest = a HomeRow for
 //! the address or `P5_LOCAL_RECV=1`. Loopback inbound (`POST /p5/msg`) reuses
-//! [`receive_msg`]. We do not spawn harness binaries.
+//! [`receive_msg`]. We do not spawn harness binaries. Type `turn` is HTTP
+//! sendPrompt on the loopback gateway — never a PTY.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use p5_core::{
     default_root, DeliveryMode, DeliveryStatus, Homes, Mailbox, MailboxError, PeerType, PostalAddr,
@@ -15,6 +17,7 @@ use p5_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::session_map::SessionMap;
+use crate::turn::{self, TurnConfig, TurnLimiter};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERROR: i32 = 1;
@@ -28,6 +31,8 @@ pub const REASON_GATED: &str = "gated";
 pub const REASON_TOO_LARGE: &str = "too_large";
 pub const REASON_NO_IDENTITY: &str = "no_identity";
 pub const REASON_ERROR: &str = "error";
+pub const REASON_HOST_DOWN: &str = "host_down";
+pub const REASON_RATE_LIMITED: &str = "rate_limited";
 
 /// CLI / test input for [`send_msg`].
 #[derive(Debug, Clone)]
@@ -145,6 +150,10 @@ pub struct SmContext {
     pub local_recv: bool,
     /// Non-empty `P5_DEV_SECRET` — loopback inbound pairing skip.
     pub dev_secret: bool,
+    /// Advertised type for **this** agent (`P5_TYP` / config.toml). K22.
+    pub our_typ: Option<PeerType>,
+    pub turn: TurnConfig,
+    pub turn_limiter: Arc<Mutex<TurnLimiter>>,
 }
 
 impl SmContext {
@@ -157,6 +166,9 @@ impl SmContext {
             sessions: Arc::new(Mutex::new(SessionMap::new())),
             local_recv: false,
             dev_secret: false,
+            our_typ: None,
+            turn: TurnConfig::loopback_default(),
+            turn_limiter: Arc::new(Mutex::new(TurnLimiter::new())),
         }
     }
 
@@ -167,7 +179,17 @@ impl SmContext {
         ctx.roster = Roster::load(root)?;
         ctx.local_recv = env_flag("P5_LOCAL_RECV");
         ctx.dev_secret = env_is_set("P5_DEV_SECRET");
+        ctx.our_typ = load_our_typ(root);
+        ctx.turn = TurnConfig::from_env();
         Ok(ctx)
+    }
+
+    /// What we advertise on whoami / inbound branch. Never the sender's guess.
+    pub fn our_declared_typ(&self) -> Option<PeerType> {
+        if let Some(t) = self.our_typ {
+            return Some(t);
+        }
+        self.homes.iter().next().map(|_| PeerType::Session)
     }
 
     pub fn load_default() -> Result<Self, SmError> {
@@ -350,8 +372,8 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         ));
     }
 
-    if typ != Some(PeerType::Session) {
-        // Unknown is not session (K22). Turn receiver is P5-10.
+    if typ != Some(PeerType::Session) && typ != Some(PeerType::Turn) {
+        // Unknown is not session (K22).
         return Ok(MsgResponse::ok_status(
             item.id,
             &to,
@@ -368,12 +390,12 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         from,
         body: req.body.clone(),
         mode: DeliveryMode::Live,
-        typ: PeerType::Session,
+        typ: typ.expect("session or turn"),
         files: Vec::new(),
         no_wake: req.no_wake,
     };
 
-    match receive_session(ctx, &inbound) {
+    match receive_msg(ctx, &inbound) {
         Ok(rx) => {
             let marked = ctx
                 .mailbox
@@ -385,6 +407,17 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
                 marked.attempts,
                 rx.target_session_id,
                 rx.already,
+            ))
+        }
+        Err(ReceiveError::Permanent { reason, .. }) if is_retryable_receive(reason) => {
+            // 503 host_down → later HOLD; 429 → retry live. Stay queued.
+            Ok(MsgResponse::ok_status(
+                item.id,
+                &to,
+                DeliveryStatus::Queued,
+                item.attempts,
+                None,
+                false,
             ))
         }
         Err(ReceiveError::Permanent { reason, hint }) => {
@@ -444,9 +477,21 @@ impl From<MailboxError> for ReceiveError {
     }
 }
 
-/// Inbound entry for the resident agent. Same cascade as [`receive_session`].
+/// Inbound entry for the resident agent. Branch on **our** type (K22).
 pub fn receive_msg(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome, ReceiveError> {
-    receive_session(ctx, inbound)
+    if inbound_is_turn(ctx, inbound) {
+        receive_turn(ctx, inbound)
+    } else {
+        receive_session(ctx, inbound)
+    }
+}
+
+fn inbound_is_turn(ctx: &SmContext, inbound: &Inbound) -> bool {
+    ctx.our_typ == Some(PeerType::Turn) || declared_typ(ctx, &inbound.to) == Some(PeerType::Turn)
+}
+
+pub fn is_retryable_receive(reason: &str) -> bool {
+    reason == REASON_HOST_DOWN || reason == REASON_RATE_LIMITED
 }
 
 /// Session receiver SM. Attach leftover + real wake/spawn are not in this PR.
@@ -519,6 +564,102 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
     })
 }
 
+/// Turn receiver SM. HOST UP = gateway `/health`. Then sendPrompt.
+///
+/// No session map, no WAIT_READY, no PTY spawn. SendToAgent is not a public
+/// HTTP verb — we only POST `/api/sendPrompt` on loopback.
+pub fn receive_turn(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome, ReceiveError> {
+    if !pairing_allowed(ctx, inbound) {
+        return Err(permanent(
+            REASON_NOT_CONNECTED,
+            "send direction is not trusted",
+        ));
+    }
+
+    if inbox_has_id(ctx, &inbound.id)? {
+        return Ok(ReceiveOutcome {
+            already: true,
+            target_session_id: None,
+        });
+    }
+
+    let Some(home) = ctx.homes.get(&inbound.to) else {
+        return Err(permanent(
+            REASON_NO_AGENT,
+            "no homes row for this address; p5 does not invent a bot",
+        ));
+    };
+
+    if !inbound.files.is_empty() && !home.tools.files {
+        return Err(permanent(REASON_GATED, "tools.files=off"));
+    }
+
+    if turn::health_up(&ctx.turn).is_err() {
+        return Err(permanent(
+            REASON_HOST_DOWN,
+            "turn gateway /health is down; sender should HOLD",
+        ));
+    }
+
+    {
+        let mut lim = ctx.turn_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        if !lim.allow(&inbound.from, Instant::now()) {
+            return Err(permanent(
+                REASON_RATE_LIMITED,
+                "12 turns / hour / sending peer",
+            ));
+        }
+    }
+
+    let agent_id = ctx.turn.resolve_agent_id(
+        home.session_id
+            .as_deref()
+            .or_else(|| {
+                ctx.roster
+                    .get(&inbound.to)
+                    .and_then(|e| e.sand_uuid.as_deref())
+            })
+            .or(Some(inbound.to.handle())),
+    );
+    if turn::send_prompt(
+        &ctx.turn,
+        &inbound.from,
+        &inbound.body,
+        &agent_id,
+        &inbound.id,
+    )
+    .is_err()
+    {
+        return Err(permanent(
+            REASON_HOST_DOWN,
+            "turn sendPrompt failed; sender should HOLD",
+        ));
+    }
+
+    {
+        let mut lim = ctx.turn_limiter.lock().unwrap_or_else(|e| e.into_inner());
+        lim.record(&inbound.from, Instant::now());
+    }
+
+    ctx.mailbox.receive(ReceiveRequest {
+        id: inbound.id.clone(),
+        to: inbound.to.clone(),
+        from: inbound.from.clone(),
+        body: inbound.body.clone(),
+        mode: inbound.mode,
+        typ: PeerType::Turn,
+        files: inbound.files.clone(),
+        files_allowed: home.tools.files,
+        title: None,
+        hold_id: None,
+    })?;
+
+    Ok(ReceiveOutcome {
+        already: false,
+        target_session_id: None,
+    })
+}
+
 fn pairing_allowed(ctx: &SmContext, inbound: &Inbound) -> bool {
     // Local dest or a configured loopback secret; pairing-key proof is later.
     if ctx.dest_is_local(&inbound.to) || ctx.dev_secret {
@@ -529,14 +670,15 @@ fn pairing_allowed(ctx: &SmContext, inbound: &Inbound) -> bool {
         .is_some_and(|entry| entry.trust == Trust::Trusted)
 }
 
-/// Peer-declared type (K22). Roster wins. A HomeRow with no roster row is
-/// Session (homes are session-only). `None` is unknown — do not guess.
+/// Peer-declared type (K22). Roster wins for *peers*. A local HomeRow uses
+/// **our** advertised type (`P5_TYP` / config), defaulting to Session.
+/// `None` is unknown — do not guess.
 pub fn declared_typ(ctx: &SmContext, to: &PostalAddr) -> Option<PeerType> {
     if let Some(entry) = ctx.roster.get(to) {
         return Some(entry.typ);
     }
     if ctx.homes.get(to).is_some() {
-        return Some(PeerType::Session);
+        return Some(ctx.our_typ.unwrap_or(PeerType::Session));
     }
     None
 }
@@ -608,6 +750,38 @@ fn env_flag(name: &str) -> bool {
 
 fn env_is_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+fn load_our_typ(root: &Path) -> Option<PeerType> {
+    if let Some(t) = parse_typ_env("P5_TYP") {
+        return Some(t);
+    }
+    parse_typ_config(&root.join("config.toml"))
+}
+
+fn parse_typ_env(name: &str) -> Option<PeerType> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok())
+}
+
+fn parse_typ_config(path: &Path) -> Option<PeerType> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let rest = line.strip_prefix("type")?.trim();
+        let rest = rest.strip_prefix('=')?.trim();
+        let val = rest.trim_matches('"').trim_matches('\'').trim();
+        if let Ok(t) = val.parse::<PeerType>() {
+            return Some(t);
+        }
+    }
+    None
 }
 
 /// True when `root` has no live-map file (the map is process-only).
@@ -867,11 +1041,12 @@ mod tests {
     }
 
     #[test]
-    fn turn_peer_stays_queued() {
+    fn turn_peer_host_down_stays_queued() {
         let tmp = tempfile::tempdir().unwrap();
         let mut ctx = ctx_with_home(tmp.path(), true);
         ctx.roster
             .insert(addr("scout::acme.postal.bot"), roster_entry(PeerType::Turn));
+        ctx.turn.health_url = "http://127.0.0.1:1/health".into();
         let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "turn later")).unwrap();
         assert!(resp.success);
         assert_eq!(resp.status.as_deref(), Some("queued"));
@@ -964,5 +1139,149 @@ mod tests {
         ctx.roster
             .insert(scout.clone(), roster_entry(PeerType::Turn));
         assert_eq!(declared_typ(&ctx, &scout), Some(PeerType::Turn));
+    }
+
+    fn turn_inbound(id: &str, from: &str, body: &str) -> Inbound {
+        Inbound {
+            id: id.into(),
+            to: addr("scout::acme.postal.bot"),
+            from: addr(from),
+            body: body.into(),
+            mode: DeliveryMode::Live,
+            typ: PeerType::Turn,
+            files: Vec::new(),
+            no_wake: false,
+        }
+    }
+
+    fn ctx_turn(root: &Path, sand: &crate::turn::MockSand) -> SmContext {
+        let mut ctx = ctx_with_home(root, true);
+        ctx.our_typ = Some(PeerType::Turn);
+        ctx.turn = sand.config();
+        ctx
+    }
+
+    #[test]
+    fn turn_health_up_sendprompt_writes_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let ctx = ctx_turn(tmp.path(), &sand);
+        let inbound = turn_inbound("01ARZ3NDEKTSV4RRFFQ69G5FAV", "alice::acme.postal.bot", "hi");
+        let rx = receive_msg(&ctx, &inbound).unwrap();
+        assert!(!rx.already);
+        assert_eq!(rx.target_session_id, None);
+        let item = ctx.mailbox.read_inbox(&inbound.id).unwrap();
+        assert_eq!(item.body, "hi");
+        assert_eq!(item.typ, PeerType::Turn);
+        let prompts = sand.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(
+            prompts[0]["prompt"],
+            "[from alice::acme.postal.bot] [p5] hi"
+        );
+        assert!(!prompts[0]["prompt"].as_str().unwrap().contains("k2g"));
+        assert_eq!(prompts[0]["agentId"], "sand-1");
+        assert_eq!(prompts[0]["clientNonce"], inbound.id);
+        assert!(session_map_not_on_disk(tmp.path()));
+    }
+
+    #[test]
+    fn turn_health_fail_is_host_down_no_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(503, 200);
+        let ctx = ctx_turn(tmp.path(), &sand);
+        let inbound = turn_inbound("01ARZ3NDEKTSV4RRFFQ69G5FAV", "alice::acme.postal.bot", "hi");
+        match receive_msg(&ctx, &inbound) {
+            Err(ReceiveError::Permanent { reason, .. }) => assert_eq!(reason, REASON_HOST_DOWN),
+            other => panic!("expected host_down, got {other:?}"),
+        }
+        assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
+        assert!(sand.prompts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn turn_rate_limit_is_12_per_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let ctx = ctx_turn(tmp.path(), &sand);
+        for i in 0..12u32 {
+            let id = format!("01ARZ3NDEKTSV4RRFFQ69G5F{i:02}");
+            receive_msg(&ctx, &turn_inbound(&id, "alice::acme.postal.bot", "n")).unwrap();
+        }
+        let over = turn_inbound(
+            "01ARZ3NDEKTSV4RRFFQ69G5F99",
+            "alice::acme.postal.bot",
+            "too many",
+        );
+        match receive_msg(&ctx, &over) {
+            Err(ReceiveError::Permanent { reason, .. }) => assert_eq!(reason, REASON_RATE_LIMITED),
+            other => panic!("expected rate_limited, got {other:?}"),
+        }
+        assert!(ctx.mailbox.read_inbox(&over.id).is_err());
+        let other = turn_inbound(
+            "01ARZ3NDEKTSV4RRFFQ69G5F98",
+            "bob::other.postal.bot",
+            "other peer",
+        );
+        assert!(!receive_msg(&ctx, &other).unwrap().already);
+        assert_eq!(sand.prompts.lock().unwrap().len(), 13);
+    }
+
+    #[test]
+    fn turn_dedupes_without_second_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let ctx = ctx_turn(tmp.path(), &sand);
+        let inbound = turn_inbound(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "alice::acme.postal.bot",
+            "first",
+        );
+        assert!(!receive_msg(&ctx, &inbound).unwrap().already);
+        let mut again = inbound.clone();
+        again.body = "second".into();
+        let second = receive_msg(&ctx, &again).unwrap();
+        assert!(second.already);
+        assert_eq!(ctx.mailbox.read_inbox(&inbound.id).unwrap().body, "first");
+        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn turn_does_not_require_harness_or_session_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let mut ctx = SmContext::new(tmp.path());
+        ctx.homes
+            .insert(home("scout::acme.postal.bot", true, false))
+            .unwrap();
+        ctx.our_typ = Some(PeerType::Turn);
+        ctx.turn = sand.config();
+        let inbound = turn_inbound("01ARZ3NDEKTSV4RRFFQ69G5FAV", "alice::acme.postal.bot", "ok");
+        receive_msg(&ctx, &inbound).unwrap();
+        assert_eq!(ctx.mailbox.list_inbox(None, None).unwrap().len(), 1);
+        assert!(ctx.sessions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn our_typ_from_config_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("config.toml"), "type = \"turn\"\n").unwrap();
+        let ctx = SmContext::load(tmp.path()).unwrap();
+        assert_eq!(ctx.our_typ, Some(PeerType::Turn));
+        assert_eq!(ctx.our_declared_typ(), Some(PeerType::Turn));
+    }
+
+    #[test]
+    fn turn_send_msg_delivers_when_gateway_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        ctx.our_typ = Some(PeerType::Turn);
+        ctx.turn = sand.config();
+        let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "ping")).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.status.as_deref(), Some("delivered"));
+        assert_eq!(ctx.mailbox.list_inbox(None, None).unwrap().len(), 1);
+        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
     }
 }
