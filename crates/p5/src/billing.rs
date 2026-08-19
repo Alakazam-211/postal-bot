@@ -1,8 +1,8 @@
-//! Account meter: 100 messages + 2 subdomains free, then $2.99/mo.
+//! Account meter: 1 postal.bot subdomain + 100 messages/month free.
+//! Extra labels $2.99/mo. No free k2.dev subdomain (websockets cost more).
 //!
-//! Same account as k2.dev (K2X). Extra labels are the Connect SKU
-//! ($2.99/mo). Buying a label on k2.dev or postal.bot syncs. Stripe
-//! lives on K2 Web — this CLI does not take cards.
+//! Same K2X account. Paid checkout is the K2 Connect Stripe portal
+//! (k2.dev/pricing) from either site. Stripe lives on K2 Web.
 //!
 //! Message meter key is the enrolled host. Plane `GET /postal/usage`
 //! when `P5_USAGE_PLANE=1`; else the local sent ledger. Mail from
@@ -15,10 +15,12 @@ use p5_core::{Homes, Mailbox, PostalAddr};
 use p5_plane::{BillingFile, PlaneClient, PlaneConfig, PostalFile, UsageReport};
 
 pub const FREE_LIMIT: u32 = 100;
-pub const FREE_SUBDOMAINS: u32 = 2;
+pub const FREE_SUBDOMAINS: u32 = 1;
 pub const PRICE_USD: &str = "2.99";
 pub const PAY_URL: &str = "https://www.postal.bot/account";
 pub const SIGNUP_URL: &str = "https://k2.dev/signup";
+/// Same Connect Stripe portal as k2.dev (K2 Web holds the keys).
+pub const CHECKOUT_URL: &str = "https://k2.dev/pricing";
 pub const SITE_URL: &str = "https://www.postal.bot";
 pub const PLAN_FREE: &str = "free";
 pub const PLAN_UNLIMITED: &str = "unlimited";
@@ -86,12 +88,20 @@ account:    {pay}
     )
 }
 
+pub fn checkout_url() -> String {
+    std::env::var("P5_CHECKOUT_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| CHECKOUT_URL.into())
+}
+
 pub fn quota_hint(report: &UsageReport) -> String {
     format!(
-        "{FREE_LIMIT} messages/month and {FREE_SUBDOMAINS} subdomains free. Remaining {} on {}. Extra labels ${PRICE_USD}/mo (same as k2.dev): {}",
+        "1 postal.bot subdomain is free ({FREE_LIMIT} messages/month). Remaining {} on {}. Extra labels ${PRICE_USD}/mo on the same Stripe portal as k2.dev: {}",
         report.remaining,
         report.host,
-        pay_url()
+        checkout_url()
     )
 }
 
@@ -451,7 +461,8 @@ mod tests {
         let hint = quota_hint(&report);
         assert!(hint.contains("$2.99"));
         assert!(hint.contains("acme.postal.bot"));
-        assert!(hint.contains("2 subdomains"));
+        assert!(hint.contains("1 postal.bot subdomain"));
+        assert!(hint.contains("k2.dev"));
     }
 
     #[test]
@@ -489,7 +500,7 @@ mod tests {
         assert!(text.contains("rosson.postal.bot"));
         assert!(text.contains("88"));
         assert!(text.contains("100"));
-        assert!(text.contains("1 / 2 free"));
+        assert!(text.contains("1 / 1 free"));
         assert!(text.contains("postal.bot/account"));
         assert!(!text.contains("9.99"));
         assert!(!text.to_ascii_lowercase().contains("kessel"));

@@ -137,7 +137,7 @@ pub struct HoldList {
 
 /// `GET /postal/usage` — messages this UTC month on one enrolled host.
 ///
-/// Free: 100 messages + 2 subdomains. Extra labels $2.99/mo (K2 Connect SKU).
+/// Free: 1 postal.bot subdomain, 100 messages/month. Extra labels $2.99/mo.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct UsageReport {
     pub host: String,

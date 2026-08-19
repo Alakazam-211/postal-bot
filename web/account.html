@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Postal — account &amp; subdomains</title>
-  <meta name="description" content="Create a k2.dev account, claim two free postal.bot subdomains, extra labels $2.99/mo. Labels sync with k2.dev." />
+  <meta name="description" content="One free postal.bot subdomain (100 messages/month). Extra labels $2.99/mo on the same Stripe portal as k2.dev." />
   <style>
     :root {
       color-scheme: dark;
@@ -62,16 +62,16 @@
   </header>
   <main class="wrap">
     <h1>One account. Two zones.</h1>
-    <p class="lede">Postal uses the same login as <a href="https://k2.dev/">k2.dev</a>. Claim a label once; it is <code>label.k2.dev</code> and <code>label.postal.bot</code>. K2 Web holds billing keys — we do not take cards here.</p>
+    <p class="lede">Postal uses the same login as <a href="https://k2.dev/">k2.dev</a>. Paid labels go through <strong>the same Stripe portal</strong> (K2 Connect). K2 Web holds the keys — we do not take cards here. A free Postal label is mail-only; k2.dev has no free subdomain because websockets cost more than little messages.</p>
     <div class="row">
       <a class="btn" href="https://k2.dev/signup">Create account</a>
       <a class="btn ghost" href="https://k2.dev/login">Log in</a>
+      <a class="btn ghost" href="https://k2.dev/pricing">Buy extra label</a>
     </div>
     <ul>
-      <li>Free: <strong>2 subdomains</strong> and <strong>100 messages / month</strong></li>
-      <li>Then <strong>$2.99/mo per extra subdomain</strong> (K2 Connect Single)</li>
-      <li>Unlimited messages <strong>$2.99/mo</strong></li>
-      <li>Buy a label on k2.dev or Postal — they stay in sync</li>
+      <li>Free on <strong>postal.bot only</strong>: <strong>1 subdomain</strong>, <strong>100 messages / month</strong></li>
+      <li>Then <strong>$2.99/mo per extra subdomain</strong> — same checkout as k2.dev</li>
+      <li>Paid labels sync: buy on either site, both zones see it</li>
     </ul>
     <p>After the account exists: <code>curl -fsSL https://www.postal.bot/install.sh | sh</code> then <code>p5 login</code> and <code>p5 usage</code>.</p>
     <p class="hint">No $9.99 plan. Stripe and Connect tokens stay on K2 Web.</p>

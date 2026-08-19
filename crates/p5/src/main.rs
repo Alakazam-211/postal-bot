@@ -110,7 +110,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Account plan (2 free subdomains, 100 free messages, $2.99/mo extra)
+    /// Account plan (1 free postal.bot subdomain, 100 msgs, $2.99/mo extra)
     Billing {
         #[command(subcommand)]
         action: Option<BillingAction>,
@@ -243,7 +243,7 @@ enum HelpTopic {
     /// Last-mile plugins (`homes.harness`): k2, grok, exec
     #[value(name = "last-mile", alias = "plugins", alias = "grok")]
     LastMile,
-    /// 100 messages + 2 subdomains free; extra labels $2.99/mo (k2.dev account)
+    /// 1 free postal.bot subdomain (100 msgs/mo); extra labels $2.99/mo
     Usage,
 }
 
@@ -340,17 +340,18 @@ the plugin ran but Sand auth failed — not a pairing failure.
 fn help_usage_text() -> String {
     format!(
         "\
-Usage — same account as k2.dev. Free: {msgs} messages/month and {subs}
-subdomains. Extra labels ${price}/mo (K2 Connect SKU). Unlimited
-messages ${price}/mo. See {pay}
+Usage — same account as k2.dev. Free on postal.bot only: {subs}
+subdomain with {msgs} messages/month (k2.dev has no free label —
+websockets cost more). Extra labels ${price}/mo, same Stripe
+portal as K2 Connect. See {pay}
 
   p5 usage           sent / remaining / subdomains for this host
   p5 usage --json
   p5 billing         same readout plus the account URL
 
-A label bought on k2.dev or postal.bot syncs (K2X subdomains).
-Create the account at {signup}. Stripe stays on K2 Web. Mail from
-before billing first ran on this box does not count.
+A paid label bought on k2.dev or postal.bot hits the same Stripe
+checkout ({checkout}) and syncs. Create the account at {signup}.
+Mail from before billing first ran on this box does not count.
 
 Over the free message cap, p5 msg exits 3 (quota). P5_BILLING=0
 shows usage but does not block send.
@@ -360,6 +361,7 @@ shows usage but does not block send.
         price = crate::billing::PRICE_USD,
         pay = crate::billing::pay_url(),
         signup = crate::billing::SIGNUP_URL,
+        checkout = crate::billing::checkout_url(),
     )
 }
 
@@ -748,6 +750,8 @@ mod tests {
         assert!(text.contains("postal.bot/account"));
         assert!(text.contains("subdomain"));
         assert!(text.contains("k2.dev"));
+        assert!(text.contains("k2.dev/pricing"));
+        assert!(text.contains("postal.bot only"));
         assert!(!text.contains("9.99"));
         assert!(!text.contains("[k2g]"));
     }
