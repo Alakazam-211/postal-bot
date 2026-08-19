@@ -195,4 +195,17 @@ mod tests {
         blob[0] = 0x99;
         assert!(matches!(bob.open(&blob, &aad), Err(CryptoError::Open)));
     }
+
+    #[test]
+    fn bad_ulid_id_fails_closed() {
+        let bob = KeyPair::generate();
+        let mut aad = sample_aad();
+        let blob = seal(&bob.public_key_pem(), b"x", &aad).unwrap();
+        aad.id = "not-a-ulid".into();
+        assert!(matches!(
+            seal(&bob.public_key_pem(), b"x", &aad),
+            Err(CryptoError::Seal(_))
+        ));
+        assert!(matches!(bob.open(&blob, &aad), Err(CryptoError::Open)));
+    }
 }

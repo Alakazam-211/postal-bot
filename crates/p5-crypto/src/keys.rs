@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use rand::rngs::OsRng;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use spki::{DecodePublicKey, EncodePublicKey};
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
@@ -35,14 +36,27 @@ impl KeyPair {
     /// Load `<root>/keys/identity.pem`, or create it (0600) if missing.
     pub fn load_or_create(root: &Path) -> Result<Self, CryptoError> {
         let path = identity_path(root);
-        match fs::read_to_string(&path) {
-            Ok(pem) => Self::from_pkcs8_pem(&pem),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let kp = Self::generate();
-                kp.save_private(&path)?;
-                Ok(kp)
+        ensure_keys_dir(path.parent().unwrap_or(root))?;
+        loop {
+            match fs::read_to_string(&path) {
+                Ok(pem) => {
+                    reassert_key_perms(&path)?;
+                    return Self::from_pkcs8_pem(&pem);
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    let kp = Self::generate();
+                    match kp.save_private(&path) {
+                        Ok(()) => return Ok(kp),
+                        Err(CryptoError::Io(io_err))
+                            if io_err.kind() == io::ErrorKind::AlreadyExists =>
+                        {
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => Err(e.into()),
         }
     }
 
@@ -61,7 +75,7 @@ impl KeyPair {
         Ok(())
     }
 
-    /// RFC 8410 `PUBLIC KEY` PEM. This is what `PUT /postal/me` uploads.
+    /// RFC 8410 `PUBLIC KEY` PEM.
     pub fn public_key_pem(&self) -> String {
         self.verifying_key()
             .to_public_key_pem(LineEnding::LF)
@@ -99,7 +113,7 @@ impl fmt::Debug for KeyPair {
     }
 }
 
-/// Order-independent 6-digit SAS (k2-dev-web `sas_code`).
+/// Order-independent 6-digit SAS.
 pub fn sas_code(fp_a: &str, fp_b: &str) -> String {
     let (lo, hi) = if fp_a <= fp_b {
         (fp_a, fp_b)
@@ -113,6 +127,11 @@ pub fn sas_code(fp_a: &str, fp_b: &str) -> String {
     let hash = Sha256::digest(&data);
     let n = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
     format!("{:06}", n % 1_000_000)
+}
+
+/// SHA-256 of a peer's SPKI DER, lowercase hex.
+pub fn fingerprint_spki_pem(pem: &str) -> Result<String, CryptoError> {
+    Ok(fingerprint_verifying_key(&parse_spki_pem(pem)?))
 }
 
 pub(crate) fn parse_spki_pem(pem: &str) -> Result<VerifyingKey, CryptoError> {
@@ -134,24 +153,76 @@ fn identity_path(root: &Path) -> PathBuf {
     root.join(KEYS_DIR).join(IDENTITY_FILE)
 }
 
-fn write_private_pem(path: &Path, pem: &str) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+fn ensure_keys_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn reassert_key_perms(identity: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(dir) = identity.parent() {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+        fs::set_permissions(identity, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut nonce = [0u8; 8];
+    OsRng.fill_bytes(&mut nonce);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| IDENTITY_FILE.to_string());
+    path.with_file_name(format!(".{name}.{}.tmp", crate::to_hex(&nonce)))
+}
+
+fn exclusive_publish(tmp: &Path, dest: &Path) -> io::Result<()> {
+    match fs::hard_link(tmp, dest) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) => {
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts.open(dest)?;
+            let data = match fs::read(tmp) {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = fs::remove_file(dest);
+                    return Err(e);
+                }
+            };
+            if let Err(e) = f.write_all(&data).and_then(|_| f.sync_all()) {
+                let _ = fs::remove_file(dest);
+                return Err(e);
+            }
+            Ok(())
         }
     }
+}
 
-    let tmp = match path.file_name() {
-        Some(name) => path.with_file_name(format!(".{}.tmp", name.to_string_lossy())),
-        None => path.with_extension("tmp"),
-    };
+fn write_private_pem(path: &Path, pem: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_keys_dir(parent)?;
+    }
 
-    {
+    let tmp = tmp_path(path);
+    let result = (|| {
         let mut opts = OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -160,13 +231,12 @@ fn write_private_pem(path: &Path, pem: &str) -> io::Result<()> {
         let mut f = opts.open(&tmp)?;
         f.write_all(pem.as_bytes())?;
         f.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
+        drop(f);
+        exclusive_publish(&tmp, path)
+    })();
+    let _ = fs::remove_file(&tmp);
+    result?;
+    reassert_key_perms(path)?;
     Ok(())
 }
 
@@ -187,14 +257,49 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
+            let file_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(file_mode, 0o600);
+            let dir_mode = fs::metadata(dir.path().join(KEYS_DIR))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
         }
 
         let b = KeyPair::load_or_create(dir.path()).unwrap();
         assert_eq!(a.fingerprint(), b.fingerprint());
         assert_eq!(a.public_key_pem(), b.public_key_pem());
         assert_eq!(a.to_x25519(), b.to_x25519());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_reasserts_key_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        KeyPair::load_or_create(dir.path()).unwrap();
+        let keys = dir.path().join(KEYS_DIR);
+        let path = identity_path(dir.path());
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        KeyPair::load_or_create(dir.path()).unwrap();
+        assert_eq!(
+            fs::metadata(&keys).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn fingerprint_spki_pem_matches_local() {
+        let kp = KeyPair::generate();
+        let pem = kp.public_key_pem();
+        assert_eq!(fingerprint_spki_pem(&pem).unwrap(), kp.fingerprint());
+        assert!(fingerprint_spki_pem("not-a-pem").is_err());
     }
 
     #[test]

@@ -10,7 +10,7 @@ mod proof;
 mod seal;
 
 pub use error::CryptoError;
-pub use keys::{sas_code, KeyPair, IDENTITY_FILE, KEYS_DIR};
+pub use keys::{fingerprint_spki_pem, sas_code, KeyPair, IDENTITY_FILE, KEYS_DIR};
 pub use proof::{proof_create, proof_verify};
 pub use seal::{seal, SealAad};
 
