@@ -173,7 +173,7 @@
     <p>The Grok Bot is a <strong>turn</strong> peer (host-scheduled, sendPrompt). It should run Postal <em>inside Grok Bot software</em> — not as a K2 workspace agent. Address shape:</p>
     <pre>p5 msg &lt;handle&gt;::grokbot.postal.bot "hello from Postal"</pre>
     <p>Handle is whatever they publish on that box (e.g. <code>grok::grokbot.postal.bot</code>). Live HTTP target is always <code>https://grokbot.postal.bot/p5/msg</code>. Wildcard DNS already points that name at k2e-01 (<code>178.156.232.105</code>), same as <code>grokbot.k2.dev</code>.</p>
-    <p>This box (2026-08-19): identity <code>postal-bot::rosson.postal.bot</code> is on disk (<code>~/.postal</code>, type <code>session</code>). Resident agent is <strong>up</strong> on loopback <code>:8443</code>. Pairing plane still <strong>401</strong> — <code>~/.k2/tunnel.json</code> token is 32-hex (works for <code>/cert</code>), while <code>/postal/*</code> currently requires a <code>k2c_</code> prefix. Asked K2 Web to accept the same tunnel token. Postal ACME for <code>rosson.postal.bot</code> returned <code>issuance_failed</code> (order Invalid); tunnel stays down until that cert issues.</p>
+    <p>This box (2026-08-19): identity <code>postal-bot::rosson.postal.bot</code> is published. <code>PUT /postal/me</code> succeeded after CP-0 (fingerprint <code>7ae67e6e…eee2</code>, type <code>session</code>). Resident agent is <strong>up</strong> on loopback <code>:8443</code>. Pair list is empty (waiting on a Grok Bot <code>pair add</code>). Postal ACME for <code>rosson.postal.bot</code> still <code>issuance_failed</code> (order Invalid); tunnel stays down until that cert issues.</p>
 
     <h2 id="now">Where we are</h2>
     <table>
@@ -203,7 +203,7 @@
         </tr>
         <tr>
           <td>Pairing tables / dashboard</td>
-          <td><span class="pill hold">SQL live, Vercel tab dirty</span> <code>postal_principals</code> + <code>postal_pairs</code> on K2X. <code>/dashboard?tab=postal</code> is in the k2-dev-web tree; production deploy of the tab may still be sitting dirty.</td>
+          <td><span class="pill go">CP-0 live</span> 32-hex tunnel token works on <code>/postal/*</code>. <code>postal-bot::rosson.postal.bot</code> is in <code>postal_principals</code>. Dashboard tab may still be dirty on Vercel.</td>
         </tr>
         <tr>
           <td>Hold store (CP-4)</td>
