@@ -3,6 +3,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 /// Enrolled-server suffix. Live HTTPS always targets `https://<label>.postal.bot`.
 const HOST_SUFFIX: &str = ".postal.bot";
 
@@ -77,6 +79,20 @@ impl FromStr for PostalAddr {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse(s, None)
+    }
+}
+
+impl Serialize for PostalAddr {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for PostalAddr {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        // Parse is the only constructor; reject invented keys on load.
+        Self::parse(&s, None).map_err(serde::de::Error::custom)
     }
 }
 
@@ -293,5 +309,15 @@ mod tests {
         assert_eq!(addr.host(), "www.postal.bot");
         assert_eq!(addr.to_string(), "scout::www.postal.bot");
         assert_eq!(addr.live_base_url(), "https://www.postal.bot");
+    }
+
+    #[test]
+    fn serde_is_display_string() {
+        let addr = PostalAddr::parse("Scout::ACME.POSTAL.BOT", None).unwrap();
+        let json = serde_json::to_string(&addr).unwrap();
+        assert_eq!(json, "\"scout::acme.postal.bot\"");
+        let back: PostalAddr = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, addr);
+        assert!(serde_json::from_str::<PostalAddr>("\"scout@acme.postal.bot\"").is_err());
     }
 }

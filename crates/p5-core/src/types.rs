@@ -6,8 +6,11 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// One word on the wire / in `p5 config`. Declared by the peer (K22).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PeerType {
     /// Lives in a terminal harness. Attach if live; resume from homes if asleep.
     Session,

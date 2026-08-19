@@ -10,3 +10,5 @@ repository = "https://github.com/Alakazam-211/postal-bot"
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 p5-core = { path = "crates/p5-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

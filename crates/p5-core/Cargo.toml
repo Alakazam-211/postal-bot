@@ -4,5 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Postal core types: addresses, peer types, delivery modes"
+description = "Postal core types: addresses, peer types, homes, roster"
 publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
