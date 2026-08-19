@@ -4,10 +4,15 @@ use p5_core::{default_root, DeliveryMode, MailItem, Mailbox, MailboxError, PeerT
 mod agent;
 mod control;
 mod http;
+mod pair;
 mod service;
 mod session_map;
 mod sm;
 
+use pair::{
+    finish as finish_pair, run_accept, run_add, run_list, run_login, run_me, run_reject,
+    run_revoke, run_show,
+};
 use sm::{send_msg, MsgRequest, MsgResponse, SmContext, SmError};
 
 const PRODUCT: &str = "Postal";
@@ -74,8 +79,11 @@ enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
-    /// Install and start the resident agent (launchd / systemd)
+    /// Install the agent; optional Connect token (`--token k2c_…`)
     Login {
+        /// Connect token (`k2c_…`)
+        #[arg(long)]
+        token: Option<String>,
         /// Write the unit file without loading it
         #[arg(long, hide = true)]
         no_start: bool,
@@ -84,6 +92,65 @@ enum Commands {
     Logout,
     /// Agent / tunnel status (UDS)
     Status,
+    /// Pairing (plane). `add` may request; accept/reject/revoke are owner-gated
+    Pair {
+        #[command(subcommand)]
+        action: PairAction,
+    },
+    /// Publish this handle's public pairing key (`PUT /postal/me`)
+    Me {
+        /// Display / pairing address (`handle::sub.postal.bot`)
+        #[arg(long)]
+        from: Option<String>,
+        /// Peer type: session or turn
+        #[arg(long)]
+        typ: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PairAction {
+    /// Request a pair (also publishes `/postal/me`)
+    Add {
+        /// Peer `handle::sub.postal.bot`
+        addr: String,
+        /// Our address
+        #[arg(long)]
+        from: Option<String>,
+        /// Our type: session or turn
+        #[arg(long)]
+        typ: Option<String>,
+    },
+    /// List pairs (updates the local roster)
+    List {
+        /// Inbox only
+        #[arg(long)]
+        inbox: bool,
+    },
+    /// Review a pair (SAS, both addrs, status)
+    Show {
+        /// Pair id
+        id: String,
+    },
+    /// Accept (owner-gated unless `P5_OWNER_PAIR=1`)
+    Accept {
+        /// Pair id
+        id: String,
+        /// SAS digits (else computed from local + peer keys)
+        #[arg(long)]
+        sas: Option<String>,
+    },
+    /// Reject (owner-gated unless `P5_OWNER_PAIR=1`)
+    Reject {
+        /// Pair id
+        id: String,
+    },
+    /// Revoke (owner-gated unless `P5_OWNER_PAIR=1`)
+    Revoke {
+        /// Pair id
+        id: String,
+    },
+>>>>>>> d56f3a8 (P5-8: pairing UX against CP-3)
 }
 
 #[derive(Debug, Subcommand)]
@@ -388,13 +455,18 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Login { no_start } => match agent::login(no_start) {
-            Ok(path) => println!("wrote {}", path.display()),
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::exit(1);
+        Commands::Login { token, no_start } => {
+            if let Some(token) = token {
+                finish_pair(run_login(token));
             }
-        },
+            match agent::login(no_start) {
+                Ok(path) => println!("wrote {}", path.display()),
+                Err(err) => {
+                    eprintln!("{err}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Logout => {
             if let Err(err) = agent::logout() {
                 eprintln!("{err}");
@@ -402,6 +474,25 @@ fn main() {
             }
         }
         Commands::Status => print!("{}", agent::status_text()),
+        Commands::Pair {
+            action: PairAction::Add { addr, from, typ },
+        } => finish_pair(run_add(addr, from, typ)),
+        Commands::Pair {
+            action: PairAction::List { inbox },
+        } => finish_pair(run_list(inbox)),
+        Commands::Pair {
+            action: PairAction::Show { id },
+        } => finish_pair(run_show(id)),
+        Commands::Pair {
+            action: PairAction::Accept { id, sas },
+        } => finish_pair(run_accept(id, sas)),
+        Commands::Pair {
+            action: PairAction::Reject { id },
+        } => finish_pair(run_reject(id)),
+        Commands::Pair {
+            action: PairAction::Revoke { id },
+        } => finish_pair(run_revoke(id)),
+        Commands::Me { from, typ } => finish_pair(run_me(from, typ)),
     }
 }
 
@@ -445,6 +536,8 @@ mod tests {
         assert!(text.contains("sent"));
         assert!(text.contains("outbox"));
         assert!(text.contains("msg"));
+        assert!(text.contains("pair"));
+        assert!(text.contains("me"));
         assert!(!text.contains("k2 "));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
     }

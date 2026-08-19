@@ -38,6 +38,19 @@ impl Trust {
     pub const fn is_trusted(self) -> bool {
         matches!(self, Self::Trusted)
     }
+
+    /// Map a plane pair-dir string. Unknown values stay off the roster.
+    pub fn from_pair_status(s: &str) -> Option<Self> {
+        match s.trim() {
+            "none" => Some(Self::None),
+            "pending" => Some(Self::Pending),
+            "trusted" => Some(Self::Trusted),
+            "rejected" => Some(Self::Rejected),
+            "revoked" => Some(Self::Revoked),
+            "blocked" => Some(Self::Blocked),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Trust {
@@ -85,6 +98,45 @@ impl Roster {
 
     pub fn insert(&mut self, addr: PostalAddr, entry: RosterEntry) -> Option<RosterEntry> {
         self.entries.insert(addr, entry)
+    }
+
+    /// Merge a plane-observed peer. Empty pem/fp leave whatever was already stored.
+    ///
+    /// New rows need a declared `typ` (K22 — do not guess session/turn).
+    pub fn merge_peer(
+        &mut self,
+        addr: PostalAddr,
+        typ: Option<PeerType>,
+        fingerprint: Option<String>,
+        public_key_pem: Option<String>,
+        trust: Trust,
+        pair_id: String,
+    ) -> bool {
+        let existing = self.entries.get(&addr).cloned();
+        let typ = match typ.or_else(|| existing.as_ref().map(|e| e.typ)) {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut entry = existing.unwrap_or(RosterEntry {
+            typ,
+            fingerprint: String::new(),
+            public_key_pem: String::new(),
+            trust,
+            pair_id: pair_id.clone(),
+            sand_uuid: None,
+            tools: ToolFlags::default(),
+        });
+        entry.typ = typ;
+        entry.trust = trust;
+        entry.pair_id = pair_id;
+        if let Some(fp) = fingerprint.filter(|s| !s.is_empty()) {
+            entry.fingerprint = fp;
+        }
+        if let Some(pem) = public_key_pem.filter(|s| !s.is_empty()) {
+            entry.public_key_pem = pem;
+        }
+        self.entries.insert(addr, entry);
+        true
     }
 
     pub fn remove(&mut self, addr: &PostalAddr) -> Option<RosterEntry> {
@@ -271,6 +323,38 @@ mod tests {
             assert_eq!(trust.as_str(), wire);
         }
         assert!(!Trust::Pending.is_trusted());
+        assert_eq!(Trust::from_pair_status("trusted"), Some(Trust::Trusted));
+        assert_eq!(Trust::from_pair_status("pending"), Some(Trust::Pending));
+        assert_eq!(Trust::from_pair_status("nope"), None);
+    }
+
+    #[test]
+    fn merge_peer_does_not_guess_typ() {
+        let mut roster = Roster::new();
+        let key = addr("scout::acme.postal.bot");
+        assert!(!roster.merge_peer(
+            key.clone(),
+            None,
+            Some("fp".into()),
+            Some("pem".into()),
+            Trust::Pending,
+            "p1".into(),
+        ));
+        assert!(roster.is_empty());
+        assert!(roster.merge_peer(
+            key.clone(),
+            Some(PeerType::Turn),
+            Some("fp".into()),
+            Some("pem".into()),
+            Trust::Pending,
+            "p1".into(),
+        ));
+        assert!(roster.merge_peer(key.clone(), None, None, None, Trust::Trusted, "p1".into(),));
+        let e = roster.get(&key).unwrap();
+        assert_eq!(e.typ, PeerType::Turn);
+        assert_eq!(e.trust, Trust::Trusted);
+        assert_eq!(e.fingerprint, "fp");
+        assert_eq!(e.public_key_pem, "pem");
     }
 
     #[cfg(unix)]

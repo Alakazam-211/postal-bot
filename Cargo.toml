@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/p5", "crates/p5-core", "crates/p5-crypto"]
+members = ["crates/p5", "crates/p5-core", "crates/p5-crypto", "crates/p5-plane"]
 
 [workspace.package]
 edition = "2021"
@@ -10,5 +10,7 @@ repository = "https://github.com/Alakazam-211/postal-bot"
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 p5-core = { path = "crates/p5-core" }
+p5-crypto = { path = "crates/p5-crypto" }
+p5-plane = { path = "crates/p5-plane" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
