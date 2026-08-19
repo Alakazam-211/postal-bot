@@ -1,20 +1,21 @@
 #!/bin/sh
 # Postal (p5) installer.
 #
-#   curl -fsSL https://postal.bot/install.sh | sh
+#   curl --proto '=https' --tlsv1.2 -fsSL https://postal.bot/install.sh | sh
 #
 # Lands `p5` on PATH at /usr/local/bin or ~/.local/bin. Idempotent.
 #
 # Remote (default, when release assets exist):
-#   1. Fetch tarball + SHA256SUMS + https://postal.bot/keys/minisign.pub
-#      (same key is also on the GitHub release until DNS is live)
+#   1. Fetch one origin's full set: tarball + SHA256SUMS + minisign.pub + .minisig
+#      (postal.bot first; GitHub release as a whole-set fallback)
 #   2. Check SHA256SUMS; minisign -Vm the tarball
-#   3. Install p5 into $prefix/bin
+#   3. Atomic-install p5 into $prefix/bin
 #
 # Local cargo (until postal.bot DNS / release assets exist):
 #   P5_LOCAL=1 ./install/install.sh
 #   ./install/install.sh --from-cargo
-#   → cargo install --path crates/p5 --root "$prefix"
+#   → cargo build --release, then copy target/release/p5 into $prefix/bin
+#   (not `cargo install --root` — that writes .crates.toml next to bin)
 #
 # Do not invent a minisign key here. The published pubkey path is the
 # ceremony; this script only fetches it.
@@ -40,7 +41,7 @@ Usage: install.sh [--from-cargo] [--prefix DIR]
 
 Install the ${PRODUCT} (${COMMAND}) binary.
 
-  --from-cargo    cargo install --path crates/p5 --root \$prefix
+  --from-cargo    cargo build crates/p5 and install p5 into \$prefix/bin
   --prefix DIR    install prefix (bin lands in DIR/bin)
   -h, --help      show this help
 
@@ -52,8 +53,9 @@ Env:
 Default prefix: /usr/local if writable, else ~/.local.
 
 Remote installs minisign-verify against ${KEY_URL}
-and check SHA256SUMS next to the asset. If those files are missing,
-this script errors — postal.bot DNS is not live yet. Use --from-cargo.
+and check SHA256SUMS next to the asset (one origin per attempt).
+If those files are missing, this script errors — postal.bot DNS
+is not live yet. Use --from-cargo.
 EOF
 }
 
@@ -143,28 +145,46 @@ sha256_of() {
     fi
 }
 
+is_gzip() {
+    _hex=$(od -An -tx1 -N2 "$1" 2>/dev/null | tr -d ' \n\t' | tr 'A-F' 'a-f')
+    [ "$_hex" = "1f8b" ]
+}
+
 fetch() {
     # fetch <url> <dest> — stderr swallowed; caller prints a single assets-missing error.
+    # Empty/short/HTML 200s fail so parking pages do not look like assets.
+    _url="$1"
+    _dest="$2"
     command -v curl >/dev/null 2>&1 || die "curl is required"
-    curl -fsSL --connect-timeout 8 --max-time 60 "$1" -o "$2" 2>/dev/null
+    rm -f "$_dest"
+    curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 8 --max-time 60 \
+        "$_url" -o "$_dest" 2>/dev/null || return 1
+    [ -s "$_dest" ] || return 1
+    _sz=$(wc -c < "$_dest" | tr -d ' ')
+    [ "$_sz" -ge 16 ] || return 1
+    if dd if="$_dest" bs=64 count=1 2>/dev/null | grep -qi '<html\|<!doctype'; then
+        return 1
+    fi
+    return 0
 }
 
 assets_missing() {
     die "$*
 
 ${PRODUCT} release assets are not published yet (postal.bot DNS is not live).
-The remote pipe needs:
+The remote pipe needs one complete origin set:
   ${KEY_URL}
   ${DIST_BASE}/SHA256SUMS
   ${DIST_BASE}/p5-<os>-<arch>.tar.gz
-  (same files on GitHub ${REPO_SLUG} releases as a fallback)
+  ${DIST_BASE}/p5-<os>-<arch>.tar.gz.minisig
+  (same files on GitHub ${REPO_SLUG} releases as a whole-set fallback)
 
 Until those exist, install from a local checkout:
 
   P5_LOCAL=1 ./install/install.sh
   ./install/install.sh --from-cargo
 
-Or: cargo install --path crates/p5"
+Or: cargo build --release -p p5"
 }
 
 need_on_path() {
@@ -175,15 +195,45 @@ need_on_path() {
     esac
 }
 
+# Atomic replace so a running p5 is not ETXTBSY (Linux) and a crash
+# cannot leave a truncated destination.
+install_bin() {
+    _src="$1"
+    [ -f "$_src" ] || die "install source is not a regular file: $_src"
+    [ ! -h "$_src" ] || die "refusing to install a symlink ($_src)"
+    mkdir -p "$BINDIR"
+    cp "$_src" "${BINDIR}/p5.new"
+    chmod 755 "${BINDIR}/p5.new"
+    mv -f "${BINDIR}/p5.new" "${BINDIR}/p5"
+}
+
+# One origin, one set. Do not mix tarball from A with sums/key/sig from B.
+try_origin() {
+    _base="$1"
+    _key="$2"
+    rm -f "$TAR_PATH" "$SUMS_PATH" "$KEY_PATH" "$SIG_PATH"
+    fetch "${_base}/${TARBALL}" "$TAR_PATH" || return 1
+    is_gzip "$TAR_PATH" || return 1
+    fetch "${_base}/SHA256SUMS" "$SUMS_PATH" || return 1
+    fetch "$_key" "$KEY_PATH" || return 1
+    fetch "${_base}/${TARBALL}.minisig" "$SIG_PATH" || return 1
+    return 0
+}
+
 PREFIX=$(choose_prefix)
 BINDIR="${PREFIX}/bin"
 
 if [ "$FROM_CARGO" = "1" ]; then
     command -v cargo >/dev/null 2>&1 || die "cargo not found (needed for --from-cargo / P5_LOCAL=1)"
     ROOT=$(repo_root) || die "cannot find crates/p5 (set P5_REPO or run from the postal-bot checkout)"
-    echo "Installing ${COMMAND} from cargo (${ROOT}/crates/p5) → ${BINDIR}"
-    # --force so a second run is a no-op replace (idempotent).
-    cargo install --path "${ROOT}/crates/p5" --root "$PREFIX" --force --locked
+    echo "Building ${COMMAND} from cargo (${ROOT}/crates/p5) → ${BINDIR}"
+    cargo build --release --locked --manifest-path "${ROOT}/crates/p5/Cargo.toml"
+    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+        SRC="${CARGO_TARGET_DIR}/release/p5"
+    else
+        SRC="${ROOT}/target/release/p5"
+    fi
+    install_bin "$SRC"
 else
     command -v curl >/dev/null 2>&1 || die "curl is required"
     TARGET=$(detect_target)
@@ -195,30 +245,15 @@ else
     SUMS_PATH="${TMP}/SHA256SUMS"
     KEY_PATH="${TMP}/minisign.pub"
     SIG_PATH="${TMP}/${TARBALL}.minisig"
+    USED_KEY="$KEY_URL"
 
     echo "Fetching ${COMMAND} (${TARGET})…"
-    if fetch "${DIST_BASE}/${TARBALL}" "$TAR_PATH"; then
-        :
-    elif fetch "${GH_DIST_BASE}/${TARBALL}" "$TAR_PATH"; then
-        :
+    if try_origin "$DIST_BASE" "$KEY_URL"; then
+        USED_KEY="$KEY_URL"
+    elif try_origin "$GH_DIST_BASE" "${GH_DIST_BASE}/minisign.pub"; then
+        USED_KEY="${GH_DIST_BASE}/minisign.pub"
     else
-        assets_missing "no tarball at ${DIST_BASE}/${TARBALL} or ${GH_DIST_BASE}/${TARBALL}"
-    fi
-
-    if fetch "${DIST_BASE}/SHA256SUMS" "$SUMS_PATH"; then
-        :
-    elif fetch "${GH_DIST_BASE}/SHA256SUMS" "$SUMS_PATH"; then
-        :
-    else
-        assets_missing "SHA256SUMS missing next to the asset"
-    fi
-
-    if fetch "$KEY_URL" "$KEY_PATH"; then
-        :
-    elif fetch "${GH_DIST_BASE}/minisign.pub" "$KEY_PATH"; then
-        :
-    else
-        assets_missing "minisign pubkey missing at ${KEY_URL}"
+        assets_missing "no complete asset set at ${DIST_BASE} or ${GH_DIST_BASE}"
     fi
 
     GOT=$(sha256_of "$TAR_PATH")
@@ -231,33 +266,21 @@ else
   Debian: sudo apt-get install minisign
   Other:  https://jedisct1.github.io/minisign/"
 
-    if fetch "${DIST_BASE}/${TARBALL}.minisig" "$SIG_PATH"; then
-        :
-    elif fetch "${GH_DIST_BASE}/${TARBALL}.minisig" "$SIG_PATH"; then
-        :
-    else
-        assets_missing "${TARBALL}.minisig missing (cannot minisign-verify)"
-    fi
-
-    echo "Verifying minisign (${KEY_URL})…"
+    echo "Verifying minisign (${USED_KEY})…"
     minisign -Vm "$TAR_PATH" -p "$KEY_PATH" -x "$SIG_PATH" >/dev/null \
         || die "minisign verify failed"
 
     EXTRACT="${TMP}/out"
     mkdir -p "$EXTRACT"
     tar -xzf "$TAR_PATH" -C "$EXTRACT"
-    if [ -f "${EXTRACT}/p5" ]; then
+    if [ -e "${EXTRACT}/p5" ]; then
         SRC="${EXTRACT}/p5"
-    elif [ -f "${EXTRACT}/bin/p5" ]; then
+    elif [ -e "${EXTRACT}/bin/p5" ]; then
         SRC="${EXTRACT}/bin/p5"
     else
         die "tarball ${TARBALL} did not contain p5"
     fi
-    chmod 755 "$SRC"
-    mkdir -p "$BINDIR"
-    # Replace in place so a second run is a no-op overwrite.
-    cp "$SRC" "${BINDIR}/p5"
-    chmod 755 "${BINDIR}/p5"
+    install_bin "$SRC"
 fi
 
 echo "Installed ${BINDIR}/p5"
