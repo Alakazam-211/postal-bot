@@ -98,6 +98,8 @@ mod tests {
             if let Ok((mut stream, _)) = listener.accept() {
                 stream.set_nonblocking(false).ok();
                 stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                // Drain the full request (headers + Content-Length) before
+                // writing. A short read + close resets ureq mid-POST.
                 let mut buf = Vec::new();
                 let mut tmp = [0u8; 2048];
                 loop {
@@ -105,11 +107,7 @@ mod tests {
                         Ok(0) => break,
                         Ok(n) => {
                             buf.extend_from_slice(&tmp[..n]);
-                            if std::str::from_utf8(&buf)
-                                .ok()
-                                .and_then(|s| s.split_once("\r\n\r\n"))
-                                .is_some()
-                            {
+                            if request_complete(&buf) {
                                 break;
                             }
                         }
@@ -124,6 +122,26 @@ mod tests {
             }
         });
         format!("http://{addr}/p5/msg")
+    }
+
+    fn request_complete(buf: &[u8]) -> bool {
+        let raw = match std::str::from_utf8(buf) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let (head, rest) = match raw.split_once("\r\n\r\n") {
+            Some(p) => p,
+            None => return false,
+        };
+        let mut content_len = 0usize;
+        for line in head.split("\r\n").skip(1) {
+            if let Some((k, v)) = line.split_once(':') {
+                if k.eq_ignore_ascii_case("content-length") {
+                    content_len = v.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        rest.len() >= content_len
     }
 
     fn payload() -> serde_json::Value {

@@ -23,11 +23,12 @@ pub fn hold_enabled() -> bool {
     env_flag("P5_HOLD")
 }
 
-/// Nested live URL: `https://{handle}.{host}/p5/msg`, or `P5_LIVE_URL`.
+/// Live HTTP target is the enrolled host (`https://acme.postal.bot/p5/msg`).
+/// Handle stays in the JSON `to`; nested `handle.host` DNS is not a route.
 pub fn live_msg_url(to: &PostalAddr, override_base: Option<&str>) -> String {
     let base = match override_base.map(str::trim).filter(|s| !s.is_empty()) {
         Some(b) => b.trim_end_matches('/').to_string(),
-        None => format!("https://{}.{}", to.handle(), to.host()),
+        None => to.live_base_url(),
     };
     if base.ends_with("/p5/msg") {
         base
@@ -157,6 +158,8 @@ pub enum PullError {
     Mailbox(MailboxError),
     Sm(SmError),
     Utf8,
+    /// `p5 recv` / poll must not dial the plane unless `P5_HOLD=1`.
+    HoldOff,
 }
 
 impl PullError {
@@ -178,6 +181,7 @@ impl fmt::Display for PullError {
             Self::Mailbox(e) => write!(f, "{e}"),
             Self::Sm(e) => write!(f, "{e}"),
             Self::Utf8 => f.write_str("hold plaintext is not utf-8"),
+            Self::HoldOff => f.write_str("hold client is off; set P5_HOLD=1"),
         }
     }
 }
@@ -210,6 +214,9 @@ impl From<SmError> for PullError {
 
 /// One GET → decrypt → fsync inbox → ACK. ACK only after the cover is on disk.
 pub fn pull_held(root: &Path) -> Result<PullReport, PullError> {
+    if !hold_enabled() {
+        return Err(PullError::HoldOff);
+    }
     let ctx = SmContext::load(root)?;
     let cfg = PlaneConfig::load(root)?;
     let client = PlaneClient::new(&cfg.base_url, cfg.require_token()?);
@@ -827,11 +834,13 @@ mod tests {
     }
 
     #[test]
-    fn live_url_uses_nested_handle() {
+    fn live_url_uses_enrolled_host_not_nested_handle() {
         let to = addr("scout::acme.postal.bot");
-        assert_eq!(
-            live_msg_url(&to, None),
-            "https://scout.acme.postal.bot/p5/msg"
+        assert_eq!(to.live_base_url(), "https://acme.postal.bot");
+        assert_eq!(live_msg_url(&to, None), "https://acme.postal.bot/p5/msg");
+        assert!(
+            !live_msg_url(&to, None).contains("scout.acme"),
+            "handle must not become a DNS label"
         );
         assert_eq!(
             live_msg_url(&to, Some("http://127.0.0.1:9")),

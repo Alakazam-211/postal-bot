@@ -99,7 +99,7 @@ enum Commands {
         #[command(subcommand)]
         action: PairAction,
     },
-    /// Pull held mail from the plane (one shot)
+    /// Pull held mail from the plane (one shot; requires `P5_HOLD=1`)
     Recv,
     /// Publish this handle's public pairing key (`PUT /postal/me`)
     Me {

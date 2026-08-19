@@ -297,3 +297,26 @@ fn recv_pulls_decrypts_and_acks() {
     assert_eq!(mb.read_inbox(id).unwrap().body, "held body");
     assert!(plane.state.lock().unwrap().items.is_empty());
 }
+
+#[test]
+fn recv_without_p5_hold_does_not_hit_plane() {
+    let home = tempfile::tempdir().unwrap();
+    let plane = MockPlane::start();
+    let mut cmd = p5();
+    isolate(&mut cmd);
+    let out = cmd
+        .env("P5_HOME", home.path())
+        .env("P5_PLANE_URL", &plane.url)
+        .env("P5_CONNECT_TOKEN", "k2c_test")
+        .env("P5_FROM", "alice::acme.postal.bot")
+        .args(["recv"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("P5_HOLD=1"), "{err}");
+    assert!(
+        plane.state.lock().unwrap().requests.is_empty(),
+        "ungated recv must not dial the plane"
+    );
+}
