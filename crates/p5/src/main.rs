@@ -1,6 +1,10 @@
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use p5_core::{default_root, DeliveryMode, MailItem, Mailbox, MailboxError, PeerType};
 
+mod agent;
+mod control;
+mod http;
+mod service;
 mod session_map;
 mod sm;
 
@@ -65,6 +69,21 @@ enum Commands {
         #[command(subcommand)]
         action: Option<OutboxAction>,
     },
+    /// Resident agent (loopback inbound + UDS control)
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+    /// Install and start the resident agent (launchd / systemd)
+    Login {
+        /// Write the unit file without loading it
+        #[arg(long, hide = true)]
+        no_start: bool,
+    },
+    /// Stop and unload the resident agent
+    Logout,
+    /// Agent / tunnel status (UDS)
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -101,6 +120,14 @@ enum SentAction {
 enum OutboxAction {
     /// List the retry queue
     List,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentAction {
+    /// Start the resident agent (blocks)
+    Run,
+    /// Signal the running agent (pid file + UDS)
+    Stop,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -216,6 +243,12 @@ fn emit_msg(resp: &MsgResponse, json: bool) {
 }
 
 fn run_msg(req: MsgRequest, json: bool) {
+    let root = default_root();
+    if let Some(resp) = control::try_send_msg(&root, &req) {
+        emit_msg(&resp, json);
+        std::process::exit(resp.exit_code());
+    }
+    eprintln!("{}", control::agent_down_hint());
     let ctx = match SmContext::load_default() {
         Ok(ctx) => ctx,
         Err(err) => {
@@ -336,6 +369,36 @@ fn main() {
         Commands::Inbox { action } => run_mailbox(inbox_cmd(action)),
         Commands::Sent { action } => run_mailbox(sent_cmd(action)),
         Commands::Outbox { action } => run_mailbox(outbox_cmd(action)),
+        Commands::Agent {
+            action: AgentAction::Run,
+        } => {
+            if let Err(err) = agent::run() {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Agent {
+            action: AgentAction::Stop,
+        } => {
+            if let Err(err) = agent::stop() {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Login { no_start } => match agent::login(no_start) {
+            Ok(path) => println!("wrote {}", path.display()),
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        },
+        Commands::Logout => {
+            if let Err(err) = agent::logout() {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Status => print!("{}", agent::status_text()),
     }
 }
 

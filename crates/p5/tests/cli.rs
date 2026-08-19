@@ -349,6 +349,69 @@ fn msg_bad_address_exits_2() {
 }
 
 #[test]
+fn status_when_agent_not_running() {
+    let home = tmp_home();
+    let text = stdout_home(home.path(), &["status"]);
+    assert!(text.contains("agent: down"));
+    assert!(text.contains("tunnel: down"));
+}
+
+#[test]
+fn login_writes_unit_file() {
+    let home = tmp_home();
+    let out = run_home(
+        home.path(),
+        &["login", "--no-start"],
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("wrote"), "{stdout}");
+    #[cfg(target_os = "macos")]
+    {
+        let plist = home
+            .path()
+            .join("Library/LaunchAgents/bot.postal.agent.plist");
+        assert!(plist.is_file(), "missing {}", plist.display());
+        let text = std::fs::read_to_string(&plist).unwrap();
+        assert!(text.contains("bot.postal.agent"));
+        assert!(text.contains("<key>Program</key>"));
+        assert!(text.contains("p5"));
+        assert!(text.contains("agent"));
+        assert!(text.contains("run"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let unit = home.path().join(".config/systemd/user/p5-agent.service");
+        assert!(unit.is_file(), "missing {}", unit.display());
+        let text = std::fs::read_to_string(&unit).unwrap();
+        assert!(text.contains("p5"));
+        assert!(text.contains("agent run"));
+        assert!(unit.ends_with("p5-agent.service"));
+    }
+}
+
+#[test]
+fn agent_run_refuses_unspecified_bind() {
+    let home = tmp_home();
+    let out = run_home(
+        home.path(),
+        &["agent", "run"],
+        &[("P5_HTTP_BIND", "0.0.0.0:8443")],
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("0.0.0.0") || err.contains("loopback") || err.contains("non-loopback"),
+        "{err}"
+    );
+}
+
+#[test]
 fn inbox_respond_is_msg_to_from() {
     let home = tmp_home();
     add_home(home.path(), "alice::acme.postal.bot", true);

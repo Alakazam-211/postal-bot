@@ -1,9 +1,8 @@
 //! Sender SM + local session receiver SM.
 //!
 //! No public bind, no hold PUT, no pairing plane. Local dest = a HomeRow for
-//! the address or `P5_LOCAL_RECV=1`. Pairing is skipped on that loopback path
-//! (`P5_DEV_SECRET` is reserved for a later loopback listener). We do not
-//! spawn harness binaries.
+//! the address or `P5_LOCAL_RECV=1`. Loopback inbound (`POST /p5/msg`) reuses
+//! [`receive_msg`]. We do not spawn harness binaries.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -12,7 +11,7 @@ use p5_core::{
     default_root, DeliveryMode, DeliveryStatus, Homes, Mailbox, MailboxError, PeerType, PostalAddr,
     ReceiveRequest, Roster, SendRequest, StoreError, Trust, EXIT_GATED, MAX_BODY_BYTES,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::session_map::SessionMap;
 
@@ -39,7 +38,7 @@ pub struct MsgRequest {
 }
 
 /// PRD §6 `--json` object. `success` matches exit 0.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MsgResponse {
     pub success: bool,
     pub id: Option<String>,
@@ -137,7 +136,7 @@ pub struct SmContext {
     pub sessions: SessionMap,
     /// `P5_LOCAL_RECV=1` — treat dest as this box even without a HomeRow.
     pub local_recv: bool,
-    /// Non-empty `P5_DEV_SECRET` — same-box pairing skip (future listener).
+    /// Non-empty `P5_DEV_SECRET` — loopback inbound pairing skip.
     pub dev_secret: bool,
 }
 
@@ -430,6 +429,11 @@ impl From<MailboxError> for ReceiveError {
     }
 }
 
+/// Inbound entry for the resident agent. Same cascade as [`receive_session`].
+pub fn receive_msg(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome, ReceiveError> {
+    receive_session(ctx, inbound)
+}
+
 /// Session receiver SM. Attach leftover + real wake/spawn are not in this PR.
 pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome, ReceiveError> {
     if !pairing_allowed(ctx, inbound) {
@@ -501,8 +505,7 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
 }
 
 fn pairing_allowed(ctx: &SmContext, inbound: &Inbound) -> bool {
-    // Same-box local is the only inbound path this PR. Dev secret is the
-    // documented escape for a future loopback listener.
+    // Local dest or a configured loopback secret; pairing-key proof is later.
     if ctx.dest_is_local(&inbound.to) || ctx.dev_secret {
         return true;
     }

@@ -12,6 +12,11 @@ clap.workspace = true
 p5-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+signal-hook = "0.3"
+tiny_http = { version = "0.12", default-features = false, features = ["ssl-rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 serde_json.workspace = true
