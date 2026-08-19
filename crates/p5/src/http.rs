@@ -344,22 +344,28 @@ pub fn serve_http(server: Arc<Server>, state: Arc<AgentState>) {
                 let is_msg = method == "POST" && path == "/p5/msg";
                 if is_msg {
                     if let Err(out) = authorize_msg(&state, &headers) {
-                        respond(request, out);
+                        reject_skip_entity(request, out);
                         continue;
                     }
                     if let Err(out) = check_post_length(request.body_length()) {
-                        respond(request, out);
+                        reject_skip_entity(request, out);
                         continue;
                     }
                 }
                 let cap = match request.body_length() {
                     Some(n) if n > MAX_POST_BYTES => {
-                        respond(request, HttpOut::json(413, json!({"error":"too_large"})));
+                        reject_skip_entity(
+                            request,
+                            HttpOut::json(413, json!({"error":"too_large"})),
+                        );
                         continue;
                     }
                     Some(n) => n,
                     None if is_msg => {
-                        respond(request, HttpOut::json(413, json!({"error":"too_large"})));
+                        reject_skip_entity(
+                            request,
+                            HttpOut::json(413, json!({"error":"too_large"})),
+                        );
                         continue;
                     }
                     None => 0,
@@ -390,11 +396,43 @@ fn check_post_length(len: Option<usize>) -> Result<usize, HttpOut> {
     }
 }
 
+/// Consume the declared entity so keep-alive cannot parse leftover JSON as the next request.
+fn drain_entity(request: &mut tiny_http::Request) {
+    let cap = request.body_length().unwrap_or(0).min(MAX_POST_BYTES) as u64;
+    if cap == 0 {
+        return;
+    }
+    let mut limited = request.as_reader().take(cap);
+    let _ = std::io::copy(&mut limited, &mut std::io::sink());
+}
+
+fn close_header() -> Header {
+    Header::from_bytes(&b"Connection"[..], &b"close"[..]).expect("header")
+}
+
+fn reject_skip_entity(mut request: tiny_http::Request, out: HttpOut) {
+    let declared = request.body_length();
+    drain_entity(&mut request);
+    match declared {
+        Some(n) if n <= MAX_POST_BYTES => respond(request, out),
+        _ => respond_close(request, out),
+    }
+}
+
 fn respond(request: tiny_http::Request, out: HttpOut) {
     let _ = request.respond(
         Response::from_string(out.body)
             .with_status_code(StatusCode(out.status))
             .with_header(json_header()),
+    );
+}
+
+fn respond_close(request: tiny_http::Request, out: HttpOut) {
+    let _ = request.respond(
+        Response::from_string(out.body)
+            .with_status_code(StatusCode(out.status))
+            .with_header(json_header())
+            .with_header(close_header()),
     );
 }
 
@@ -428,6 +466,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{IpAddr, TcpStream};
     use std::thread;
+    use std::time::Duration;
 
     use p5_core::{HomeRow, Homes, Mailbox, ToolFlags};
 
@@ -739,6 +778,77 @@ mod tests {
         );
         let unauthorized = raw_http(addr, &bad);
         assert!(unauthorized.contains("401"), "{unauthorized}");
+
+        stop.stop.store(true, Ordering::Relaxed);
+        server.unblock();
+        serve.join().unwrap();
+    }
+
+    fn read_one_http(s: &mut TcpStream) -> String {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(s);
+        let mut headers = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            headers.push_str(&line);
+            if line == "\r\n" || line == "\n" || line.is_empty() {
+                break;
+            }
+        }
+        let len = headers
+            .lines()
+            .find_map(|l| {
+                l.split_once(':').and_then(|(k, v)| {
+                    k.eq_ignore_ascii_case("content-length")
+                        .then_some(v.trim().parse::<usize>().unwrap_or(0))
+                })
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; len];
+        if len > 0 {
+            reader.read_exact(&mut body).unwrap();
+        }
+        headers.push_str(&String::from_utf8_lossy(&body));
+        headers
+    }
+
+    #[test]
+    fn unauthorized_post_drains_entity_for_keepalive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut homes = Homes::new();
+        homes.insert(home_row()).unwrap();
+        homes.save(tmp.path()).unwrap();
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (server, addr) = bind_http(bind, None).unwrap();
+        let state = Arc::new(AgentState::new(tmp.path(), addr, Some("s3cret".into())));
+        let stop = Arc::clone(&state);
+        let server = Arc::new(server);
+        let serve = {
+            let server = Arc::clone(&server);
+            let state = Arc::clone(&state);
+            thread::spawn(move || serve_http(server, state))
+        };
+
+        let body = String::from_utf8(sample_msg(SAMPLE_ID)).unwrap();
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let req = format!(
+            "POST /p5/msg HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nx-p5-dev-secret: wrong\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        let first = read_one_http(&mut s);
+        assert!(first.contains("401"), "{first}");
+
+        s.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let second = read_one_http(&mut s);
+        assert!(second.contains("200"), "{second}");
+        assert!(
+            second.contains("\"ok\":true") || second.contains("\"ok\": true"),
+            "{second}"
+        );
 
         stop.stop.store(true, Ordering::Relaxed);
         server.unblock();

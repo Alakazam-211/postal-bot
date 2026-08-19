@@ -267,8 +267,8 @@ fn exe_looks_like_p5(path: &Path) -> bool {
 }
 
 fn args_have_agent_run(args: &[String]) -> bool {
-    args.windows(2).any(|w| w[0] == "agent" && w[1] == "run")
-        || (args.iter().any(|a| a == "agent") && args.iter().any(|a| a == "run"))
+    args.get(1).map(String::as_str) == Some("agent")
+        && args.get(2).map(String::as_str) == Some("run")
 }
 
 #[cfg(target_os = "macos")]
@@ -444,5 +444,16 @@ mod tests {
             "run".into()
         ]));
         assert!(!args_have_agent_run(&["p5".into(), "status".into()]));
+        assert!(
+            !args_have_agent_run(&["p5".into(), "msg".into(), "agent".into(), "run".into()]),
+            "body/handle tokens must not look like the agent subcommand"
+        );
+        assert!(!args_have_agent_run(&[
+            "p5".into(),
+            "inbox".into(),
+            "agent".into(),
+            "list".into(),
+            "run".into()
+        ]));
     }
 }
