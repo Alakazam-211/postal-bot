@@ -1,3 +1,4 @@
 /target
 /.k2
 *.pdb
+node_modules/

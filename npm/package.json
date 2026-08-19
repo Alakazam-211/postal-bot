@@ -1,0 +1,37 @@
+{
+  "name": "@alakazamlabs/postal",
+  "version": "0.1.0",
+  "description": "Postal (postal.bot) — thin fetcher for the p5 Rust binary. Not a JavaScript rewrite.",
+  "license": "MIT",
+  "author": "Alakazam Labs",
+  "homepage": "https://postal.bot",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Alakazam-211/postal-bot.git",
+    "directory": "npm"
+  },
+  "bugs": {
+    "url": "https://github.com/Alakazam-211/postal-bot/issues"
+  },
+  "keywords": [
+    "postal",
+    "postal.bot",
+    "p5",
+    "alakazam"
+  ],
+  "bin": {
+    "p5": "bin/p5.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}
