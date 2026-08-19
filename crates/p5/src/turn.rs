@@ -450,7 +450,7 @@ pub fn send_prompt(
     agent_id: &str,
     nonce: &str,
 ) -> Result<(), TurnNetError> {
-    let prompt = format!("[from {from}] [p5] {body}");
+    let prompt = format!("[from {from}] {body}");
     let payload = json!({
         "agentId": agent_id,
         "prompt": prompt,
@@ -811,10 +811,11 @@ mod tests {
         assert_eq!(prompts[0]["agentId"], "sand-1");
         assert_eq!(
             prompts[0]["prompt"],
-            "[from alice::acme.postal.bot] [p5] ship it"
+            "[from alice::acme.postal.bot] ship it"
         );
         assert_eq!(prompts[0]["clientNonce"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[k2g]"));
+        assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[p5]"));
         let auths = sand.auths.lock().unwrap();
         assert!(
             auths.iter().any(|a| a.as_deref() == Some("test-token")),
@@ -915,7 +916,7 @@ mod tests {
         assert_eq!(prompts[0]["agentId"], uuid);
         assert_eq!(
             prompts[0]["prompt"],
-            "[from postal-bot::acme.postal.bot] [p5] hello grok"
+            "[from postal-bot::acme.postal.bot] hello grok"
         );
     }
 

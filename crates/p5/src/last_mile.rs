@@ -203,7 +203,13 @@ fn knock_k2(client: &K2MsgClient, knock: &Knock) -> Result<(), LastMileError> {
     let req = KnockRequest {
         // Absolute cwd is what `k2 msg` accepts (name/handle often ≠ Postal handle).
         workspace: k2_workspace(knock),
-        text: knock.text.clone(),
+        // Live inject is the mail body. k2 already stamps [from …].
+        // Do not send "Open: p5 inbox read" — Postal is its own tray.
+        text: if knock.body.trim().is_empty() {
+            knock.title.clone()
+        } else {
+            knock.body.clone()
+        },
         from: knock.from.clone(),
         wake: knock.wake,
         project: knock.cwd.clone(),
@@ -534,9 +540,10 @@ mod tests {
         assert_eq!(prompts[0]["agentId"], uuid);
         assert_eq!(
             prompts[0]["prompt"],
-            "[from postal-bot::acme.postal.bot] [p5] hello grok"
+            "[from postal-bot::acme.postal.bot] hello grok"
         );
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[k2g]"));
+        assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[p5]"));
         let auths = sand.auths.lock().unwrap();
         assert!(auths.iter().any(|a| a.as_deref() == Some("secret")));
     }

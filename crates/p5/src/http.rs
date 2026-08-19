@@ -1109,7 +1109,7 @@ mod tests {
         assert_eq!(sand.prompts.lock().unwrap().len(), 1);
         assert_eq!(
             sand.prompts.lock().unwrap()[0]["prompt"],
-            "[from jarvis::other.postal.bot] [p5] hello scout"
+            "[from jarvis::other.postal.bot] hello scout"
         );
 
         let down = crate::turn::MockSand::spawn(503, 200);

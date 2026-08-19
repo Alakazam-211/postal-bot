@@ -290,7 +290,7 @@ impl From<StoreError> for SmError {
 /// Stamp used on live inject (P5-7a). Inbox covers keep the original body.
 #[allow(dead_code)]
 pub fn fabric_stamp(from: &PostalAddr, body: &str) -> String {
-    format!("[from {from}] [p5] {body}")
+    format!("[from {from}] {body}")
 }
 
 /// Sender SM: parse → sent queued first → local receiver or live HTTPS.
@@ -1316,8 +1316,9 @@ mod tests {
     #[test]
     fn fabric_stamp_is_p5_not_k2g() {
         let text = fabric_stamp(&addr("alice::acme.postal.bot"), "ship it");
-        assert_eq!(text, "[from alice::acme.postal.bot] [p5] ship it");
+        assert_eq!(text, "[from alice::acme.postal.bot] ship it");
         assert!(!text.contains("k2g"));
+        assert!(!text.contains("[p5]"));
     }
 
     #[test]
@@ -1363,10 +1364,9 @@ mod tests {
         assert_eq!(knocks[0].workspace, "/srv/scout");
         assert_eq!(knocks[0].from, "alice::acme.postal.bot");
         assert!(knocks[0].wake);
-        assert_eq!(
-            knocks[0].text,
-            "[p5:01ARZ3NDEKTSV4RRFFQ69G5FAV] hello scout\nOpen: p5 inbox read 01ARZ3NDEKTSV4RRFFQ69G5FAV"
-        );
+        assert_eq!(knocks[0].text, "hello scout");
+        assert!(!knocks[0].text.contains("p5 inbox"));
+        assert!(!knocks[0].text.contains("[p5:"));
         assert_eq!(knocks[0].project, "/srv/scout");
     }
 
@@ -1511,7 +1511,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert_eq!(
             prompts[0]["prompt"],
-            "[from alice::acme.postal.bot] [p5] hi"
+            "[from alice::acme.postal.bot] hi"
         );
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("k2g"));
         assert_eq!(prompts[0]["agentId"], "sand-1");

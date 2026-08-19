@@ -279,8 +279,8 @@ Built-in  grok  (Grok Bot / Sand, usually type turn)
         3. POST listAgents name match (handle grok → agent \"Grok\")
         4. ~/sand-data/agents/<uuid>/profile.json
         5. GET /health activeAgentId
-  Prompt stamp: [from handle::host] [p5] <body>
-        Postal stamp is [p5]. Do not send unauthenticated (that is HTTP 401).
+  Prompt: [from handle::host] <body>
+        No [p5] tag — Postal is its own product. Do not send unauthenticated (HTTP 401).
   Mail is already in ~/.postal/inbox even if sendPrompt fails.
   One sendPrompt = one billed Grok Bot turn. Rate-limit 12/hour/peer.
 
@@ -288,7 +288,7 @@ Built-in  k2  (K2 workspace, type session)
   POST /cli/workspace/msg on the local k2-daemon (same route as k2 msg).
   Auth: ~/.k2/daemon.port + daemon.token (P5_K2_MSG=0 disables)
   Target: homes.cwd if it is an absolute path, else the Postal handle.
-  Knock text: [p5:<id>] <title>\\nOpen: p5 inbox read <id>
+  Knock text: the mail body (k2 stamps [from <addr>]). Tray stays ~/.postal/inbox.
   wake=true unless the sender passed --no-wake.
 
 Exec plugin  (anything else)
