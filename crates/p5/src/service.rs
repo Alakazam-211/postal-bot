@@ -137,14 +137,21 @@ pub fn launchd_plist_text(program: &Path, p5_home: Option<&Path>) -> String {
 /// systemd user unit `p5-agent.service`. ExecStart is `p5 agent run`.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn systemd_unit_text(program: &Path, p5_home: Option<&Path>) -> String {
+    let bindir = program
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "/usr/bin".into());
     let program = systemd_quote(&program.to_string_lossy());
-    let env = match p5_home {
-        Some(home) => {
-            let pair = format!("P5_HOME={}", home.display());
-            format!("Environment={}\n", systemd_quote(&pair))
-        }
-        None => String::new(),
-    };
+    let mut env = format!(
+        "Environment={}\n",
+        systemd_quote(&format!("PATH={bindir}:/usr/local/bin:/usr/bin:/bin"))
+    );
+    if let Some(home) = p5_home {
+        env.push_str(&format!(
+            "Environment={}\n",
+            systemd_quote(&format!("P5_HOME={}", home.display()))
+        ));
+    }
     format!(
         "\
 [Unit]
@@ -197,8 +204,34 @@ pub fn login(no_start: bool) -> Result<PathBuf, ServiceError> {
     if no_start || skip_start() {
         return Ok(path);
     }
-    start_service(&path)?;
+    if start_service(&path).is_err() {
+        spawn_detached_agent()?;
+    }
     Ok(path)
+}
+
+fn spawn_detached_agent() -> Result<(), ServiceError> {
+    use std::process::{Command, Stdio};
+
+    let program = program_path();
+    let log_path = p5_core::default_root().join("agent.log");
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let log = fs::File::create(&log_path)?;
+    let err = log.try_clone()?;
+    let mut cmd = Command::new(&program);
+    if let Some(dir) = program.parent() {
+        let rest = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        cmd.env("PATH", format!("{}:{rest}", dir.display()));
+    }
+    cmd.args(["agent", "run"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err))
+        .spawn()
+        .map_err(|e| ServiceError::Start(format!("could not start p5 agent: {e}")))?;
+    Ok(())
 }
 
 pub fn unit_path(home: &Path) -> PathBuf {
@@ -343,6 +376,7 @@ mod tests {
         assert_eq!(SYSTEMD_UNIT_NAME, "p5-agent.service");
         let text = systemd_unit_text(Path::new("/usr/local/bin/p5"), None);
         assert!(text.contains("ExecStart=/usr/local/bin/p5 agent run"));
+        assert!(text.contains("PATH=/usr/local/bin:"));
         assert!(text.contains("postal.bot"));
         assert!(text.contains("p5"));
         assert!(!text.to_ascii_lowercase().contains("kessel"));

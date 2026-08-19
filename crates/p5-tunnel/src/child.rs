@@ -26,6 +26,15 @@ pub fn resolve_frpc(bin: &FrpcBinary) -> Result<PathBuf, String> {
             }
         }
         FrpcBinary::Auto => {
+            if let Some(found) = beside_p5() {
+                return Ok(found);
+            }
+            if let Some(home) = std::env::var_os("HOME") {
+                let bundled = PathBuf::from(home).join(".postal/bin/frpc");
+                if is_executable(&bundled) {
+                    return Ok(bundled);
+                }
+            }
             if let Some(found) = which_in_path("frpc") {
                 return Ok(found);
             }
@@ -35,12 +44,19 @@ pub fn resolve_frpc(bin: &FrpcBinary) -> Result<PathBuf, String> {
                 }
             }
             Err(
-                "frpc not installed: Postal tunnel needs the frp client on PATH \
-                 (or set P5_FRPC)"
+                "frpc not found next to p5 or on PATH. Re-run \
+                 https://www.postal.bot/install.sh (it installs frpc beside p5)."
                     .into(),
             )
         }
     }
+}
+
+fn beside_p5() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let cand = dir.join("frpc");
+    is_executable(&cand).then_some(cand)
 }
 
 fn common_frpc_locations() -> Vec<PathBuf> {
@@ -211,6 +227,26 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    #[test]
+    #[test]
+    fn auto_resolve_finds_beside_p5_dir_via_postal_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let bin = home.join(".postal/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let frpc = bin.join("frpc");
+        std::fs::write(&frpc, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&frpc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let got = resolve_frpc(&FrpcBinary::Auto).expect("postal bin frpc");
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(got, frpc);
     }
 
     #[test]

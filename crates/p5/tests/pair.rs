@@ -282,6 +282,7 @@ fn view_opt(
         status: status.into(),
         epoch: 0,
         public_key_pem: pem.map(str::to_string),
+        public_key_pem_camel: None,
         fingerprint: pem.and_then(|p| fingerprint_spki_pem(p).ok()),
     }
 }

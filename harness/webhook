@@ -1,0 +1,18 @@
+#!/bin/sh
+# Example last-mile plugin: POST Knock JSON v1 to $P5_WEBHOOK_URL.
+# Install: cp harness/webhook ~/.postal/harness/webhook && chmod 755 ~/.postal/harness/webhook
+# Then set homes.harness = "webhook".
+set -eu
+[ "${1:-}" = "knock" ] || exit 2
+[ -n "${P5_WEBHOOK_URL:-}" ] || {
+  echo '{"ok":false,"reason":"P5_WEBHOOK_URL unset"}'
+  exit 1
+}
+body=$(cat)
+code=$(printf '%s' "$body" | curl -sS -o /dev/null -w '%{http_code}' \
+  --max-time 20 -X POST "$P5_WEBHOOK_URL" \
+  -H 'Content-Type: application/json' --data-binary @-)
+case "$code" in
+  2*) echo '{"ok":true}' ;;
+  *) echo "{\"ok\":false,\"reason\":\"HTTP $code\"}"; exit 1 ;;
+esac

@@ -107,16 +107,69 @@ pub fn run_login(token: String) -> Result<(), PairError> {
     Ok(())
 }
 
-pub fn run_me(from: Option<String>, typ: Option<String>) -> Result<(), PairError> {
+pub fn run_me(from: Option<String>, typ: Option<String>, print_pem: bool) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let published = publish_handles(&ctx, from.as_deref(), typ.as_deref())?;
     if published.is_empty() {
         return Err(PairError::NoIdentity);
     }
+    let pem = if print_pem {
+        Some(ctx.public_pem()?)
+    } else {
+        None
+    };
     for (addr, fp) in published {
         println!("{addr}");
         println!("fingerprint  {fp}");
+        if let Some(pem) = pem.as_deref() {
+            print!("{pem}");
+            if !pem.ends_with('\n') {
+                println!();
+            }
+        }
     }
+    Ok(())
+}
+
+/// Fill a peer's SPKI on the local roster. Plane `GET /postal/pairs` omits keys.
+pub fn run_set_key(addr: String, pem_path: Option<String>) -> Result<(), PairError> {
+    let ctx = PairCtx::load()?;
+    let peer = parse_addr(&addr, ctx.default_host())?;
+    let pem_raw = match pem_path.as_deref() {
+        None | Some("-") => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| PairError::Store(StoreError::Io(e)))?;
+            buf
+        }
+        Some(path) => std::fs::read_to_string(path).map_err(|e| PairError::Store(StoreError::Io(e)))?,
+    };
+    if pem_raw.contains("PRIVATE") {
+        return Err(PairError::PrivateKey);
+    }
+    let pem = pem_raw.trim().to_string();
+    if pem.is_empty() {
+        return Err(PairError::MissingPem);
+    }
+    let fp = fingerprint_spki_pem(&pem)?;
+    let mut roster = Roster::load(&ctx.root)?;
+    let existing = roster
+        .get(&peer)
+        .cloned()
+        .ok_or_else(|| PairError::NotFound(peer.to_string()))?;
+    roster.merge_peer(
+        peer.clone(),
+        Some(existing.typ),
+        Some(fp.clone()),
+        Some(pem),
+        existing.trust,
+        existing.pair_id,
+    );
+    roster.save(&ctx.root)?;
+    println!("{peer}");
+    println!("fingerprint  {fp}");
     Ok(())
 }
 
@@ -172,6 +225,20 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
     client.accept(&id, &sas)?;
     refresh_roster(&client, &ctx.root, &ctx.configured_addrs(None))?;
     println!("ok");
+    if let Some(view) = client.list_pairs(false).ok().as_ref().and_then(|l| l.find(&id)) {
+        if let Some(peer) = peer_of(&ctx, view) {
+            if Roster::load(&ctx.root)
+                .ok()
+                .and_then(|r| r.get(&peer).map(|e| e.public_key_pem.clone()))
+                .unwrap_or_default()
+                .is_empty()
+            {
+                eprintln!(
+                    "friend saved, but the plane did not return {peer}'s public key. Ask them: p5 me --pem"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -277,12 +344,11 @@ fn apply_view(roster: &mut Roster, selves: &BTreeSet<PostalAddr>, view: &PairVie
     // fromTyp / from-side SPKI describe `from` only. Never copy our typ or key onto `to`.
     let typ = if peer_is_from { view.from_typ } else { None };
     let (fp, pem) = if peer_is_from {
-        let fp = view.fingerprint.clone().or_else(|| {
-            view.public_key_pem
-                .as_deref()
-                .and_then(|pem| fingerprint_spki_pem(pem).ok())
+        let pem = view.public_pem().map(str::to_string);
+        let fp = view.fingerprint.clone().filter(|s| !s.trim().is_empty()).or_else(|| {
+            pem.as_deref().and_then(|p| fingerprint_spki_pem(p).ok())
         });
-        (fp, view.public_key_pem.clone())
+        (fp, pem)
     } else {
         (None, None)
     };
@@ -314,7 +380,7 @@ fn local_sas(ctx: &PairCtx, view: &PairView) -> Option<LocalSas> {
     let peer = peer_of(ctx, view)?;
     let from = parse_view_addr(&view.from);
     let view_pem = if from.as_ref() == Some(&peer) {
-        view.public_key_pem.clone().filter(|s| !s.is_empty())
+        view.public_pem().map(str::to_string)
     } else {
         None
     };
@@ -401,6 +467,16 @@ fn print_show(ctx: &PairCtx, view: &PairView) -> Result<(), PairError> {
         (None, Some(p)) => println!("sas     {p}"),
         (None, None) => println!("sas     —"),
     }
+    if let Some(peer) = peer_of(ctx, view) {
+        if Roster::load(&ctx.root)
+            .ok()
+            .and_then(|r| r.get(&peer).map(|e| e.public_key_pem.clone()))
+            .unwrap_or_default()
+            .is_empty()
+        {
+            println!("roster_key  missing (plane list omits PEM; p5 pair set-key {peer})");
+        }
+    }
     Ok(())
 }
 
@@ -431,6 +507,7 @@ pub enum PairError {
     BadTyp(TypeParseError),
     NoIdentity,
     NoSas,
+    MissingPem,
     NotFound(String),
     Gated,
     PrivateKey,
@@ -440,7 +517,7 @@ impl PairError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Gated => EXIT_GATED,
-            Self::BadAddress(_) | Self::BadTyp(_) => EXIT_USAGE,
+            Self::BadAddress(_) | Self::BadTyp(_) | Self::MissingPem => EXIT_USAGE,
             Self::Plane(e) => e.exit_code(),
             _ => EXIT_ERROR,
         }
@@ -459,6 +536,7 @@ impl fmt::Display for PairError {
                 "no local identity; set P5_FROM or add a homes row (handle::sub.postal.bot)",
             ),
             Self::NoSas => f.write_str("no SAS; pass --sas after p5 pair show"),
+            Self::MissingPem => f.write_str("empty public key PEM"),
             Self::NotFound(id) => write!(f, "pair not found: {id}"),
             Self::Gated => write!(f, "{REASON_GATED}"),
             Self::PrivateKey => f.write_str("refusing to upload a private key"),

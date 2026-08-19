@@ -2,3 +2,5 @@
 /.k2
 *.pdb
 node_modules/
+/web/releases/latest/*.tar.gz
+/web/releases/latest/SHA256SUMS

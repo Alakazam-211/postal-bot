@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use p5_core::default_root;
 
 use crate::control::{self, pid_path, sock_path, StatusReport};
-use crate::http::{bind_from_env, bind_http, load_ssl_from_env, serve_http, AgentState, BindError};
+use crate::http::{bind_from_env, bind_http, load_ssl, serve_http, AgentState, BindError};
 use crate::service::{self, ServiceError};
 
 const STOP_GRACE: Duration = Duration::from_secs(2);
@@ -66,6 +66,20 @@ pub fn env_secret() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Login already wrote the Connect token. Don't make the user export P5_TUNNEL.
+fn arm_tunnel_env(root: &Path) {
+    if std::env::var_os("P5_CONNECT_TOKEN").is_none() {
+        if let Ok(cfg) = p5_plane::PlaneConfig::load(root) {
+            if let Some(t) = cfg.token.filter(|s| !s.is_empty()) {
+                std::env::set_var("P5_CONNECT_TOKEN", t);
+            }
+        }
+    }
+    if std::env::var_os("P5_TUNNEL").is_none() && std::env::var_os("P5_CONNECT_TOKEN").is_some() {
+        std::env::set_var("P5_TUNNEL", "1");
+    }
+}
+
 pub fn run() -> Result<(), AgentError> {
     run_at(&default_root())
 }
@@ -80,8 +94,17 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
         }
     }
     let bind = bind_from_env()?;
-    let ssl = load_ssl_from_env().map_err(AgentError::Tls)?;
-    let (server, local) = bind_http(bind, ssl).map_err(AgentError::Http)?;
+    arm_tunnel_env(root);
+    // Issue the leaf before bind so loopback can speak TLS for passthrough.
+    let mut tunnel = p5_tunnel::start_from_env(root, bind.port());
+    let ssl = load_ssl(root).map_err(AgentError::Tls)?;
+    let (server, local) = match bind_http(bind, ssl) {
+        Ok(v) => v,
+        Err(err) => {
+            tunnel.stop();
+            return Err(AgentError::Http(err));
+        }
+    };
     let state = Arc::new(AgentState::new(root, local, env_secret()));
     let listener = match control::bind_uds(&sock_path(root)) {
         Ok(l) => l,
@@ -123,8 +146,6 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
         None
     };
 
-    // frpc is this process's child. Broker miss still serves loopback.
-    let mut tunnel = p5_tunnel::start_from_env(root, local.port());
     state.tunnel_up.store(tunnel.is_up(), Ordering::Relaxed);
     if tunnel.is_up() {
         eprintln!("postal tunnel up");

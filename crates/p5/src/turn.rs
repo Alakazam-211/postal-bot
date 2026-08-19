@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpStream};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use p5_core::PostalAddr;
@@ -15,6 +16,9 @@ pub const DEFAULT_TURN_HEALTH: &str = "http://127.0.0.1:1340/health";
 pub const TURN_LIMIT_PER_HOUR: usize = 12;
 const TURN_WINDOW: Duration = Duration::from_secs(60 * 60);
 const TURN_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
+/// k2g `sand_api(..., timeout=90)` for sendPrompt.
+const SEND_PROMPT_TIMEOUT: Duration = Duration::from_secs(90);
+const SAND_API_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnConfig {
@@ -41,11 +45,21 @@ impl TurnConfig {
     }
 
     pub fn from_env() -> Self {
+        let gw = load_sand_gateway();
         let health = std::env::var("P5_TURN_HEALTH")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| DEFAULT_TURN_HEALTH.to_string());
+            .unwrap_or_else(|| {
+                let host = gw
+                    .host
+                    .as_deref()
+                    .filter(|h| host_is_loopback(h))
+                    .unwrap_or("127.0.0.1");
+                gw.port
+                    .map(|p| format!("http://{host}:{p}/health"))
+                    .unwrap_or_else(|| DEFAULT_TURN_HEALTH.to_string())
+            });
         let prompt = std::env::var("P5_TURN_PROMPT")
             .ok()
             .map(|s| s.trim().to_string())
@@ -59,7 +73,8 @@ impl TurnConfig {
         let token = std::env::var("P5_TURN_TOKEN")
             .ok()
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or(gw.token);
         Self {
             health_url: health,
             prompt_url: prompt,
@@ -67,20 +82,277 @@ impl TurnConfig {
             token,
         }
     }
+}
 
-    pub fn resolve_agent_id(&self, fallback: Option<&str>) -> String {
-        if !self.agent_id.is_empty() {
-            return self.agent_id.clone();
-        }
-        fallback.unwrap_or("").to_string()
+struct SandGateway {
+    port: Option<u16>,
+    host: Option<String>,
+    token: Option<String>,
+}
+
+fn sand_data_root() -> Option<PathBuf> {
+    std::env::var("SAND_DATA_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("sand-data")))
+}
+
+/// Same file k2g reads (`$SAND_DATA_ROOT/gateway.json`, default `~/sand-data/gateway.json`).
+fn load_sand_gateway() -> SandGateway {
+    let empty = SandGateway {
+        port: None,
+        host: None,
+        token: None,
+    };
+    let Some(path) = sand_data_root().map(|r| r.join("gateway.json")) else {
+        return empty;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return empty;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return empty;
+    };
+    let token = v
+        .get("token")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let port = v
+        .get("port")
+        .and_then(|x| x.as_u64())
+        .and_then(|n| u16::try_from(n).ok());
+    let host = v
+        .get("host")
+        .and_then(|x| x.as_str())
+        .map(rewrite_gateway_host)
+        .filter(|h| !h.is_empty());
+    SandGateway { port, host, token }
+}
+
+fn rewrite_gateway_host(host: &str) -> String {
+    let host = host.trim();
+    if host.is_empty() || host == "0.0.0.0" || host == "::" || host == "[::]" {
+        return "127.0.0.1".into();
+    }
+    host.trim_matches(|c| c == '[' || c == ']').to_string()
+}
+
+fn api_url(health: &str, command: &str) -> String {
+    match parse_http_url(health) {
+        Ok(u) => format!("http://{}:{}/api/{command}", u.host, u.port),
+        Err(_) => format!("http://127.0.0.1:1340/api/{command}"),
     }
 }
 
-pub fn prompt_url_from_health(health: &str) -> String {
-    match parse_http_url(health) {
-        Ok(u) => format!("http://{}:{}/api/sendPrompt", u.host, u.port),
-        Err(_) => "http://127.0.0.1:1340/api/sendPrompt".into(),
+/// k2g `sand_api`: always POST `/api/{command}` with Bearer. Token required.
+fn sand_api(
+    cfg: &TurnConfig,
+    command: &str,
+    body: &serde_json::Value,
+    timeout: Duration,
+) -> Result<(u16, Vec<u8>), TurnNetError> {
+    let token = cfg
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            TurnNetError::Auth(
+                "Grok Bot gateway token missing; need ~/sand-data/gateway.json (or P5_TURN_TOKEN)"
+                    .into(),
+            )
+        })?;
+    let url = api_url(&cfg.health_url, command);
+    let payload = body.to_string();
+    http_exchange("POST", &url, Some(payload.as_bytes()), Some(token), timeout)
+}
+
+#[derive(Debug, Clone)]
+pub struct SandAgent {
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+}
+
+/// `POST /api/listAgents` then disk profiles under `sand-data/agents/<uuid>/`.
+pub fn list_agents(cfg: &TurnConfig) -> Result<Vec<SandAgent>, TurnNetError> {
+    let (status, body) = sand_api(cfg, "listAgents", &json!({}), SAND_API_TIMEOUT)?;
+    if status != 200 {
+        return Err(TurnNetError::Status(status));
     }
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap_or_default();
+    let mut agents = Vec::new();
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        if id.is_empty() {
+            continue;
+        }
+        agents.push(SandAgent {
+            id: id.to_string(),
+            name: row
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            active: row
+                .get("isActive")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+        });
+    }
+    merge_disk_agents(&mut agents);
+    Ok(agents)
+}
+
+fn merge_disk_agents(agents: &mut Vec<SandAgent>) {
+    let Some(root) = sand_data_root() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(root.join("agents")) else {
+        return;
+    };
+    let have: std::collections::HashSet<String> = agents.iter().map(|a| a.id.clone()).collect();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if !looks_like_agent_uuid(&id) || have.contains(&id) {
+            continue;
+        }
+        let name = std::fs::read_to_string(path.join("profile.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| {
+                v.get("name")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| id.chars().take(8).collect());
+        agents.push(SandAgent {
+            id,
+            name,
+            active: false,
+        });
+    }
+}
+
+pub fn looks_like_agent_uuid(s: &str) -> bool {
+    let s = s.trim();
+    let b = s.as_bytes();
+    b.len() == 36
+        && b[8] == b'-'
+        && b[13] == b'-'
+        && b[18] == b'-'
+        && b[23] == b'-'
+        && s.bytes()
+            .enumerate()
+            .all(|(i, c)| matches!(i, 8 | 13 | 18 | 23) || c.is_ascii_hexdigit())
+}
+
+/// Sand addressing is UUID / listAgents, never a Postal handle.
+///
+/// Order: `P5_TURN_AGENT_ID`, homes `session_id` if UUID, listAgents name
+/// match (k2g), disk profiles, then `GET /health` `activeAgentId`.
+pub fn resolve_sand_agent(
+    cfg: &TurnConfig,
+    session_id: Option<&str>,
+    handle: Option<&str>,
+) -> Result<String, TurnNetError> {
+    let explicit = cfg.agent_id.trim();
+    if !explicit.is_empty() {
+        if looks_like_agent_uuid(explicit) {
+            return Ok(explicit.to_string());
+        }
+        if let Some(id) = match_listed_agent(cfg, explicit) {
+            return Ok(id);
+        }
+        return Ok(explicit.to_string());
+    }
+    if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if looks_like_agent_uuid(sid) {
+            return Ok(sid.to_string());
+        }
+        if let Some(id) = match_listed_agent(cfg, sid) {
+            return Ok(id);
+        }
+    }
+    if let Some(h) = handle.map(str::trim).filter(|s| !s.is_empty()) {
+        if looks_like_agent_uuid(h) {
+            return Ok(h.to_string());
+        }
+        if let Some(id) = match_listed_agent(cfg, h) {
+            return Ok(id);
+        }
+    }
+    if let Some(id) = active_agent_id(cfg) {
+        return Ok(id);
+    }
+    Err(TurnNetError::Agent(
+        "no Sand UUID; POST /api/listAgents with Bearer from gateway.json (handle is not an agentId)"
+            .into(),
+    ))
+}
+
+fn match_listed_agent(cfg: &TurnConfig, needle: &str) -> Option<String> {
+    let needle = needle.to_ascii_lowercase();
+    let agents = list_agents(cfg).ok()?;
+    let mut exact = Vec::new();
+    let mut prefix = Vec::new();
+    for a in agents {
+        let name = a.name.to_ascii_lowercase();
+        let id = a.id.to_ascii_lowercase();
+        if id == needle || name == needle {
+            exact.push(a);
+        } else if !needle.is_empty() && (name.starts_with(&needle) || id.starts_with(&needle)) {
+            prefix.push(a);
+        }
+    }
+    let pool = if !exact.is_empty() { exact } else { prefix };
+    if pool.len() == 1 {
+        return Some(pool[0].id.clone());
+    }
+    let live: Vec<_> = pool.iter().filter(|a| a.active).collect();
+    if live.len() == 1 {
+        return Some(live[0].id.clone());
+    }
+    None
+}
+
+/// `GET /health` `activeAgentId` (the live Grok Bot). Health is public; Bearer optional.
+pub fn active_agent_id(cfg: &TurnConfig) -> Option<String> {
+    let (status, body) = http_exchange(
+        "GET",
+        &cfg.health_url,
+        None,
+        cfg.token.as_deref(),
+        TURN_HTTP_TIMEOUT,
+    )
+    .ok()?;
+    if status != 200 {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    v.get("activeAgentId")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub fn prompt_url_from_health(health: &str) -> String {
+    api_url(health, "sendPrompt")
 }
 
 /// Sliding window: 12 successful turns / hour / sending peer.
@@ -139,12 +411,16 @@ pub enum TurnNetError {
     Url(String),
     Connect(String),
     Status(u16),
+    Auth(String),
+    Agent(String),
 }
 
 impl std::fmt::Display for TurnNetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Url(msg) | Self::Connect(msg) => f.write_str(msg),
+            Self::Url(msg) | Self::Connect(msg) | Self::Auth(msg) | Self::Agent(msg) => {
+                f.write_str(msg)
+            }
             Self::Status(code) => write!(f, "turn gateway HTTP {code}"),
         }
     }
@@ -153,7 +429,13 @@ impl std::fmt::Display for TurnNetError {
 impl std::error::Error for TurnNetError {}
 
 pub fn health_up(cfg: &TurnConfig) -> Result<(), TurnNetError> {
-    let (status, _) = http_exchange("GET", &cfg.health_url, None, None, TURN_HTTP_TIMEOUT)?;
+    let (status, _) = http_exchange(
+        "GET",
+        &cfg.health_url,
+        None,
+        cfg.token.as_deref(),
+        TURN_HTTP_TIMEOUT,
+    )?;
     if status == 200 {
         Ok(())
     } else {
@@ -173,15 +455,8 @@ pub fn send_prompt(
         "agentId": agent_id,
         "prompt": prompt,
         "clientNonce": nonce,
-    })
-    .to_string();
-    let (status, _) = http_exchange(
-        "POST",
-        &cfg.prompt_url,
-        Some(payload.as_bytes()),
-        cfg.token.as_deref(),
-        Duration::from_secs(10),
-    )?;
+    });
+    let (status, _) = sand_api(cfg, "sendPrompt", &payload, SEND_PROMPT_TIMEOUT)?;
     if (200..300).contains(&status) {
         Ok(())
     } else {
@@ -310,14 +585,36 @@ fn parse_http_response(raw: &[u8]) -> Result<(u16, Vec<u8>), TurnNetError> {
 #[cfg(test)]
 pub(crate) struct MockSand {
     pub prompts: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    pub auths: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
     addr: std::net::SocketAddr,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    token: Option<String>,
 }
 
 #[cfg(test)]
 impl MockSand {
     pub fn spawn(health: u16, prompt: u16) -> Self {
+        Self::spawn_inner(health, prompt, Some("test-token".into()), None, false)
+    }
+
+    pub fn spawn_authed(health: u16, prompt: u16, token: &str, agents: serde_json::Value) -> Self {
+        Self::spawn_inner(
+            health,
+            prompt,
+            Some(token.to_string()),
+            Some(agents),
+            true,
+        )
+    }
+
+    fn spawn_inner(
+        health: u16,
+        prompt: u16,
+        token: Option<String>,
+        agents: Option<serde_json::Value>,
+        require_auth: bool,
+    ) -> Self {
         use std::io::Write;
         use std::net::TcpListener;
         use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -329,9 +626,15 @@ impl MockSand {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let prompts = Arc::new(Mutex::new(Vec::new()));
+        let auths = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let captured = Arc::clone(&prompts);
+        let captured_auth = Arc::clone(&auths);
         let stop_flag = Arc::clone(&stop);
+        let need = if require_auth { token.clone() } else { None };
+        let roster = agents
+            .unwrap_or_else(|| json!([{"id":"sand-1","name":"Grok","isActive":true}]));
+        let roster_body = roster.to_string();
         listener.set_nonblocking(true).unwrap();
         let handle = thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) {
@@ -340,15 +643,30 @@ impl MockSand {
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let req = read_http_request(&mut stream);
+                        let bearer = request_bearer(&req);
+                        captured_auth.lock().unwrap().push(bearer.clone());
+                        let api = req.contains("POST /api/");
                         let (status, body) = if req.starts_with("GET /health") {
-                            (health.load(Ordering::Relaxed), r#"{"ok":true}"#)
+                            (
+                                health.load(Ordering::Relaxed),
+                                r#"{"ok":true,"activeAgentId":"0e5f5de8-7619-4ba4-9753-32c5470b2346"}"#
+                                    .to_string(),
+                            )
+                        } else if api && need.as_ref().is_some_and(|t| bearer.as_deref() != Some(t.as_str()))
+                        {
+                            (401, r#"{"error":"unauthorized"}"#.to_string())
+                        } else if req.contains("POST /api/listAgents") {
+                            (200, roster_body.clone())
                         } else if req.contains("POST /api/sendPrompt") {
                             if let Some(json) = request_json(&req) {
                                 captured.lock().unwrap().push(json);
                             }
-                            (prompt.load(Ordering::Relaxed), r#"{"ok":true}"#)
+                            (
+                                prompt.load(Ordering::Relaxed),
+                                r#"{"ok":true,"accepted":true}"#.to_string(),
+                            )
                         } else {
-                            (404, r#"{"error":"not_found"}"#)
+                            (404, r#"{"error":"not_found"}"#.to_string())
                         };
                         let resp = format!(
                             "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -365,9 +683,11 @@ impl MockSand {
         });
         Self {
             prompts,
+            auths,
             addr,
             stop,
             handle: Some(handle),
+            token,
         }
     }
 
@@ -380,7 +700,7 @@ impl MockSand {
             health_url: self.url("/health"),
             prompt_url: self.url("/api/sendPrompt"),
             agent_id: "sand-1".into(),
-            token: None,
+            token: self.token.clone(),
         }
     }
 }
@@ -455,6 +775,21 @@ fn request_json(req: &str) -> Option<serde_json::Value> {
 }
 
 #[cfg(test)]
+fn request_bearer(req: &str) -> Option<String> {
+    let head = req.split("\r\n\r\n").next().or_else(|| req.split("\n\n").next())?;
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        if !k.eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        let v = v.trim();
+        v.strip_prefix("Bearer ")
+            .or_else(|| v.strip_prefix("bearer "))
+            .map(|s| s.trim().to_string())
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -479,6 +814,12 @@ mod tests {
             "[from alice::acme.postal.bot] [p5] ship it"
         );
         assert_eq!(prompts[0]["clientNonce"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[k2g]"));
+        let auths = sand.auths.lock().unwrap();
+        assert!(
+            auths.iter().any(|a| a.as_deref() == Some("test-token")),
+            "sendPrompt must send Bearer like k2g sand_api, got {auths:?}"
+        );
     }
 
     #[test]
@@ -528,5 +869,122 @@ mod tests {
             prompt_url_from_health("http://127.0.0.1:9999/health"),
             "http://127.0.0.1:9999/api/sendPrompt"
         );
+    }
+
+    #[test]
+    fn send_prompt_without_token_does_not_hit_gateway() {
+        let sand = MockSand::spawn(200, 200);
+        let mut cfg = sand.config();
+        cfg.token = None;
+        match send_prompt(
+            &cfg,
+            &"alice::acme.postal.bot".parse().unwrap(),
+            "nope",
+            "sand-1",
+            "n1",
+        ) {
+            Err(TurnNetError::Auth(msg)) => assert!(msg.contains("token"), "{msg}"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
+        assert!(sand.prompts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_agents_is_post_and_resolves_handle() {
+        let uuid = "0e5f5de8-7619-4ba4-9753-32c5470b2346";
+        let sand = MockSand::spawn_authed(
+            200,
+            200,
+            "secret",
+            json!([{"id": uuid, "name": "Grok", "isActive": true}]),
+        );
+        let mut cfg = sand.config();
+        cfg.agent_id.clear();
+        cfg.token = Some("secret".into());
+        let id = resolve_sand_agent(&cfg, None, Some("grok")).unwrap();
+        assert_eq!(id, uuid);
+        send_prompt(
+            &cfg,
+            &"postal-bot::acme.postal.bot".parse().unwrap(),
+            "hello grok",
+            &id,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        )
+        .unwrap();
+        let prompts = sand.prompts.lock().unwrap();
+        assert_eq!(prompts[0]["agentId"], uuid);
+        assert_eq!(
+            prompts[0]["prompt"],
+            "[from postal-bot::acme.postal.bot] [p5] hello grok"
+        );
+    }
+
+    #[test]
+    fn missing_bearer_on_strict_gateway_is_401() {
+        let sand = MockSand::spawn_authed(
+            200,
+            200,
+            "secret",
+            json!([{"id":"sand-1","name":"Grok","isActive":true}]),
+        );
+        let mut cfg = sand.config();
+        cfg.token = Some("wrong".into());
+        match send_prompt(
+            &cfg,
+            &"alice::acme.postal.bot".parse().unwrap(),
+            "hi",
+            "sand-1",
+            "n1",
+        ) {
+            Err(TurnNetError::Status(401)) => {}
+            other => panic!("expected Status(401), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_env_loads_gateway_json() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("gateway.json"),
+            r#"{"port":1340,"host":"0.0.0.0","token":"gw-token-1","scheme":"http"}"#,
+        )
+        .unwrap();
+        let prev_root = std::env::var_os("SAND_DATA_ROOT");
+        let prev_token = std::env::var_os("P5_TURN_TOKEN");
+        let prev_health = std::env::var_os("P5_TURN_HEALTH");
+        let prev_prompt = std::env::var_os("P5_TURN_PROMPT");
+        std::env::set_var("SAND_DATA_ROOT", dir.path());
+        std::env::remove_var("P5_TURN_TOKEN");
+        std::env::remove_var("P5_TURN_HEALTH");
+        std::env::remove_var("P5_TURN_PROMPT");
+        let cfg = TurnConfig::from_env();
+        match prev_root {
+            Some(v) => std::env::set_var("SAND_DATA_ROOT", v),
+            None => std::env::remove_var("SAND_DATA_ROOT"),
+        }
+        match prev_token {
+            Some(v) => std::env::set_var("P5_TURN_TOKEN", v),
+            None => std::env::remove_var("P5_TURN_TOKEN"),
+        }
+        match prev_health {
+            Some(v) => std::env::set_var("P5_TURN_HEALTH", v),
+            None => std::env::remove_var("P5_TURN_HEALTH"),
+        }
+        match prev_prompt {
+            Some(v) => std::env::set_var("P5_TURN_PROMPT", v),
+            None => std::env::remove_var("P5_TURN_PROMPT"),
+        }
+        assert_eq!(cfg.token.as_deref(), Some("gw-token-1"));
+        assert_eq!(cfg.health_url, "http://127.0.0.1:1340/health");
+        assert_eq!(cfg.prompt_url, "http://127.0.0.1:1340/api/sendPrompt");
+    }
+
+    #[test]
+    fn uuid_shape() {
+        assert!(looks_like_agent_uuid("0e5f5de8-7619-4ba4-9753-32c5470b2346"));
+        assert!(!looks_like_agent_uuid("grok"));
+        assert!(!looks_like_agent_uuid("Grok"));
     }
 }

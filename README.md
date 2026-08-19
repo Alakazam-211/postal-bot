@@ -6,12 +6,11 @@ Living readout: [`web/progress.html`](web/progress.html) (also meant for `www.po
 
 ## Install
 
-The advertised pipes wait on a signed release (no GitHub Release tarball yet; `https://postal.bot/install.sh` is not served):
-
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://postal.bot/install.sh | sh
-npm i -g @alakazamlabs/postal
+curl -fsSL https://www.postal.bot/install.sh | sh
 ```
+
+Use **www** (apex `postal.bot` has been a timeout). No GitHub login. Matching OS tarball if we published one; otherwise `p5-src.tar.gz` + cargo.
 
 From a checkout, until those assets exist:
 
@@ -22,3 +21,7 @@ P5_LOCAL=1 ./install/install.sh
 ```
 
 That builds `crates/p5` and lands `p5` on PATH (`/usr/local/bin` if writable, else `~/.local/bin`).
+
+Last mile is a harness plugin (`homes.harness`): built-in `k2` and `grok`, or an executable under `harness/` (see `harness/README.md`). Pairing/hold/enroll are not plugins.
+
+Grok Bot lab: `scripts/grokbot-setup.sh` and `scripts/grokbot-agent-prompt.txt`.

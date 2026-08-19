@@ -5,6 +5,8 @@ mod agent;
 mod control;
 mod hold;
 mod http;
+mod k2;
+mod last_mile;
 mod pair;
 mod service;
 mod session_map;
@@ -13,7 +15,7 @@ mod turn;
 
 use pair::{
     finish as finish_pair, run_accept, run_add, run_list, run_login, run_me, run_reject,
-    run_revoke, run_show,
+    run_revoke, run_set_key, run_show,
 };
 use sm::{send_msg, MsgRequest, MsgResponse, SmContext, SmError};
 
@@ -40,7 +42,7 @@ struct Cli {
 enum Commands {
     /// Print this CLI's identity (works without ~/.postal)
     Whoami,
-    /// Show help, or a topic (`p5 help types`)
+    /// Show help, or a topic (`p5 help types`, `p5 help last-mile`)
     Help {
         /// Help topic
         topic: Option<HelpTopic>,
@@ -109,6 +111,9 @@ enum Commands {
         /// Our type: session or turn (default session — this CLI's identity)
         #[arg(long)]
         typ: Option<String>,
+        /// Also print the public SPKI PEM (safe to share)
+        #[arg(long)]
+        pem: bool,
     },
 }
 
@@ -153,6 +158,14 @@ enum PairAction {
     Revoke {
         /// Pair id
         id: String,
+    },
+    /// Store a peer's public SPKI on the local roster (plane list omits keys)
+    SetKey {
+        /// Peer `handle::sub.postal.bot`
+        addr: String,
+        /// PEM file (`-` = stdin)
+        #[arg(long = "pem-file")]
+        pem_file: Option<String>,
     },
 }
 
@@ -204,6 +217,9 @@ enum AgentAction {
 enum HelpTopic {
     /// Bot types: session and turn (live/tray are modes)
     Types,
+    /// Last-mile plugins (`homes.harness`): k2, grok, exec
+    #[value(name = "last-mile", alias = "plugins", alias = "grok")]
+    LastMile,
 }
 
 fn whoami_text() -> String {
@@ -232,6 +248,66 @@ Delivery modes (not types):
 
   {live}     Short inject (session only).
   {tray}     Durable package + optional knock.
+
+Last mile (how a live cell is knocked after inbox fsync) is a plugin
+on homes.harness. See: p5 help last-mile
+"
+    )
+}
+
+fn help_last_mile_text() -> String {
+    format!(
+        "\
+Last mile — after Postal writes ~/.postal/inbox, knock the live agent.
+
+Set homes.harness on the receiving address. Types (session/turn) are
+how the agent lives; harness is how we inject. See also: p5 help types
+
+Built-in  grok  (Grok Bot / Sand, usually type turn)
+  Loopback gateway HTTP (same contract as Grok Bot's host API):
+  POST http://127.0.0.1:<port>/api/listAgents     body {{}}
+  POST http://127.0.0.1:<port>/api/sendPrompt     body {{agentId, prompt, clientNonce}}
+  GET  http://127.0.0.1:<port>/health             HOST UP (public)
+  Auth on /api/*: Authorization: Bearer <token>
+        token + port from $SAND_DATA_ROOT/gateway.json
+        (default ~/sand-data/gateway.json, written by the Grok Bot host).
+        host 0.0.0.0/:: is rewritten to 127.0.0.1. Never dial a remote Sand.
+        override: P5_TURN_TOKEN / P5_TURN_HEALTH / P5_TURN_PROMPT / P5_TURN_AGENT_ID
+  agentId: Sand UUID — never the Postal handle \"grok\".
+        1. P5_TURN_AGENT_ID
+        2. homes.session_id if it is a UUID
+        3. POST listAgents name match (handle grok → agent \"Grok\")
+        4. ~/sand-data/agents/<uuid>/profile.json
+        5. GET /health activeAgentId
+  Prompt stamp: [from handle::host] [p5] <body>
+        Postal stamp is [p5]. Do not send unauthenticated (that is HTTP 401).
+  Mail is already in ~/.postal/inbox even if sendPrompt fails.
+  One sendPrompt = one billed Grok Bot turn. Rate-limit 12/hour/peer.
+
+Built-in  k2  (K2 workspace, type session)
+  POST /cli/workspace/msg on the local k2-daemon (same route as k2 msg).
+  Auth: ~/.k2/daemon.port + daemon.token (P5_K2_MSG=0 disables)
+  Target: homes.cwd if it is an absolute path, else the Postal handle.
+  Knock text: [p5:<id>] <title>\\nOpen: p5 inbox read <id>
+  wake=true unless the sender passed --no-wake.
+
+Exec plugin  (anything else)
+  Executable: $P5_HARNESS_DIR/<name>  or  ~/.postal/harness/<name>
+              or p5-harness-<name> on PATH
+  argv: <plugin> knock
+  stdin: Knock JSON v1 (id, to, from, handle, typ, title, text, body, wake, cwd)
+  exit 0 / {{\"ok\":true}} = hit. Tray is already durable on failure.
+  Example: repo harness/webhook  (P5_WEBHOOK_URL)
+
+Setup on a Grok Bot box (receiving):
+  curl … https://www.postal.bot/install.sh | sh   # p5 + frpc beside it
+  p5 login     # or p5 agent run if systemd user bus is missing
+  p5 status    # agent: up  tunnel: up
+  homes.harness=grok  typ=turn  address=grok::this-label.postal.bot
+  Need a running Grok Bot host so ~/sand-data/gateway.json exists.
+
+p5 status / agent.log: \"turn gateway HTTP 401\" or \"token missing\" means
+the plugin ran but Sand auth failed — not a pairing failure.
 "
     )
 }
@@ -414,6 +490,9 @@ fn main() {
         Commands::Help {
             topic: Some(HelpTopic::Types),
         } => print!("{}", help_types_text()),
+        Commands::Help {
+            topic: Some(HelpTopic::LastMile),
+        } => print!("{}", help_last_mile_text()),
         Commands::Msg {
             addr,
             text,
@@ -495,7 +574,10 @@ fn main() {
         Commands::Pair {
             action: PairAction::Revoke { id },
         } => finish_pair(run_revoke(id)),
-        Commands::Me { from, typ } => finish_pair(run_me(from, typ)),
+        Commands::Pair {
+            action: PairAction::SetKey { addr, pem_file },
+        } => finish_pair(run_set_key(addr, pem_file)),
+        Commands::Me { from, typ, pem } => finish_pair(run_me(from, typ, pem)),
         Commands::Recv => match hold::run_recv() {
             Ok(report) => println!("pulled {}", report.pulled),
             Err(err) => {
@@ -531,8 +613,23 @@ mod tests {
         assert!(text.contains("Grok Bot"));
         assert!(text.contains("Sand"));
         assert!(text.contains("live"));
-        assert!(text.contains("tray"));
-        assert!(text.contains("not types"));
+        assert!(text.contains("p5 help last-mile"));
+    }
+
+    #[test]
+    fn help_last_mile_documents_grok_gateway() {
+        let text = help_last_mile_text();
+        assert!(text.contains("sendPrompt"));
+        assert!(text.contains("listAgents"));
+        assert!(text.contains("sand-data/gateway.json"));
+        assert!(text.contains("Authorization: Bearer"));
+        assert!(text.contains("activeAgentId"));
+        assert!(text.contains("cli/workspace/msg"));
+        assert!(text.contains("Knock JSON v1"));
+        assert!(text.contains("401"));
+        assert!(text.contains("[p5]"));
+        assert!(text.contains("homes.harness"));
+        assert!(!text.contains("[k2g]"));
     }
 
     #[test]

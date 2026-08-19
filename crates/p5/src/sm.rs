@@ -19,6 +19,7 @@ use p5_crypto::KeyPair;
 use p5_live::{LiveClient, LiveRequest, LiveResult};
 use serde::{Deserialize, Serialize};
 
+use crate::last_mile::{self, LastMile};
 use crate::session_map::SessionMap;
 use crate::turn::{self, TurnConfig, TurnLimiter};
 
@@ -168,6 +169,8 @@ pub struct SmContext {
     pub live: LiveClient,
     /// Override `https://<host>` (mock HTTPS peer). Production is [`PostalAddr::live_base_url`].
     pub live_base: Option<String>,
+    /// Harness adapters after inbox fsync. Off in unit tests.
+    pub last_mile: LastMile,
 }
 
 impl SmContext {
@@ -190,6 +193,7 @@ impl SmContext {
             live_timeout: Duration::from_secs(5),
             live: LiveClient::new(),
             live_base: None,
+            last_mile: LastMile::default(),
         }
     }
 
@@ -209,6 +213,7 @@ impl SmContext {
         }
         ctx.live_url = env_nonempty("P5_LIVE_URL");
         ctx.live_base = ctx.live_url.clone();
+        ctx.last_mile.k2 = crate::k2::K2MsgClient::from_k2_home();
         Ok(ctx)
     }
 
@@ -525,7 +530,7 @@ fn send_live(
                 None,
                 false,
             );
-            resp.hint = Some(last_error);
+            resp.hint = Some(friend_keep_hint(ctx, to, &last_error));
             Ok(resp)
         }
         LiveResult::Permanent { reason, hint } => {
@@ -541,6 +546,19 @@ fn send_live(
             Ok(resp)
         }
     }
+}
+
+fn friend_keep_hint(ctx: &SmContext, to: &PostalAddr, last_error: &str) -> String {
+    if ctx
+        .roster
+        .get(to)
+        .is_some_and(|e| e.trust == Trust::Trusted)
+    {
+        return format!(
+            "{to} is a friend but isn't reachable yet ({last_error}). Message kept. They just need Postal running (install + p5 login); you don't redo the invite."
+        );
+    }
+    last_error.to_string()
 }
 
 fn load_identity(root: &std::path::Path) -> Option<KeyPair> {
@@ -657,6 +675,10 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
         hold_id: None,
     })?;
 
+    if let Err(err) = last_mile::after_inbox_fsync(ctx, home, inbound) {
+        eprintln!("p5: last-mile: {err}");
+    }
+
     Ok(ReceiveOutcome {
         already: false,
         target_session_id: live
@@ -698,16 +720,6 @@ pub fn receive_turn(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome
     }
 
     let files_allowed = home.tools.files;
-    let agent_id = ctx.turn.resolve_agent_id(
-        home.session_id
-            .as_deref()
-            .or_else(|| {
-                ctx.roster
-                    .get(&inbound.to)
-                    .and_then(|e| e.sand_uuid.as_deref())
-            })
-            .or(Some(inbound.to.handle())),
-    );
 
     if turn::health_up(&ctx.turn).is_err() {
         return Err(permanent(
@@ -743,19 +755,11 @@ pub fn receive_turn(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome
         return Err(err.into());
     }
 
-    if turn::send_prompt(
-        &ctx.turn,
-        &inbound.from,
-        &inbound.body,
-        &agent_id,
-        &inbound.id,
-    )
-    .is_err()
-    {
+    if let Err(err) = last_mile::after_inbox_fsync(ctx, home, inbound) {
         release_turn_slot(ctx, &inbound.from, reserved_at);
         return Err(permanent(
             REASON_HOST_DOWN,
-            "turn sendPrompt failed; sender should HOLD",
+            format!("grok last-mile failed; sender should HOLD ({err})"),
         ));
     }
 
@@ -869,6 +873,13 @@ fn load_our_typ(root: &Path) -> Option<PeerType> {
     if let Some(t) = parse_typ_env("P5_TYP") {
         return Some(t);
     }
+    if let Ok(cfg) = p5_plane::PlaneConfig::load(root) {
+        if let Some(raw) = cfg.typ.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Ok(t) = raw.parse() {
+                return Some(t);
+            }
+        }
+    }
     parse_typ_config(&root.join("config.toml"))
 }
 
@@ -883,8 +894,11 @@ fn parse_typ_config(path: &Path) -> Option<PeerType> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let rest = line.strip_prefix("type")?.trim();
-        let rest = rest.strip_prefix('=')?.trim();
+        // `type=` first so it is not eaten by `typ`.
+        let rest = line
+            .strip_prefix("type")
+            .or_else(|| line.strip_prefix("typ"))?;
+        let rest = rest.trim().strip_prefix('=')?.trim();
         let val = rest.trim_matches('"').trim_matches('\'').trim();
         if let Ok(t) = val.parse::<PeerType>() {
             return Some(t);
@@ -1304,6 +1318,80 @@ mod tests {
         let text = fabric_stamp(&addr("alice::acme.postal.bot"), "ship it");
         assert_eq!(text, "[from alice::acme.postal.bot] [p5] ship it");
         assert!(!text.contains("k2g"));
+    }
+
+    #[test]
+    fn config_toml_typ_turn_is_our_typ() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.toml"), "typ = \"turn\"\naddr = \"grok::acme.postal.bot\"\n")
+            .unwrap();
+        let ctx = SmContext::load(tmp.path()).unwrap();
+        assert_eq!(ctx.our_typ, Some(PeerType::Turn));
+    }
+
+    fn k2_inbound(body: &str) -> Inbound {
+        Inbound {
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            to: addr("scout::acme.postal.bot"),
+            from: addr("alice::acme.postal.bot"),
+            body: body.into(),
+            mode: DeliveryMode::Live,
+            typ: PeerType::Session,
+            files: Vec::new(),
+            no_wake: false,
+        }
+    }
+
+    #[test]
+    fn k2_harness_knocks_after_inbox_fsync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        let mut row = ctx
+            .homes
+            .get(&addr("scout::acme.postal.bot"))
+            .unwrap()
+            .clone();
+        row.harness = Some("k2".into());
+        ctx.homes.insert(row).unwrap();
+        ctx.last_mile.k2 = crate::k2::K2MsgClient::capture();
+        let inbound = k2_inbound("hello scout");
+        let rx = receive_session(&ctx, &inbound).unwrap();
+        assert!(!rx.already);
+        assert_eq!(ctx.mailbox.list_inbox(None, None).unwrap().len(), 1);
+        let knocks = ctx.last_mile.k2.recorded();
+        assert_eq!(knocks.len(), 1);
+        assert_eq!(knocks[0].workspace, "/srv/scout");
+        assert_eq!(knocks[0].from, "alice::acme.postal.bot");
+        assert!(knocks[0].wake);
+        assert_eq!(
+            knocks[0].text,
+            "[p5:01ARZ3NDEKTSV4RRFFQ69G5FAV] hello scout\nOpen: p5 inbox read 01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        );
+        assert_eq!(knocks[0].project, "/srv/scout");
+    }
+
+    #[test]
+    fn other_harness_does_not_call_k2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        ctx.last_mile.k2 = crate::k2::K2MsgClient::capture();
+        receive_session(&ctx, &k2_inbound("hello")).unwrap();
+        assert!(ctx.last_mile.k2.recorded().is_empty());
+        assert_eq!(ctx.mailbox.list_inbox(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn live_inject_off_skips_k2_knock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = SmContext::new(tmp.path());
+        let mut row = home("scout::acme.postal.bot", true, true);
+        row.harness = Some("k2".into());
+        row.tools.live_inject = false;
+        ctx.homes.insert(row).unwrap();
+        ctx.last_mile.k2 = crate::k2::K2MsgClient::capture();
+        receive_session(&ctx, &k2_inbound("hello")).unwrap();
+        assert!(ctx.last_mile.k2.recorded().is_empty());
+        assert_eq!(ctx.mailbox.list_inbox(None, None).unwrap().len(), 1);
     }
 
     #[test]

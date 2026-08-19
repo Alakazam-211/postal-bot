@@ -66,11 +66,24 @@ pub struct PairView {
     pub status: String,
     #[serde(default)]
     pub epoch: u64,
-    /// Optional; live CP-3 list omits it. Mock / later joins may include it.
-    #[serde(default, alias = "publicKeyPem")]
+    /// Snake or camel; live CP-3 currently sends **both**. Do not `alias` them
+    /// onto one field (serde duplicate-field error).
+    #[serde(default)]
     pub public_key_pem: Option<String>,
+    #[serde(default, rename = "publicKeyPem", skip_serializing)]
+    pub public_key_pem_camel: Option<String>,
     #[serde(default)]
     pub fingerprint: Option<String>,
+}
+
+impl PairView {
+    pub fn public_pem(&self) -> Option<&str> {
+        nonempty_pem(&self.public_key_pem).or_else(|| nonempty_pem(&self.public_key_pem_camel))
+    }
+}
+
+fn nonempty_pem(s: &Option<String>) -> Option<&str> {
+    s.as_deref().filter(|s| !s.trim().is_empty())
 }
 
 /// `GET /postal/pairs` (or `?inbox=1`).
@@ -120,4 +133,39 @@ pub struct HoldPutResponse {
 pub struct HoldList {
     #[serde(default)]
     pub items: Vec<HoldEnvelope>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pair_view_accepts_both_pem_keys() {
+        let raw = r#"{
+            "id": "p1",
+            "from": "grok::grokbot.postal.bot",
+            "to": "postal-bot::rosson.postal.bot",
+            "status": "trusted",
+            "fingerprint": "abc",
+            "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nCAMEL\n-----END PUBLIC KEY-----\n",
+            "public_key_pem": "-----BEGIN PUBLIC KEY-----\nSNAKE\n-----END PUBLIC KEY-----\n"
+        }"#;
+        let v: PairView = serde_json::from_str(raw).unwrap();
+        assert_eq!(v.fingerprint.as_deref(), Some("abc"));
+        assert!(v.public_pem().unwrap().contains("SNAKE") || v.public_pem().unwrap().contains("CAMEL"));
+        assert!(v.public_pem().unwrap().contains("BEGIN PUBLIC KEY"));
+    }
+
+    #[test]
+    fn pair_view_camel_only() {
+        let raw = r#"{
+            "id": "p1",
+            "from": "a::acme.postal.bot",
+            "to": "b::acme.postal.bot",
+            "status": "pending",
+            "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nX\n-----END PUBLIC KEY-----\n"
+        }"#;
+        let v: PairView = serde_json::from_str(raw).unwrap();
+        assert!(v.public_pem().unwrap().contains("BEGIN PUBLIC KEY"));
+    }
 }

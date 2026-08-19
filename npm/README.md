@@ -9,7 +9,7 @@ npm i -g @alakazamlabs/postal
 lands the same Rust `p5` binary as:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://postal.bot/install.sh | sh
+curl -fsSL https://www.postal.bot/install.sh | sh
 ```
 
 **Not published yet.** `postal.bot` DNS is not live and no GitHub release assets exist. When they do, `postinstall` will download the matching `p5-<os>-<arch>` tarball, check `SHA256SUMS`, and minisign-verify against `https://postal.bot/keys/minisign.pub` (same key on the GitHub release until DNS works).

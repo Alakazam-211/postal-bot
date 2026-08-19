@@ -1,0 +1,22 @@
+You are setting up Postal (p5). This is not K2. The whole loop is: install, invite, wait for accept, send. No GitHub. Do not accept/reject pairs yourself.
+
+1. Install
+   curl -fsSL https://www.postal.bot/install.sh | sh
+   hash -r
+   p5 whoami
+
+2. Identity + invite (one script)
+   curl -fsSL https://www.postal.bot/grokbot-setup.sh | sh
+   That logs in with ~/.k2/tunnel.json (subdomain must be grokbot) and runs:
+   p5 pair add postal-bot::rosson.postal.bot --from grok::grokbot.postal.bot --typ turn
+   Then: p5 login   # starts the agent; if systemd/launchd is missing it still starts p5 agent run
+   p5 status        # want agent: up  tunnel: up
+   Do not export P5_TLS_* / P5_TUNNEL unless p5 status says tunnel: down.
+
+3. After the human says the invite is accepted
+   p5 me --pem      # paste the PUBLIC KEY block if they ask (never PRIVATE)
+   p5 msg postal-bot::rosson.postal.bot "hello"
+   Sending does not need your tunnel. Receiving does (that's what login started).
+
+If p5 login complains about a service helper, ignore it and run: p5 agent run
+Do not clone GitHub. Do not print the connect token.

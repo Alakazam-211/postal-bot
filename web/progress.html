@@ -203,7 +203,7 @@
         </tr>
         <tr>
           <td>Pairing tables / dashboard</td>
-          <td><span class="pill go">CP-0 live</span> 32-hex tunnel token works on <code>/postal/*</code>. <code>postal-bot::rosson.postal.bot</code> is in <code>postal_principals</code>. Dashboard tab may still be dirty on Vercel.</td>
+          <td><span class="pill go">pair trusted</span> Plane rows live. First friend: <code>grok::grokbot.postal.bot</code> ↔ <code>postal-bot::rosson.postal.bot</code> (SAS 526919), owner-accepted from this CLI. k2.dev Postal tab is <strong>not</strong> a usable login. Accept UI will be <strong>our</strong> site/app, not k2.dev.</td>
         </tr>
         <tr>
           <td>Hold store (CP-4)</td>
@@ -215,7 +215,7 @@
         </tr>
         <tr>
           <td>Live mail to another product</td>
-          <td><span class="pill hold">waiting on Grok Bot pair</span> Self-send 2026-08-19 landed in <code>~/.postal/inbox</code>, <strong>not</strong> this K2 cell. K2 seam locked: after fsync, <code>POST /cli/workspace/msg</code> — no <code>typ=k2</code>.</td>
+          <td><span class="pill go">plugin last mile</span> After inbox fsync, <code>homes.harness</code> selects a plugin. Built-in <code>k2</code> → <code>/cli/workspace/msg</code> (landed in this cell). Built-in <code>grok</code> → sendPrompt. Anything else is an exec plugin. No <code>typ=k2</code>. Grok Bot pair: <code>scripts/grokbot-setup.sh</code>.</td>
         </tr>
       </tbody>
     </table>
@@ -260,9 +260,8 @@
     </div>
 
     <h2 id="install">Install pipes</h2>
-    <p><strong>The advertised curl pipe is not working yet.</strong></p>
-    <pre>curl --proto '=https' --tlsv1.2 -fsSL https://postal.bot/install.sh | sh
-npm i -g @alakazamlabs/postal</pre>
+    <p><strong>Use www</strong> (apex <code>postal.bot</code> has been a timeout from this box). No GitHub clone.</p>
+    <pre>curl -fsSL https://www.postal.bot/install.sh | sh</pre>
     <table>
       <thead>
         <tr><th>Piece</th><th>Reality 2026-08-19</th></tr>
@@ -273,12 +272,12 @@ npm i -g @alakazamlabs/postal</pre>
           <td><span class="pill go">yes</span> POSIX script, minisign + SHA256SUMS when assets exist, <code>--from-cargo</code> / <code>P5_LOCAL=1</code> builds from a checkout.</td>
         </tr>
         <tr>
-          <td><code>https://postal.bot/install.sh</code></td>
-          <td><span class="pill stop">not served</span> Apex is Vercel <code>10.10.0.1</code>; www serves the landing HTML only. No <code>/install.sh</code>, no <code>/releases</code>, no <code>/keys/minisign.pub</code>.</td>
+          <td><code>https://www.postal.bot/install.sh</code></td>
+          <td><span class="pill go">served</span> Vercel static. Source + native tarballs under <code>/releases/latest</code>. Apex <code>postal.bot</code> may still time out — use www.</td>
         </tr>
         <tr>
           <td>GitHub Releases tarball</td>
-          <td><span class="pill stop">none</span> <code>Alakazam-211/postal-bot</code> has no releases. The script’s GitHub fallback has nothing to fetch.</td>
+          <td><span class="pill stop">not used</span> Private repo — Cortana has no GitHub. Pipe does not clone or hit GH releases.</td>
         </tr>
         <tr>
           <td>minisign ceremony</td>
@@ -290,12 +289,7 @@ npm i -g @alakazamlabs/postal</pre>
         </tr>
       </tbody>
     </table>
-    <p>Until a signed release exists, the only working install is from a git checkout:</p>
-    <pre>git clone git@github.com:Alakazam-211/postal-bot.git
-cd postal-bot
-P5_LOCAL=1 ./install/install.sh
-p5 whoami</pre>
-    <p>That is what the Grok Bot side should use for the first lab, unless we cut a release first. Cutting a release is a separate go (minisign key + tarball + something serving <code>/install.sh</code> — www Vercel or a grey apex file host, not orange-cloud in front of E2E names).</p>
+    <p>Grok Bot / Cortana: <code>curl … https://www.postal.bot/install.sh | sh</code> then <code>./scripts/grokbot-setup.sh</code> (or pair-only if p5 is already on PATH). Minisign ceremony still later; this lab pipe is SHA256 + optional minisign.</p>
 
     <h2 id="lab">Grok Bot lab</h2>
     <p>When you say go, the other side is Grok Bot software on their box, not a K2 sidecar.</p>
@@ -312,7 +306,7 @@ p5 whoami</pre>
     </ol>
     <p>Their turn receiver will hit <strong>local</strong> <code>GET :1340/health</code> then sendPrompt. If Grok Bot’s health port is not 1340, they set <code>P5_TURN_HEALTH</code>. We never call SendToAgent over HTTP.</p>
     <h3>Copy-paste prompt for the Grok Bot</h3>
-    <p>Give this to a bot <em>inside Grok Bot software</em> on the box that already has <code>grokbot.k2.dev</code>. Not a K2 workspace agent.</p>
+    <p>Repo files: <code>scripts/grokbot-setup.sh</code> (runnable) and <code>scripts/grokbot-agent-prompt.txt</code>. Give the prompt to a bot <em>inside Grok Bot software</em> on the box that already has <code>grokbot.k2.dev</code>. Not a K2 workspace agent. Friend request is <code>p5 pair add postal-bot::rosson.postal.bot --from grok::grokbot.postal.bot --typ turn</code> — you accept on the dashboard.</p>
     <pre>You are setting up Postal (p5) so you can mail another bot. This is not K2.
 
 Goal

@@ -33,6 +33,8 @@ use p5_core::Homes;
 pub const DEFAULT_LOCAL_PORT: u16 = 8443;
 /// Env flag that arms the tunnel child from `p5 agent run`.
 pub const TUNNEL_ENV: &str = "P5_TUNNEL";
+/// Force a new CSR even when `tunnel/cert.pem` already exists.
+pub const REISSUE_ENV: &str = "P5_TUNNEL_REISSUE";
 /// Optional label override (`acme` → `acme.postal.bot`).
 pub const LABEL_ENV: &str = "P5_TUNNEL_LABEL";
 /// Connect token posted to the cert broker (same shape as k2-connect `/cert`).
@@ -140,24 +142,29 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
         Ok(k) => k,
         Err(err) => return TunnelHandle::down(err.to_string()),
     };
-    let csr = match build_csr_pem(&label, &key) {
-        Ok(c) => c,
-        Err(err) => return TunnelHandle::down(err.to_string()),
-    };
+    let reuse = csr::cert_path(opts.root).is_file()
+        && csr::key_path(opts.root).is_file()
+        && !env_truthy(REISSUE_ENV);
+    if !reuse {
+        let csr = match build_csr_pem(&label, &key) {
+            Ok(c) => c,
+            Err(err) => return TunnelHandle::down(err.to_string()),
+        };
 
-    let url = opts
-        .broker_url
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(broker_url);
-    let token = opts.token.unwrap_or("");
-    let cert = match request_cert_at(&url, &csr, &label, token) {
-        Ok(c) => c,
-        Err(err) => return TunnelHandle::down(err.to_string()),
-    };
-    if let Err(err) = csr::install_cert(opts.root, &cert) {
-        return TunnelHandle::down(err.to_string());
+        let url = opts
+            .broker_url
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(broker_url);
+        let token = opts.token.unwrap_or("");
+        let cert = match request_cert_at(&url, &csr, &label, token) {
+            Ok(c) => c,
+            Err(err) => return TunnelHandle::down(err.to_string()),
+        };
+        if let Err(err) = csr::install_cert(opts.root, &cert) {
+            return TunnelHandle::down(err.to_string());
+        }
     }
 
     let port = if opts.local_port == 0 {
@@ -347,6 +354,40 @@ mod tests {
             "{reason}"
         );
         assert!(!tmp.path().join(TUNNEL_DIR).join(TUNNEL_CERT_FILE).exists());
+    }
+
+    #[test]
+    #[test]
+    fn try_start_reuses_existing_leaf_without_broker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = stub_frpc(tmp.path());
+        crate::csr::load_or_generate_key(tmp.path()).unwrap();
+        std::fs::write(
+            crate::csr::cert_path(tmp.path()),
+            "-----BEGIN CERTIFICATE-----\nUEs=\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let dead = {
+            let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            format!("http://127.0.0.1:{p}/cert")
+        };
+        let mut h = try_start(StartOpts {
+            root: tmp.path(),
+            label: "acme",
+            local_port: 8443,
+            broker_url: Some(&dead),
+            token: Some("tok"),
+            frpc: Some(&stub),
+            server_addr: Some("127.0.0.1"),
+            server_port: Some(7000),
+        });
+        assert!(
+            h.is_up(),
+            "reuse leaf should not dial broker: {:?}",
+            h.reason()
+        );
     }
 
     #[test]

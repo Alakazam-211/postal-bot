@@ -411,6 +411,19 @@ pub fn tls_paths_from_env() -> Result<Option<(PathBuf, PathBuf)>, String> {
     }
 }
 
+/// Env wins; otherwise `~/.postal/tunnel/{cert,key}.pem` after a broker issue.
+pub fn tls_paths(root: &Path) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    if let Some(pair) = tls_paths_from_env()? {
+        return Ok(Some(pair));
+    }
+    let cert = root.join("tunnel").join("cert.pem");
+    let key = root.join("tunnel").join("key.pem");
+    if cert.is_file() && key.is_file() {
+        return Ok(Some((cert, key)));
+    }
+    Ok(None)
+}
+
 fn ssl_config(cert: &Path, key: &Path) -> Result<tiny_http::SslConfig, String> {
     let certificate = std::fs::read(cert).map_err(|e| format!("read P5_TLS_CERT: {e}"))?;
     let private_key = std::fs::read(key).map_err(|e| format!("read P5_TLS_KEY: {e}"))?;
@@ -562,7 +575,11 @@ fn json_header() -> Header {
 }
 
 pub fn load_ssl_from_env() -> Result<Option<tiny_http::SslConfig>, String> {
-    match tls_paths_from_env()? {
+    load_ssl(&p5_core::default_root())
+}
+
+pub fn load_ssl(root: &Path) -> Result<Option<tiny_http::SslConfig>, String> {
+    match tls_paths(root)? {
         Some((cert, key)) => ssl_config(&cert, &key).map(Some),
         None => Ok(None),
     }
