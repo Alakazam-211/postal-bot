@@ -26,6 +26,11 @@ pub struct SealAad {
     pub to: String,
 }
 
+/// True when `blob` is a sized HoldSeal-v1 ciphertext, not plaintext.
+pub fn is_holdseal_v1(blob: &[u8]) -> bool {
+    blob.len() >= HEADER_LEN + TAG_LEN && blob.len() <= MAX_BLOB && blob[0] == HOLDSEAL_V1
+}
+
 /// Seal `plaintext` to `peer_spki_pem`. Blob is `v || eph_pub || nonce || ct||tag`.
 pub fn seal(peer_spki_pem: &str, plaintext: &[u8], aad: &SealAad) -> Result<Vec<u8>, CryptoError> {
     if plaintext.len() > MAX_PLAINTEXT {
@@ -146,6 +151,9 @@ mod tests {
         let blob = seal(&bob.public_key_pem(), pt, &aad).unwrap();
         assert_eq!(blob[0], HOLDSEAL_V1);
         assert_eq!(blob.len(), HEADER_LEN + pt.len() + TAG_LEN);
+        assert!(is_holdseal_v1(&blob));
+        assert!(!is_holdseal_v1(pt));
+        assert!(!is_holdseal_v1(&[]));
         let opened = bob.open(&blob, &aad).unwrap();
         assert_eq!(opened, pt);
     }

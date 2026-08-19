@@ -5,7 +5,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::{
-    AcceptRequest, MeRequest, MeResponse, PairAddRequest, PairAddResponse, PairLists, PlaneError,
+    AcceptRequest, HoldEnvelope, HoldList, HoldPutResponse, MeRequest, MeResponse, PairAddRequest,
+    PairAddResponse, PairLists, PlaneError,
 };
 
 const TIMEOUT_SECS: u64 = 30;
@@ -101,6 +102,46 @@ impl PlaneClient {
         Ok(())
     }
 
+    /// `PUT /postal/hold` upsert-by-id. Refuses plaintext before any socket.
+    pub fn put_hold(&self, env: &HoldEnvelope) -> Result<HoldPutResponse, PlaneError> {
+        crate::hold::refuse_plaintext(env)?;
+        if !is_safe_id(&env.id) {
+            return Err(PlaneError::BadHoldId);
+        }
+        self.send_json("PUT", "/postal/hold", Some(env))
+    }
+
+    /// Seal then PUT. Same plaintext lock as [`Self::put_hold`].
+    pub fn put_hold_sealed(
+        &self,
+        id: &str,
+        to: &str,
+        from: &str,
+        plaintext: &[u8],
+        peer_spki_pem: &str,
+    ) -> Result<HoldPutResponse, PlaneError> {
+        let env = crate::hold::seal_envelope(
+            id,
+            to,
+            from,
+            plaintext,
+            peer_spki_pem,
+            Duration::from_secs(crate::hold::HOLD_TTL_SECS),
+        )?;
+        self.put_hold(&env)
+    }
+
+    pub fn list_hold(&self) -> Result<HoldList, PlaneError> {
+        let v: serde_json::Value = self.send_json("GET", "/postal/hold", None::<&()>)?;
+        crate::hold::parse_hold_list(v)
+    }
+
+    pub fn ack_hold(&self, id: &str) -> Result<(), PlaneError> {
+        let path = hold_ack_path(id)?;
+        let _: serde_json::Value = self.send_json("POST", &path, Some(&serde_json::json!({})))?;
+        Ok(())
+    }
+
     fn send_json<T, B>(&self, method: &str, path: &str, body: Option<&B>) -> Result<T, PlaneError>
     where
         T: DeserializeOwned,
@@ -137,13 +178,20 @@ fn refuse_private_pem(pem: &str) -> Result<(), PlaneError> {
 
 /// Pair ids are a path segment. Reject anything that could change the target.
 fn pair_action_path(id: &str, action: &str) -> Result<String, PlaneError> {
-    if !is_safe_pair_id(id) {
+    if !is_safe_id(id) {
         return Err(PlaneError::BadPairId);
     }
     Ok(format!("/postal/pair/{id}/{action}"))
 }
 
-fn is_safe_pair_id(id: &str) -> bool {
+fn hold_ack_path(id: &str) -> Result<String, PlaneError> {
+    if !is_safe_id(id) {
+        return Err(PlaneError::BadHoldId);
+    }
+    Ok(format!("/postal/hold/{id}/ack"))
+}
+
+fn is_safe_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .chars()
@@ -343,8 +391,103 @@ mod tests {
             assert!(matches!(c.reject(id).unwrap_err(), PlaneError::BadPairId));
             assert!(matches!(c.revoke(id).unwrap_err(), PlaneError::BadPairId));
         }
-        assert!(is_safe_pair_id("pair-1"));
-        assert!(is_safe_pair_id("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
-        assert!(!is_safe_pair_id("../x"));
+        assert!(is_safe_id("pair-1"));
+        assert!(is_safe_id("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(!is_safe_id("../x"));
+    }
+
+    #[test]
+    fn put_hold_refuses_plaintext_without_http() {
+        let c = PlaneClient::new("http://127.0.0.1:1", "k2c_test");
+        let env = HoldEnvelope {
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            to: "scout::acme.postal.bot".into(),
+            from: "alice::acme.postal.bot".into(),
+            size: 12,
+            expiry: 1,
+            ciphertext: crate::hold::encode_ciphertext(b"secret cover"),
+        };
+        assert!(matches!(
+            c.put_hold(&env).unwrap_err(),
+            PlaneError::Plaintext
+        ));
+        let raw = HoldEnvelope {
+            ciphertext: "hello world".into(),
+            size: 0,
+            ..env.clone()
+        };
+        assert!(matches!(
+            c.put_hold(&raw).unwrap_err(),
+            PlaneError::Plaintext
+        ));
+        let escaped = HoldEnvelope {
+            id: "../x".into(),
+            ciphertext: crate::hold::encode_ciphertext(b"nope"),
+            ..env
+        };
+        // Plaintext is checked first so we never open a socket on either lock.
+        assert!(matches!(
+            c.put_hold(&escaped).unwrap_err(),
+            PlaneError::Plaintext
+        ));
+    }
+
+    #[test]
+    fn put_hold_sends_sealed_blob_and_bearer() {
+        let bob = p5_crypto::KeyPair::generate();
+        let (url, rec) = spawn_ok(200, r#"{"ok":true,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}"#);
+        let c = PlaneClient::new(url, "k2c_test");
+        let out = c
+            .put_hold_sealed(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "scout::acme.postal.bot",
+                "alice::acme.postal.bot",
+                b"secret cover",
+                &bob.public_key_pem(),
+            )
+            .unwrap();
+        assert_eq!(out.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        let got = rec.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].method, "PUT");
+        assert_eq!(got[0].path, "/postal/hold");
+        assert_eq!(got[0].auth, "Bearer k2c_test");
+        assert!(!got[0].body.contains("secret cover"));
+        let v: serde_json::Value = serde_json::from_str(&got[0].body).unwrap();
+        assert_eq!(v["id"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(v["to"], "scout::acme.postal.bot");
+        assert_eq!(v["from"], "alice::acme.postal.bot");
+        assert!(v["size"].as_u64().unwrap() > 0);
+        assert!(v["expiry"].as_u64().unwrap() > 0);
+        let blob = crate::hold::decode_ciphertext(v["ciphertext"].as_str().unwrap()).unwrap();
+        assert!(p5_crypto::is_holdseal_v1(&blob));
+    }
+
+    #[test]
+    fn list_hold_and_ack_paths() {
+        let (url, rec) = spawn_ok(
+            200,
+            r#"{"items":[{"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","to":"a::acme.postal.bot","from":"b::acme.postal.bot","size":1,"expiry":1,"ciphertext":"YQ=="}]}"#,
+        );
+        let c = PlaneClient::new(&url, "k2c_test");
+        let list = c.list_hold().unwrap();
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(rec.lock().unwrap()[0].method, "GET");
+        assert_eq!(rec.lock().unwrap()[0].path, "/postal/hold");
+
+        let (url, rec) = spawn_ok(200, r#"{"ok":true}"#);
+        let c = PlaneClient::new(url, "k2c_test");
+        c.ack_hold("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let got = rec.lock().unwrap();
+        assert_eq!(got[0].method, "POST");
+        assert_eq!(got[0].path, "/postal/hold/01ARZ3NDEKTSV4RRFFQ69G5FAV/ack");
+        assert_eq!(got[0].auth, "Bearer k2c_test");
+
+        let c = PlaneClient::new("http://127.0.0.1:1", "k2c_test");
+        assert!(matches!(
+            c.ack_hold("../x").unwrap_err(),
+            PlaneError::BadHoldId
+        ));
     }
 }

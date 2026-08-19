@@ -1,14 +1,15 @@
 //! Sender SM + local session / turn receiver SM.
 //!
-//! No public bind, no hold PUT, no pairing plane. Local dest = a HomeRow for
-//! the address or `P5_LOCAL_RECV=1`. Loopback inbound (`POST /p5/msg`) reuses
-//! [`receive_msg`]. We do not spawn harness binaries. Type `turn` is HTTP
-//! sendPrompt on the loopback gateway — never a PTY.
+//! Local dest = a HomeRow for the address or `P5_LOCAL_RECV=1`. Remote dest
+//! stays queued unless `P5_HOLD=1`, which tries live HTTPS then hold on a
+//! definite miss. Loopback inbound (`POST /p5/msg`) reuses [`receive_msg`].
+//! We do not spawn harness binaries. Type `turn` is HTTP sendPrompt on the
+//! loopback gateway — never a PTY.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use p5_core::{
     default_root, DeliveryMode, DeliveryStatus, Homes, Mailbox, MailboxError, PeerType, PostalAddr,
@@ -88,7 +89,7 @@ impl MsgResponse {
         }
     }
 
-    fn ok_status(
+    pub(crate) fn ok_status(
         id: String,
         to: &PostalAddr,
         status: DeliveryStatus,
@@ -154,6 +155,13 @@ pub struct SmContext {
     pub our_typ: Option<PeerType>,
     pub turn: TurnConfig,
     pub turn_limiter: Arc<Mutex<TurnLimiter>>,
+    /// `P5_HOLD=1` — live send + hold PUT after a definite miss.
+    pub hold: bool,
+    pub plane_url: String,
+    pub plane_token: Option<String>,
+    /// Test / override base for live `POST /p5/msg`.
+    pub live_url: Option<String>,
+    pub live_timeout: Duration,
 }
 
 impl SmContext {
@@ -169,6 +177,11 @@ impl SmContext {
             our_typ: None,
             turn: TurnConfig::loopback_default(),
             turn_limiter: Arc::new(Mutex::new(TurnLimiter::new())),
+            hold: false,
+            plane_url: p5_plane::DEFAULT_PLANE_URL.to_string(),
+            plane_token: None,
+            live_url: None,
+            live_timeout: Duration::from_secs(5),
         }
     }
 
@@ -181,6 +194,12 @@ impl SmContext {
         ctx.dev_secret = env_is_set("P5_DEV_SECRET");
         ctx.our_typ = load_our_typ(root);
         ctx.turn = TurnConfig::from_env();
+        ctx.hold = env_flag("P5_HOLD");
+        if let Ok(cfg) = p5_plane::PlaneConfig::load(root) {
+            ctx.plane_url = cfg.base_url;
+            ctx.plane_token = cfg.token;
+        }
+        ctx.live_url = env_nonempty("P5_LIVE_URL");
         Ok(ctx)
     }
 
@@ -362,14 +381,7 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
     };
 
     if !ctx.dest_is_local(&to) {
-        return Ok(MsgResponse::ok_status(
-            item.id,
-            &to,
-            DeliveryStatus::Queued,
-            item.attempts,
-            None,
-            false,
-        ));
+        return crate::hold::finish_remote(ctx, &item, &to, &from, &req.body);
     }
 
     if typ != Some(PeerType::Session) && typ != Some(PeerType::Turn) {
@@ -750,7 +762,7 @@ fn permanent(reason: &'static str, hint: impl Into<String>) -> ReceiveError {
     }
 }
 
-fn env_flag(name: &str) -> bool {
+pub(crate) fn env_flag(name: &str) -> bool {
     match std::env::var(name) {
         Ok(v) => {
             let v = v.trim();
@@ -772,11 +784,7 @@ fn load_our_typ(root: &Path) -> Option<PeerType> {
 }
 
 fn parse_typ_env(name: &str) -> Option<PeerType> {
-    std::env::var(name)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse().ok())
+    env_nonempty(name).and_then(|s| s.parse().ok())
 }
 
 fn parse_typ_config(path: &Path) -> Option<PeerType> {
@@ -794,6 +802,13 @@ fn parse_typ_config(path: &Path) -> Option<PeerType> {
         }
     }
     None
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// True when `root` has no live-map file (the map is process-only).

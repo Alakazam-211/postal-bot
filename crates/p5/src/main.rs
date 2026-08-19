@@ -3,6 +3,7 @@ use p5_core::{default_root, DeliveryMode, MailItem, Mailbox, MailboxError, PeerT
 
 mod agent;
 mod control;
+mod hold;
 mod http;
 mod pair;
 mod service;
@@ -98,6 +99,8 @@ enum Commands {
         #[command(subcommand)]
         action: PairAction,
     },
+    /// Pull held mail from the plane (one shot)
+    Recv,
     /// Publish this handle's public pairing key (`PUT /postal/me`)
     Me {
         /// Display / pairing address (`handle::sub.postal.bot`)
@@ -493,6 +496,13 @@ fn main() {
             action: PairAction::Revoke { id },
         } => finish_pair(run_revoke(id)),
         Commands::Me { from, typ } => finish_pair(run_me(from, typ)),
+        Commands::Recv => match hold::run_recv() {
+            Ok(report) => println!("pulled {}", report.pulled),
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(err.exit_code());
+            }
+        },
     }
 }
 
@@ -538,6 +548,7 @@ mod tests {
         assert!(text.contains("msg"));
         assert!(text.contains("pair"));
         assert!(text.contains("me"));
+        assert!(text.contains("recv"));
         assert!(!text.contains("k2 "));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
     }

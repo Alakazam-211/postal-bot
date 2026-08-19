@@ -756,7 +756,9 @@ dependencies = [
 name = "p5-plane"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "p5-core",
+ "p5-crypto",
  "serde",
  "serde_json",
  "tempfile",

@@ -21,6 +21,11 @@ pub enum PlaneError {
     PrivateKey,
     /// Pair id is interpolated into the URL path.
     BadPairId,
+    /// Hold id is interpolated into the URL path.
+    BadHoldId,
+    /// Wire lock: never PUT plaintext; hold store is ciphertext only.
+    Plaintext,
+    Crypto(String),
 }
 
 impl PlaneError {
@@ -45,6 +50,9 @@ impl fmt::Display for PlaneError {
             Self::Transport(msg) => write!(f, "plane transport: {msg}"),
             Self::PrivateKey => f.write_str("refusing to upload a private key"),
             Self::BadPairId => f.write_str("pair id contains invalid characters"),
+            Self::BadHoldId => f.write_str("hold id contains invalid characters"),
+            Self::Plaintext => f.write_str("refusing to upload plaintext hold body"),
+            Self::Crypto(msg) => write!(f, "postal hold crypto: {msg}"),
         }
     }
 }

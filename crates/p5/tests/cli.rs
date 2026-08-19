@@ -35,7 +35,12 @@ fn stdout_home(home: &Path, args: &[&str]) -> String {
 
 fn run_home(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
     let mut cmd = p5();
-    cmd.env("P5_HOME", home).args(args);
+    cmd.env("P5_HOME", home)
+        .env_remove("P5_HOLD")
+        .env_remove("P5_PLANE_URL")
+        .env_remove("P5_LIVE_URL")
+        .env_remove("P5_CONNECT_TOKEN")
+        .args(args);
     for (k, v) in extra_env {
         cmd.env(k, v);
     }

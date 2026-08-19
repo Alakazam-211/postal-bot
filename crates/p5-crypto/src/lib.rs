@@ -12,7 +12,7 @@ mod seal;
 pub use error::CryptoError;
 pub use keys::{fingerprint_spki_pem, sas_code, KeyPair, IDENTITY_FILE, KEYS_DIR};
 pub use proof::{proof_create, proof_verify};
-pub use seal::{seal, SealAad};
+pub use seal::{is_holdseal_v1, seal, SealAad};
 
 /// Hold blob version byte.
 pub const HOLDSEAL_V1: u8 = 1;

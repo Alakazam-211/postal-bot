@@ -115,6 +115,13 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
     };
     let uds_state = Arc::clone(&state);
     let uds_handle = thread::spawn(move || control::serve_uds(listener, uds_state));
+    let hold_handle = if crate::hold::hold_enabled() {
+        let root = root.to_path_buf();
+        let stop = Arc::clone(&state.stop);
+        Some(thread::spawn(move || crate::hold::poll_loop(root, stop)))
+    } else {
+        None
+    };
 
     // frpc is this process's child. Broker miss still serves loopback.
     let mut tunnel = p5_tunnel::start_from_env(root, local.port());
@@ -142,6 +149,9 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
     http_server.unblock();
     let _ = http_handle.join();
     let _ = uds_handle.join();
+    if let Some(h) = hold_handle {
+        let _ = h.join();
+    }
     cleanup_ours(root);
     Ok(())
 }

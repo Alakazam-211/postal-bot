@@ -93,3 +93,31 @@ impl PairLists {
             .find(|p| p.id == id)
     }
 }
+
+/// `PUT /postal/hold` body. `ciphertext` is opaque HoldSeal-v1 (base64).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HoldEnvelope {
+    pub id: String,
+    pub to: String,
+    pub from: String,
+    pub size: u64,
+    /// Unix seconds (TTL). Opaque to the plane besides GC.
+    pub expiry: u64,
+    pub ciphertext: String,
+}
+
+/// `PUT /postal/hold` response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HoldPutResponse {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub id: String,
+}
+
+/// `GET /postal/hold`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HoldList {
+    #[serde(default)]
+    pub items: Vec<HoldEnvelope>,
+}
