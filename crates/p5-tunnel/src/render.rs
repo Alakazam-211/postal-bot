@@ -18,13 +18,25 @@ pub const DEFAULT_FRP_SERVER: &str = "178.156.232.105";
 pub const DEFAULT_FRP_PORT: u16 = 7000;
 pub const FRPC_TOML_FILE: &str = "frpc.toml";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FrpcSpec {
     pub label: String,
     pub local_port: u16,
     pub server_addr: String,
     pub server_port: u16,
     pub token: Option<String>,
+}
+
+impl fmt::Debug for FrpcSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrpcSpec")
+            .field("label", &self.label)
+            .field("local_port", &self.local_port)
+            .field("server_addr", &self.server_addr)
+            .field("server_port", &self.server_port)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -218,6 +230,15 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "frpc.toml must be 0600, got {mode:o}");
         }
+    }
+
+    #[test]
+    fn debug_redacts_token() {
+        let s = spec(8443);
+        let dbg = format!("{s:?}");
+        assert!(!dbg.contains("tok_secret"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
+        assert!(dbg.contains("acme"), "{dbg}");
     }
 
     #[test]

@@ -59,8 +59,8 @@ impl TunnelHandle {
         }
     }
 
-    pub fn is_up(&self) -> bool {
-        self.child.as_ref().is_some_and(TunnelChild::is_alive)
+    pub fn is_up(&mut self) -> bool {
+        self.child.as_mut().is_some_and(TunnelChild::is_alive)
     }
 
     pub fn reason(&self) -> Option<&str> {
@@ -312,7 +312,7 @@ mod tests {
         let prev = std::env::var_os(TUNNEL_ENV);
         std::env::remove_var(TUNNEL_ENV);
         let tmp = tempfile::tempdir().unwrap();
-        let h = start_from_env(tmp.path(), 8443);
+        let mut h = start_from_env(tmp.path(), 8443);
         assert!(!h.is_up());
         assert_eq!(h.reason(), Some("disabled"));
         match prev {
@@ -330,7 +330,7 @@ mod tests {
             drop(l);
             format!("http://127.0.0.1:{p}/cert")
         };
-        let h = try_start(StartOpts {
+        let mut h = try_start(StartOpts {
             root: tmp.path(),
             label: "acme",
             local_port: 8443,
@@ -356,7 +356,7 @@ mod tests {
         let body = serde_json::json!({ "cert": "-----BEGIN CERTIFICATE-----\nUEs=\n-----END CERTIFICATE-----\n" })
             .to_string();
         let url = spawn_mock_broker("200 OK", &body);
-        let h = try_start(StartOpts {
+        let mut h = try_start(StartOpts {
             root: tmp.path(),
             label: "acme",
             local_port: 18765,

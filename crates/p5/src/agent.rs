@@ -100,6 +100,12 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
 
     let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&state.stop));
     let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&state.stop));
+    // frpc is in its own process group, so a tty hangup would otherwise
+    // skip Drop and leave the tunnel child. Same flag as TERM/INT.
+    #[cfg(unix)]
+    {
+        let _ = signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&state.stop));
+    }
 
     let http_server = Arc::new(server);
     let http_state = Arc::clone(&state);
