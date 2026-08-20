@@ -1,10 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
-  "redirects": [
-    { "source": "/signup", "destination": "https://www.postal.bot/signup", "permanent": false },
-    { "source": "/login", "destination": "https://www.postal.bot/login", "permanent": false }
-  ],
   "rewrites": [
     { "source": "/account", "destination": "/account.html" },
     { "source": "/pay", "destination": "/pay.html" },
