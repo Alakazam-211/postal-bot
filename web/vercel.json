@@ -2,8 +2,8 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
   "redirects": [
-    { "source": "/signup", "destination": "https://k2.dev/signup", "permanent": false },
-    { "source": "/login", "destination": "https://k2.dev/login", "permanent": false }
+    { "source": "/signup", "destination": "https://k2.dev/p/signup", "permanent": false },
+    { "source": "/login", "destination": "https://k2.dev/p/login", "permanent": false }
   ],
   "rewrites": [
     { "source": "/account", "destination": "/account.html" },

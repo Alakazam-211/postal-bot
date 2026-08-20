@@ -137,7 +137,7 @@ fn usage_shows_free_remaining() {
     assert!(text.contains("100"));
     assert!(text.contains("remaining"));
     assert!(text.contains("subdomains"));
-    assert!(text.contains("postal.bot/account"));
+    assert!(text.contains("k2.dev/p/account"));
 }
 
 #[test]
