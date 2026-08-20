@@ -379,7 +379,13 @@ fn title_line(body: &str) -> String {
     if line.is_empty() {
         return "Postal".into();
     }
-    line.chars().take(80).collect()
+    let mut chars = line.chars();
+    let out: String = chars.by_ref().take(80).collect();
+    if chars.next().is_some() {
+        format!("{out}…")
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]
@@ -400,7 +406,9 @@ mod tests {
     fn title_falls_back_and_clips() {
         assert_eq!(title_line(""), "Postal");
         assert_eq!(title_line("\n\n# Hello\nbody"), "Hello");
-        assert_eq!(title_line(&"x".repeat(90)).len(), 80);
+        let clipped = title_line(&"x".repeat(90));
+        assert!(clipped.ends_with('…'), "{clipped}");
+        assert_eq!(clipped.chars().count(), 81);
     }
 
     #[test]

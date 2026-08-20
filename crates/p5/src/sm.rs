@@ -1387,6 +1387,27 @@ mod tests {
     }
 
     #[test]
+    fn k2_knock_is_full_body_not_clipped_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        let mut row = ctx
+            .homes
+            .get(&addr("scout::acme.postal.bot"))
+            .unwrap()
+            .clone();
+        row.harness = Some("k2".into());
+        ctx.homes.insert(row).unwrap();
+        ctx.last_mile.k2 = crate::k2::K2MsgClient::capture();
+        let body = "got your return on Postal: 01M0EYWFQGX5ZWW241RK7DX1XP live/acked. Round trip proven (HTTPS + harness=k2 knock both ways). Keep bot.postal.frpc until we ship a tarball with cert reuse.";
+        let inbound = k2_inbound(body);
+        receive_session(&ctx, &inbound).unwrap();
+        let knocks = ctx.last_mile.k2.recorded();
+        assert_eq!(knocks[0].text, body);
+        assert!(knocks[0].text.contains("Keep bot.postal.frpc"));
+        assert!(!knocks[0].text.ends_with("Round trip pro"));
+    }
+
+    #[test]
     fn other_harness_does_not_call_k2() {
         let tmp = tempfile::tempdir().unwrap();
         let mut ctx = ctx_with_home(tmp.path(), true);
