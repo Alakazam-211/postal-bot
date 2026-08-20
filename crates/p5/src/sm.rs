@@ -45,6 +45,21 @@ pub struct MsgRequest {
     pub to: String,
     pub body: String,
     pub no_wake: bool,
+    /// CLI process cwd (agent UDS must not use the daemon's cwd).
+    pub cwd: Option<PathBuf>,
+    /// CLI process session ids (K2_SESSION_ID / GROK_SESSION_ID / …).
+    pub session_ids: Vec<String>,
+}
+
+impl MsgRequest {
+    /// Stamp cwd + session env from *this* process (the invoking CLI).
+    pub fn capture_caller(mut self) -> Self {
+        self.session_ids = caller_session_ids();
+        if self.cwd.is_none() {
+            self.cwd = std::env::current_dir().ok();
+        }
+        self
+    }
 }
 
 /// PRD §6 `--json` object. `success` matches exit 0.
@@ -312,7 +327,7 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         }
     };
 
-    let from = match resolve_from(ctx) {
+    let from = match resolve_from(ctx, req) {
         Ok(addr) => addr,
         Err(SmError::NoIdentity) => {
             return Ok(MsgResponse::fail(
@@ -849,7 +864,14 @@ fn same_cwd(a: &Path, b: &Path) -> bool {
 
 /// From is the homes row for *this* process. Never a CLI flag (impersonation).
 pub(crate) fn resolve_from_homes(homes: &Homes) -> Result<PostalAddr, SmError> {
-    let ids = caller_session_ids();
+    resolve_from_homes_at(homes, &caller_session_ids(), std::env::current_dir().ok().as_deref())
+}
+
+fn resolve_from_homes_at(
+    homes: &Homes,
+    ids: &[String],
+    cwd: Option<&Path>,
+) -> Result<PostalAddr, SmError> {
     let mut by_sid: Vec<PostalAddr> = homes
         .iter()
         .filter(|(_, row)| {
@@ -867,10 +889,10 @@ pub(crate) fn resolve_from_homes(homes: &Homes) -> Result<PostalAddr, SmError> {
     if by_sid.len() > 1 {
         return Err(SmError::NoIdentity);
     }
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Some(cwd) = cwd {
         let mut by_cwd: Vec<PostalAddr> = homes
             .iter()
-            .filter(|(_, row)| same_cwd(&row.cwd, &cwd))
+            .filter(|(_, row)| same_cwd(&row.cwd, cwd))
             .map(|(addr, _)| addr.clone())
             .collect();
         by_cwd.sort();
@@ -888,8 +910,20 @@ pub(crate) fn resolve_from_homes(homes: &Homes) -> Result<PostalAddr, SmError> {
     Err(SmError::NoIdentity)
 }
 
-fn resolve_from(ctx: &SmContext) -> Result<PostalAddr, SmError> {
-    resolve_from_homes(&ctx.homes)
+fn resolve_from(ctx: &SmContext, req: &MsgRequest) -> Result<PostalAddr, SmError> {
+    let ids = if req.session_ids.is_empty() {
+        caller_session_ids()
+    } else {
+        req.session_ids.clone()
+    };
+    let cwd;
+    let cwd_ref = if let Some(p) = req.cwd.as_deref() {
+        Some(p)
+    } else {
+        cwd = std::env::current_dir().ok();
+        cwd.as_deref()
+    };
+    resolve_from_homes_at(&ctx.homes, &ids, cwd_ref)
 }
 
 fn permanent(reason: &'static str, hint: impl Into<String>) -> ReceiveError {
@@ -1015,6 +1049,8 @@ mod tests {
             to: to.into(),
             body: body.into(),
             no_wake: false,
+            cwd: None,
+            session_ids: Vec::new(),
         }
     }
 

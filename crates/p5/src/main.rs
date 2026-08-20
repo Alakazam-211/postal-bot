@@ -598,7 +598,10 @@ fn inbox_respond(id: String, text: String, no_wake: bool, json: bool) {
                 to: item.from.to_string(),
                 body: text,
                 no_wake,
-            },
+                cwd: None,
+                session_ids: Vec::new(),
+            }
+            .capture_caller(),
             json,
         ),
         Err(err) => {
@@ -663,7 +666,10 @@ fn main() {
                 to: addr,
                 body: text,
                 no_wake,
-            },
+                cwd: None,
+                session_ids: Vec::new(),
+            }
+            .capture_caller(),
             json,
         ),
         Commands::Inbox {

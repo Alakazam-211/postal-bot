@@ -409,6 +409,8 @@ mod tests {
             to: to.into(),
             body: body.into(),
             no_wake: false,
+            cwd: None,
+            session_ids: Vec::new(),
         }
     }
 

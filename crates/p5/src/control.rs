@@ -28,6 +28,10 @@ pub enum ControlReq {
         body: String,
         #[serde(default)]
         no_wake: bool,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        session_ids: Vec<String>,
     },
     /// Pack a live session onto the in-memory map (`p5 handle claim`).
     Register {
@@ -155,6 +159,8 @@ fn handle_client(stream: &mut UnixStream, state: &AgentState) -> Result<(), Stri
             to,
             body,
             no_wake,
+            cwd,
+            session_ids,
         } => {
             let resp = match state.context() {
                 Ok(ctx) => match send_msg(
@@ -163,6 +169,8 @@ fn handle_client(stream: &mut UnixStream, state: &AgentState) -> Result<(), Stri
                         to,
                         body,
                         no_wake,
+                        cwd: cwd.map(PathBuf::from),
+                        session_ids,
                     },
                 ) {
                     Ok(resp) => resp,
@@ -264,6 +272,8 @@ pub fn try_send_msg(root: &Path, req: &MsgRequest) -> TrySend {
         "to": req.to,
         "body": req.body,
         "no_wake": req.no_wake,
+        "cwd": req.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        "session_ids": req.session_ids,
     });
     if let Err(err) = write_frame(&mut stream, &payload) {
         return TrySend::Up(MsgResponse::from_error(err.to_string()));
@@ -346,6 +356,8 @@ mod tests {
             to: "scout::acme.postal.bot".into(),
             body: "hi".into(),
             no_wake: false,
+            cwd: None,
+            session_ids: Vec::new(),
         }
     }
 
