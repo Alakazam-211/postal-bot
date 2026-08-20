@@ -30,6 +30,11 @@ pub enum ControlReq {
         no_wake: bool,
         from: Option<String>,
     },
+    /// Pack a live session onto the in-memory map (`p5 handle claim`).
+    Register {
+        addr: String,
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,6 +59,10 @@ enum ControlResp {
         stopped: bool,
     },
     Send(MsgResponse),
+    Register {
+        ok: bool,
+        live: bool,
+    },
     Error {
         ok: bool,
         error: String,
@@ -166,6 +175,28 @@ fn handle_client(stream: &mut UnixStream, state: &AgentState) -> Result<(), Stri
             };
             ControlResp::Send(resp)
         }
+        ControlReq::Register { addr, session_id } => {
+            match addr.parse::<p5_core::PostalAddr>() {
+                Ok(parsed) => {
+                    let mut map = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                    map.insert(
+                        parsed,
+                        crate::session_map::LiveSession {
+                            session_id,
+                            ready: true,
+                        },
+                    );
+                    ControlResp::Register {
+                        ok: true,
+                        live: true,
+                    }
+                }
+                Err(err) => ControlResp::Error {
+                    ok: false,
+                    error: err.to_string(),
+                },
+            }
+        }
     };
     write_frame(stream, &resp).map_err(|e| e.to_string())
 }
@@ -247,6 +278,29 @@ pub fn try_send_msg(root: &Path, req: &MsgRequest) -> TrySend {
             Err(_) => TrySend::Up(MsgResponse::from_error("agent send failed")),
         },
         Err(err) => TrySend::Up(MsgResponse::from_error(err.to_string())),
+    }
+}
+
+/// Register a live session on a running agent. Connect-refused is `false`.
+pub fn try_register(root: &Path, addr: &str, session_id: &str) -> bool {
+    let mut stream = match connect(root) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let payload = serde_json::json!({
+        "op": "register",
+        "addr": addr,
+        "session_id": session_id,
+    });
+    if write_frame(&mut stream, &payload).is_err() {
+        return false;
+    }
+    match read_frame(&mut stream) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
+            .unwrap_or(false),
+        Err(_) => false,
     }
 }
 

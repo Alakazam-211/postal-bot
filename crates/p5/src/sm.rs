@@ -845,11 +845,18 @@ fn resolve_from(
     {
         return parse_from(&raw, ctx);
     }
-    if let Some((addr, _)) = ctx.homes.iter().next() {
-        return Ok(addr.clone());
+    if let Ok(cfg) = p5_plane::PlaneConfig::load(ctx.mailbox.root()) {
+        if let Some(raw) = cfg.addr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            return parse_from(raw, ctx);
+        }
     }
-    if ctx.dest_is_local(to) {
-        return Ok(to.clone());
+    // Never BTreeMap-first: claude sorts before postal-bot and became From.
+    if let Some((addr, _)) = ctx
+        .homes
+        .iter()
+        .find(|(a, _)| a.handle() == "postal-bot")
+    {
+        return Ok(addr.clone());
     }
     Err(SmError::NoIdentity)
 }
@@ -964,6 +971,7 @@ mod tests {
                 Vec::new()
             },
             harness: if harness { Some("claude".into()) } else { None },
+            terminal: None,
             tools: ToolFlags {
                 files: false,
                 live_inject: true,

@@ -24,6 +24,8 @@ pub struct KnockRequest {
     pub from: String,
     pub wake: bool,
     pub project: String,
+    /// Packed at `p5 handle claim`. k2-daemon may ignore unknown fields.
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,13 +238,17 @@ fn post_msg(
         form_encode(&req.project)
     );
     let path = format!("{MSG_PATH}?{query}");
-    let body = format!(
+    let mut body = format!(
         "workspace={}&text={}&from={}&wake={}",
         form_encode(&req.workspace),
         form_encode(&req.text),
         form_encode(&req.from),
         if req.wake { "true" } else { "false" }
     );
+    if let Some(sid) = req.session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        body.push_str("&session_id=");
+        body.push_str(&form_encode(sid));
+    }
     let (status, resp) = http_post(port, &path, body.as_bytes(), timeout)?;
     let text = String::from_utf8_lossy(&resp).into_owned();
     if !(200..300).contains(&status) {
@@ -378,6 +384,7 @@ mod tests {
             from: "alice::acme.postal.bot".into(),
             wake: true,
             project: "/srv/scout".into(),
+            session_id: None,
         };
         client.knock(&req).unwrap();
         assert_eq!(client.recorded(), vec![req]);
@@ -392,6 +399,7 @@ mod tests {
                 from: "a::acme.postal.bot".into(),
                 wake: true,
                 project: String::new(),
+                session_id: None,
             })
             .unwrap_err();
         assert!(matches!(err, K2MsgError::Disabled));
@@ -439,6 +447,7 @@ mod tests {
                 from: "alice::acme.postal.bot".into(),
                 wake: true,
                 project: "/srv/scout".into(),
+                session_id: Some("sess-claim".into()),
             })
             .unwrap();
         assert!(resp.success);
@@ -453,6 +462,7 @@ mod tests {
         assert!(raw.contains("workspace=postal-bot"));
         assert!(raw.contains("from=alice%3A%3Aacme.postal.bot"));
         assert!(raw.contains("wake=true"));
+        assert!(raw.contains("session_id=sess-claim"));
         assert!(raw.contains("text=%5Bp5%3A01ARZ3NDEKTSV4RRFFQ69G5FAV%5D%20Brief%0AOpen%3A%20p5%20inbox%20read%2001ARZ3NDEKTSV4RRFFQ69G5FAV"));
         assert!(!raw.contains("tok_secret\r\n"));
     }
@@ -493,6 +503,7 @@ mod tests {
                 from: "a::acme.postal.bot".into(),
                 wake: false,
                 project: String::new(),
+                session_id: None,
             })
             .unwrap_err();
         stop.store(true, Ordering::Relaxed);

@@ -2,5 +2,7 @@
 /.k2
 *.pdb
 node_modules/
+__pycache__/
+*.pyc
 /web/releases/latest/*.tar.gz
 /web/releases/latest/SHA256SUMS

@@ -200,6 +200,7 @@ fn add_home(root: &Path, address: &str) {
             inbox_root: None,
             launch: vec!["claude".into()],
             harness: Some("claude".into()),
+            terminal: None,
             tools: ToolFlags {
                 files: false,
                 live_inject: true,

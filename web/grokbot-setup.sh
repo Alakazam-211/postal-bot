@@ -47,19 +47,25 @@ install_p5() {
         info "p5 already on PATH: $(command -v p5)"
         return 0
     fi
-    src="${POSTAL_SRC:-}"
-    if [ -z "$src" ] && [ -f "./install/install.sh" ]; then
-        src="$PWD"
+    # Prefer the published tarball (linux prebuilt). A checkout used to
+    # force cargo and hit rustc 1.97 pre_exec E0133. P5_LOCAL=1 keeps the
+    # source path for packagers.
+    if [ "${P5_LOCAL:-0}" = "1" ]; then
+        src="${POSTAL_SRC:-}"
+        if [ -z "$src" ] && [ -f "./install/install.sh" ]; then
+            src="$PWD"
+        fi
+        if [ -n "$src" ] && [ -f "$src/install/install.sh" ]; then
+            need_bin cargo
+            info "installing p5 from $src (--from-cargo)"
+            ( cd "$src" && P5_LOCAL=1 ./install/install.sh --from-cargo )
+            hash -r 2>/dev/null || true
+            command -v p5 >/dev/null 2>&1 || die "p5 not on PATH after install; add ~/.local/bin"
+            return 0
+        fi
+        die "P5_LOCAL=1 but no install/install.sh (set POSTAL_SRC)"
     fi
-    if [ -n "$src" ] && [ -f "$src/install/install.sh" ]; then
-        need_bin cargo
-        info "installing p5 from $src (--from-cargo)"
-        ( cd "$src" && P5_LOCAL=1 ./install/install.sh --from-cargo )
-        hash -r 2>/dev/null || true
-        command -v p5 >/dev/null 2>&1 || die "p5 not on PATH after install; add ~/.local/bin"
-        return 0
-    fi
-    info "installing p5 via https://www.postal.bot/install.sh (no GitHub)"
+    info "installing p5 via https://www.postal.bot/install.sh (linux tarball, then src)"
     curl -fsSL https://www.postal.bot/install.sh | sh
     hash -r 2>/dev/null || true
     command -v p5 >/dev/null 2>&1 || die "p5 not on PATH after install; add ~/.local/bin"

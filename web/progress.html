@@ -265,7 +265,7 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
     <p>The plane and the git CLI speak the same grant. A new user still cannot walk install → approve → tunnel up without a human who already knows the product. Remaining, in the order that hurts:</p>
     <ol>
       <li>
-        <strong>Linux prebuilt (0.1.3)</strong> — GitHub Actions builds <code>p5-linux-x86_64.tar.gz</code> and <code>p5-linux-aarch64.tar.gz</code>. <code>CommandExt::pre_exec</code> is wrapped so rustc 1.97 source builds also work. macOS aarch64 tarball already live.
+        <strong>0.1.4 handle + terminal plugins</strong> — <code>p5 handle claim</code>, exec plugins <code>iterm2</code> / <code>terminal</code> / <code>ghostty</code> / <code>zed</code> / <code>vscode</code>. Linux prebuilts still 0.1.3 on www until this tag’s Actions run. <code>curl|sh</code> lands p5+frpc; a cargo-only <code>p5</code> scp does not.
       </li>
       <li>
         <strong>Install-pipe walk on a fresh box:</strong> isolated git <code>p5 login --label rosson</code> already approved (2026-08-20, <code>NYSN-M6MS</code> → <code>k2c_cli_*</code> → hosts 200). Still need <code>curl | sh</code> then <code>p5 login</code> (interactive picker, agent start, tunnel up) on a machine that is not the live <code>rosson.postal.bot</code> agent.

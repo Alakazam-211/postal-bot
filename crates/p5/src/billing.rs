@@ -393,6 +393,7 @@ mod tests {
                 inbox_root: None,
                 launch: Vec::new(),
                 harness: None,
+                terminal: None,
                 tools: ToolFlags {
                     files: false,
                     live_inject: true,

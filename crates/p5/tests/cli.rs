@@ -60,6 +60,7 @@ fn add_home(root: &Path, address: &str, wake: bool) {
             inbox_root: None,
             launch: vec!["claude".into()],
             harness: Some("claude".into()),
+            terminal: None,
             tools: ToolFlags {
                 files: false,
                 live_inject: true,
@@ -526,4 +527,67 @@ fn inbox_respond_is_msg_to_from() {
     assert!(cover.contains("pong"));
     assert!(cover.contains("alice::acme.postal.bot"));
     assert!(cover.contains("scout::acme.postal.bot"));
+}
+
+#[test]
+fn handle_claim_requires_plugin() {
+    let home = tmp_home();
+    let out = run_home(home.path(), &["handle", "claim", "scout"], &[]);
+    assert_eq!(out.status.code(), Some(2), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no_plugin"), "{err}");
+}
+
+#[test]
+fn handle_claim_k2_writes_homes() {
+    let home = tmp_home();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "tunnel_label = \"acme\"\n",
+    )
+    .unwrap();
+    let bin = home.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let k2 = bin.join("k2");
+    std::fs::write(
+        &k2,
+        "#!/bin/sh\nprintf '%s\\n' 'workspace: scout' 'session: sess-cli'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&k2, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = run_home(
+        home.path(),
+        &[
+            "handle",
+            "claim",
+            "scout",
+            "--plugin",
+            "k2",
+            "--cwd",
+            home.path().to_str().unwrap(),
+            "--json",
+        ],
+        &[("PATH", path.as_str()), ("P5_PLANE_URL", "http://127.0.0.1:1")],
+    );
+    assert!(
+        out.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("scout::acme.postal.bot"), "{stdout}");
+    assert!(stdout.contains("sess-cli"), "{stdout}");
+    let listed = stdout_home(home.path(), &["handle", "list", "--json"]);
+    assert!(listed.contains("scout::acme.postal.bot"), "{listed}");
+    assert!(listed.contains("\"plugin\": \"k2\""), "{listed}");
 }

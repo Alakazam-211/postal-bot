@@ -32,7 +32,6 @@ impl SessionMap {
         self.entries.get(addr)
     }
 
-    #[allow(dead_code)]
     pub fn insert(&mut self, addr: PostalAddr, session: LiveSession) -> Option<LiveSession> {
         self.entries.insert(addr, session)
     }

@@ -14,6 +14,7 @@ mod session_map;
 mod sm;
 mod turn;
 
+mod handle;
 mod login;
 
 use pair::{
@@ -107,6 +108,11 @@ enum Commands {
     Logout,
     /// Agent / tunnel status (UDS)
     Status,
+    /// Bind a handle to this session's plugin + re-wake identity
+    Handle {
+        #[command(subcommand)]
+        action: HandleAction,
+    },
     /// Pairing (plane). `add` may request; accept/reject/revoke are owner-gated
     Pair {
         #[command(subcommand)]
@@ -137,6 +143,46 @@ enum Commands {
         #[arg(long)]
         pem: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum HandleAction {
+    /// Pack plugin + session id for this handle (run in that bot's terminal)
+    Claim {
+        /// Left side of `handle::host` (`claude`)
+        handle: String,
+        /// Last-mile plugin (`k2`, `grok`, or exec name)
+        #[arg(long)]
+        plugin: Option<String>,
+        /// Workspace directory (default: cwd)
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Platform session id; plugin must validate it
+        #[arg(long)]
+        session: Option<String>,
+        /// session or turn (default: plugin claim)
+        #[arg(long)]
+        typ: Option<String>,
+        /// Replace an existing session id on this handle
+        #[arg(long)]
+        force: bool,
+        /// Print a JSON object
+        #[arg(long)]
+        json: bool,
+    },
+    /// List homes rows (address, plugin, session, cwd)
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one handle
+    Show {
+        handle: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a homes row (owner-gated: `P5_OWNER_PAIR=1`)
+    Drop { handle: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -295,8 +341,11 @@ fn help_last_mile_text() -> String {
         "\
 Last mile — after Postal writes ~/.postal/inbox, knock the live agent.
 
-Set homes.harness on the receiving address. Types (session/turn) are
-how the agent lives; harness is how we inject. See also: p5 help types
+Pack plugin + session per handle (not per install):
+
+  p5 handle claim <handle> --plugin k2|grok|<name> [--json]
+
+Run that in the bot's own terminal. See also: p5 help types
 
 Built-in  grok  (Grok Bot / Sand, usually type turn)
   Loopback gateway HTTP (same contract as Grok Bot's host API):
@@ -532,6 +581,27 @@ fn fail_sm(err: SmError, json: bool) -> ! {
     std::process::exit(err.exit_code());
 }
 
+fn run_handle(action: HandleAction) {
+    let result = match action {
+        HandleAction::Claim {
+            handle,
+            plugin,
+            cwd,
+            session,
+            typ,
+            force,
+            json,
+        } => crate::handle::run_claim(handle, plugin, cwd, session, typ, json, force),
+        HandleAction::List { json } => crate::handle::run_list(json),
+        HandleAction::Show { handle, json } => crate::handle::run_show(handle, json),
+        HandleAction::Drop { handle } => crate::handle::run_drop(handle),
+    };
+    if let Err(err) = result {
+        eprintln!("{err}");
+        std::process::exit(err.exit_code());
+    }
+}
+
 fn inbox_respond(id: String, text: String, no_wake: bool, json: bool, from: Option<String>) {
     let mb = mailbox();
     match mb.read_inbox(&id) {
@@ -593,6 +663,7 @@ fn main() {
         Commands::Help {
             topic: Some(HelpTopic::Usage),
         } => print!("{}", help_usage_text()),
+        Commands::Handle { action } => run_handle(action),
         Commands::Usage { json } => run_usage(json),
         Commands::Billing { action } => run_billing(action),
         Commands::Msg {

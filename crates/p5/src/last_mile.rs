@@ -50,6 +50,7 @@ use crate::sm::{Inbound, SmContext};
 use crate::turn;
 
 const KNOCK_TIMEOUT: Duration = Duration::from_secs(25);
+const RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 const PLUGIN_NAME_MAX: usize = 63;
 
 /// Per-process last-mile clients. Dispatch is still `HomeRow.harness`.
@@ -137,7 +138,7 @@ pub fn after_inbox_fsync(
         return Ok(());
     };
     let knock = Knock::from_inbox(home, inbound);
-    dispatch(ctx, &name, &knock)
+    dispatch(ctx, &name, &knock, home.tools.wake)
 }
 
 fn resolve_plugin(root: &Path, home: &HomeRow, is_turn: bool) -> Option<String> {
@@ -160,15 +161,36 @@ fn resolve_plugin(root: &Path, home: &HomeRow, is_turn: bool) -> Option<String> 
         .map(str::to_string)
 }
 
-fn dispatch(ctx: &SmContext, name: &str, knock: &Knock) -> Result<(), LastMileError> {
+fn dispatch(
+    ctx: &SmContext,
+    name: &str,
+    knock: &Knock,
+    wake: bool,
+) -> Result<(), LastMileError> {
     match name {
         "k2" => knock_k2(&ctx.last_mile.k2, knock),
         "grok" => knock_grok(ctx, knock),
         other => match discover_exec(ctx.mailbox.root(), other) {
-            Some(path) => exec_knock(&path, knock),
+            Some(path) => exec_knock_or_resume(&path, knock, wake),
             None => Ok(()),
         },
     }
+}
+
+fn exec_knock_or_resume(path: &Path, knock: &Knock, wake: bool) -> Result<(), LastMileError> {
+    match exec_op(path, "knock", knock, KNOCK_TIMEOUT) {
+        Ok(()) => Ok(()),
+        Err(err) if wake && looks_dormant(&err) => {
+            exec_op(path, "resume", knock, RESUME_TIMEOUT)?;
+            exec_op(path, "knock", knock, KNOCK_TIMEOUT)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn looks_dormant(err: &LastMileError) -> bool {
+    let s = err.to_string();
+    s.contains("not_live") || s.contains("session not found") || s.contains("tty not found")
 }
 
 fn knock_grok(ctx: &SmContext, knock: &Knock) -> Result<(), LastMileError> {
@@ -213,6 +235,7 @@ fn knock_k2(client: &K2MsgClient, knock: &Knock) -> Result<(), LastMileError> {
         from: knock.from.clone(),
         wake: knock.wake,
         project: knock.cwd.clone(),
+        session_id: knock.session_id.clone(),
     };
     client
         .knock(&req)
@@ -280,11 +303,11 @@ fn find_on_path(bin: &str) -> Option<PathBuf> {
     None
 }
 
-fn exec_knock(path: &Path, knock: &Knock) -> Result<(), LastMileError> {
+fn exec_op(path: &Path, op: &str, knock: &Knock, timeout: Duration) -> Result<(), LastMileError> {
     let body = serde_json::to_vec(knock)
-        .map_err(|e| LastMileError::Exec(format!("encode knock: {e}")))?;
+        .map_err(|e| LastMileError::Exec(format!("encode {op}: {e}")))?;
     let mut child = Command::new(path)
-        .arg("knock")
+        .arg(op)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -295,7 +318,7 @@ fn exec_knock(path: &Path, knock: &Knock) -> Result<(), LastMileError> {
             .write_all(&body)
             .map_err(|e| LastMileError::Exec(e.to_string()))?;
     }
-    let output = wait_with_timeout(&mut child, KNOCK_TIMEOUT)?;
+    let output = wait_with_timeout(&mut child, timeout)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if let Ok(reply) = serde_json::from_str::<PluginReply>(stdout.trim()) {
         if reply.ok == Some(false) {
@@ -365,6 +388,221 @@ fn drain_child(
         status,
         stdout,
         stderr,
+    })
+}
+
+/// Result of `<plugin> claim` (built-in or exec).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    pub terminal: String,
+    pub session_id: String,
+    pub cwd: String,
+    pub live: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typ: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimWire {
+    #[serde(default)]
+    ok: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    terminal: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    live: Option<bool>,
+    #[serde(default)]
+    typ: Option<String>,
+    #[serde(default)]
+    launch: Option<Vec<String>>,
+}
+
+/// Reveal terminal + session id for `p5 handle claim`. Fail closed.
+pub fn claim_plugin(
+    root: &Path,
+    plugin: &str,
+    handle: &str,
+    cwd: &Path,
+    want_session: Option<&str>,
+) -> Result<Claim, LastMileError> {
+    if !is_plugin_name(plugin) {
+        return Err(LastMileError::Plugin(format!("no_plugin: {plugin}")));
+    }
+    match plugin {
+        "k2" => claim_k2(cwd, handle, want_session),
+        "grok" | "turn" => claim_grok(handle, want_session),
+        other => match discover_exec(root, other) {
+            Some(path) => exec_claim(&path, handle, cwd, want_session),
+            None => Err(LastMileError::Plugin(format!(
+                "no_plugin: {other} not found (built-ins: k2, grok; or ~/.postal/harness/{other})"
+            ))),
+        },
+    }
+}
+
+fn claim_k2(
+    cwd: &Path,
+    _handle: &str,
+    want_session: Option<&str>,
+) -> Result<Claim, LastMileError> {
+    let out = Command::new("k2")
+        .arg("whoami")
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| LastMileError::Plugin(format!("claim_failed: k2 whoami: {e}")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(LastMileError::Plugin(format!(
+            "claim_failed: k2 whoami exit {}: {}",
+            out.status.code().unwrap_or(-1),
+            err.trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let session_id = parse_whoami_field(&text, "session").ok_or_else(|| {
+        LastMileError::Plugin("claim_failed: k2 whoami has no session: line".into())
+    })?;
+    if let Some(want) = want_session.map(str::trim).filter(|s| !s.is_empty()) {
+        if want != session_id {
+            return Err(LastMileError::Plugin(format!(
+                "session_mismatch: wanted {want}, k2 whoami is {session_id}"
+            )));
+        }
+    }
+    Ok(Claim {
+        terminal: "k2".into(),
+        session_id,
+        cwd: cwd.to_string_lossy().into_owned(),
+        live: true,
+        typ: Some("session".into()),
+        launch: None,
+    })
+}
+
+fn parse_whoami_field(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            let v = rest.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn claim_grok(handle: &str, want_session: Option<&str>) -> Result<Claim, LastMileError> {
+    let cfg = turn::TurnConfig::from_env();
+    let id = turn::resolve_sand_agent(&cfg, want_session, Some(handle))
+        .map_err(|e| LastMileError::Plugin(format!("claim_failed: {e}")))?;
+    if let Some(want) = want_session.map(str::trim).filter(|s| !s.is_empty()) {
+        if want != id {
+            return Err(LastMileError::Plugin(format!(
+                "session_mismatch: wanted {want}, grok agent is {id}"
+            )));
+        }
+    }
+    Ok(Claim {
+        terminal: "grok".into(),
+        session_id: id,
+        cwd: String::new(),
+        live: turn::health_up(&cfg).is_ok(),
+        typ: Some("turn".into()),
+        launch: None,
+    })
+}
+
+fn exec_claim(
+    path: &Path,
+    handle: &str,
+    cwd: &Path,
+    want_session: Option<&str>,
+) -> Result<Claim, LastMileError> {
+    let body = serde_json::json!({
+        "v": 1,
+        "op": "claim",
+        "handle": handle,
+        "cwd": cwd.to_string_lossy(),
+        "session_id": want_session,
+    });
+    let bytes = serde_json::to_vec(&body)
+        .map_err(|e| LastMileError::Exec(format!("encode claim: {e}")))?;
+    let mut child = Command::new(path)
+        .arg("claim")
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| LastMileError::Exec(format!("{}: {e}", path.display())))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&bytes)
+            .map_err(|e| LastMileError::Exec(e.to_string()))?;
+    }
+    let output = wait_with_timeout(&mut child, KNOCK_TIMEOUT)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let wire: ClaimWire = serde_json::from_str(stdout.trim()).unwrap_or(ClaimWire {
+        ok: Some(output.status.success()),
+        reason: None,
+        terminal: None,
+        session_id: None,
+        cwd: None,
+        live: None,
+        typ: None,
+        launch: None,
+    });
+    if wire.ok == Some(false) || !output.status.success() {
+        let reason = wire
+            .reason
+            .unwrap_or_else(|| String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return Err(LastMileError::Plugin(format!(
+            "claim_failed: {}",
+            if reason.is_empty() {
+                format!("{} exit {}", path.display(), output.status.code().unwrap_or(-1))
+            } else {
+                reason
+            }
+        )));
+    }
+    let session_id = wire
+        .session_id
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| LastMileError::Plugin("claim_failed: plugin omitted session_id".into()))?;
+    if let Some(want) = want_session.map(str::trim).filter(|s| !s.is_empty()) {
+        // iTerm tab ids (w0t0p0:UUID) are not the resume id; allow that.
+        let iterm_shaped = want.contains(':') || want.chars().any(|c| c.is_ascii_uppercase());
+        if want != session_id && !iterm_shaped {
+            return Err(LastMileError::Plugin(format!(
+                "session_mismatch: wanted {want}, plugin revealed {session_id}"
+            )));
+        }
+    }
+    Ok(Claim {
+        terminal: wire.terminal.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("exec")
+                .to_string()
+        }),
+        session_id,
+        cwd: wire
+            .cwd
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
+        live: wire.live.unwrap_or(true),
+        typ: wire.typ,
+        launch: wire.launch.filter(|v| !v.is_empty()),
     })
 }
 
@@ -444,6 +682,7 @@ mod tests {
                 inbox_root: None,
                 launch: vec!["x".into()],
                 harness: Some(harness.into()),
+                terminal: None,
                 tools: ToolFlags {
                     files: false,
                     live_inject: true,
@@ -503,6 +742,46 @@ mod tests {
     }
 
     #[test]
+    fn k2_workspace_uses_this_row_cwd_not_handle() {
+        assert_eq!(
+            k2_workspace(&Knock {
+                v: 1,
+                op: "knock".into(),
+                id: "1".into(),
+                to: "claude::acme.postal.bot".into(),
+                from: "a::acme.postal.bot".into(),
+                handle: "claude".into(),
+                typ: "session".into(),
+                title: "hi".into(),
+                text: "hi".into(),
+                body: "hi".into(),
+                wake: true,
+                cwd: "/Users/z/claude".into(),
+                session_id: Some("sess-claude".into()),
+            }),
+            "/Users/z/claude"
+        );
+        assert_eq!(
+            k2_workspace(&Knock {
+                v: 1,
+                op: "knock".into(),
+                id: "1".into(),
+                to: "postal-bot::acme.postal.bot".into(),
+                from: "a::acme.postal.bot".into(),
+                handle: "postal-bot".into(),
+                typ: "session".into(),
+                title: "hi".into(),
+                text: "hi".into(),
+                body: "hi".into(),
+                wake: true,
+                cwd: "/Users/z/kessel".into(),
+                session_id: Some("sess-p5".into()),
+            }),
+            "/Users/z/kessel"
+        );
+    }
+
+    #[test]
     fn grok_plugin_resolves_handle_via_list_agents() {
         let tmp = tempfile::tempdir().unwrap();
         let uuid = "0e5f5de8-7619-4ba4-9753-32c5470b2346";
@@ -524,6 +803,7 @@ mod tests {
                 inbox_root: None,
                 launch: Vec::new(),
                 harness: Some("grok".into()),
+                terminal: None,
                 tools: ToolFlags {
                     files: false,
                     live_inject: true,
@@ -570,6 +850,25 @@ mod tests {
         fs::set_permissions(&plugin, fs::Permissions::from_mode(0o755)).unwrap();
         let (ctx, inbound) = home_with_harness(tmp.path(), "sample");
         receive_session(&ctx, &inbound).unwrap();
+        assert_eq!(ctx.mailbox.list_inbox(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn exec_plugin_not_live_runs_resume_then_knock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness_dir = tmp.path().join("harness");
+        fs::create_dir(&harness_dir).unwrap();
+        let plugin = harness_dir.join("iterm2");
+        let flag = tmp.path().join("resumed");
+        let script = format!(
+            "#!/bin/sh\nFLAG=\"{}\"\nif [ \"$1\" = resume ]; then touch \"$FLAG\"; echo '{{\"ok\":true}}'; exit 0; fi\nif [ -f \"$FLAG\" ]; then echo '{{\"ok\":true}}'; exit 0; fi\necho '{{\"ok\":false,\"reason\":\"not_live\"}}'\nexit 1\n",
+            flag.display()
+        );
+        fs::write(&plugin, script).unwrap();
+        fs::set_permissions(&plugin, fs::Permissions::from_mode(0o755)).unwrap();
+        let (ctx, inbound) = home_with_harness(tmp.path(), "iterm2");
+        receive_session(&ctx, &inbound).unwrap();
+        assert!(flag.is_file(), "resume should have run");
         assert_eq!(ctx.mailbox.list_inbox(None, None).unwrap().len(), 1);
     }
 }

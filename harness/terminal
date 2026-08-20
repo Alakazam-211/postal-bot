@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""Postal last-mile for Claude (or a shell) in macOS Terminal.app.
+
+Same three ops as harness/iterm2: claim, knock, resume.
+Inject uses `do script in tab` (PTY input + return) without `activate`.
+Resume uses `open -g` + `do script` and restores the previous frontmost app.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+
+LOG = os.path.expanduser("~/.postal/terminal-knock.log")
+
+
+def log(msg: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(msg.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def read_stdin() -> dict:
+    raw = sys.stdin.read()
+    return json.loads(raw) if raw.strip() else {}
+
+
+def encode_project_dir(cwd: str) -> str:
+    return os.path.expanduser("~/.claude/projects/") + cwd.replace("/", "-")
+
+
+def claude_session_from_disk(cwd: str) -> str | None:
+    cwd = os.path.abspath(cwd)
+    hist = os.path.expanduser("~/.claude/history.jsonl")
+    latest, latest_ts = None, -1
+    if os.path.isfile(hist):
+        try:
+            with open(hist, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if d.get("project") != cwd:
+                        continue
+                    sid = (d.get("sessionId") or "").strip()
+                    ts = d.get("timestamp") or 0
+                    if sid and ts >= latest_ts:
+                        latest, latest_ts = sid, ts
+        except OSError:
+            pass
+    if latest:
+        return latest
+    proj = encode_project_dir(cwd)
+    if not os.path.isdir(proj):
+        return None
+    files = []
+    try:
+        for name in os.listdir(proj):
+            if name.endswith(".jsonl") and len(name) > 10:
+                path = os.path.join(proj, name)
+                files.append((os.path.getmtime(path), name[: -len(".jsonl")]))
+    except OSError:
+        return None
+    if not files:
+        return None
+    files.sort()
+    return files[-1][1]
+
+
+def live_for_cwd(cwd: str, resume_id: str | None) -> tuple[str | None, str | None]:
+    """(pid, tty) for Apple_Terminal process in cwd."""
+    cwd = os.path.abspath(cwd)
+    try:
+        out = subprocess.check_output(["ps", "ax", "-o", "pid=,tty=,command="], text=True)
+    except OSError:
+        return None, None
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, tty, cmd = parts[0], parts[1], parts[2]
+        if "claude" not in cmd:
+            continue
+        if "bg-spare" in cmd or "bg-pty-host" in cmd:
+            continue
+        if resume_id and resume_id not in cmd and "--resume" in cmd:
+            continue
+        if tty in ("??", "-"):
+            continue
+        try:
+            env = subprocess.check_output(
+                ["ps", "eww", "-p", pid], text=True, stderr=subprocess.DEVNULL
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if "TERM_PROGRAM=Apple_Terminal" not in env:
+            continue
+        if f"PWD={cwd}" not in env:
+            continue
+        idx = env.find("PWD=" + cwd)
+        after = env[idx + 4 + len(cwd) : idx + 4 + len(cwd) + 1] if idx >= 0 else ""
+        if after and after not in " \t\n":
+            continue
+        if not tty.startswith("tty"):
+            tty = "tty" + tty
+        return pid, "/dev/" + tty
+    return None, None
+
+
+def osascript(script: str, args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["osascript", "-", *args],
+        input=script,
+        text=True,
+        capture_output=True,
+    )
+
+
+def restore_frontmost(name: str) -> None:
+    if not name:
+        return
+    subprocess.run(
+        [
+            "osascript",
+            "-e",
+            'tell application "System Events" to set frontmost of process "%s" to true'
+            % name.replace('"', ""),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def frontmost_name() -> str:
+    r = subprocess.run(
+        [
+            "osascript",
+            "-e",
+            'tell application "System Events" to get name of first application process whose frontmost is true',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return (r.stdout or "").strip()
+
+
+def write_launch_command(cwd: str, resume_id: str) -> str:
+    """Terminal `do script` blocks until the child exits — cannot wait on claude.
+    `open -g` a .command file starts the tab without holding osascript."""
+    run_dir = os.path.expanduser("~/.postal/harness-run")
+    os.makedirs(run_dir, exist_ok=True)
+    tag = (resume_id or "new")[:8]
+    path = os.path.join(run_dir, "terminal-%s.command" % tag)
+    cmd = "exec claude --dangerously-skip-permissions"
+    if resume_id:
+        cmd += " --resume " + shlex.quote(resume_id)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!/bin/zsh\ncd %s || exit 1\n%s\n" % (shlex.quote(cwd), cmd))
+    os.chmod(path, 0o700)
+    return path
+
+INJECT_SCRIPT = r"""
+on run argv
+  set wantTty to item 1 of argv
+  set payload to item 2 of argv
+  set prevFront to ""
+  try
+    tell application "System Events"
+      set prevFront to name of first application process whose frontmost is true
+    end tell
+  end try
+  set found to false
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        try
+          set tt to tty of t as text
+          if tt contains wantTty then
+            -- Timeout: do script waits for a shell prompt if the tab is busy.
+            -- First call pastes + one return; Claude TUI needs a second Enter to submit.
+            with timeout of 2 seconds
+              do script payload in t
+            end timeout
+            delay 0.25
+            with timeout of 2 seconds
+              do script "" in t
+            end timeout
+            set found to true
+            exit repeat
+          end if
+        end try
+      end repeat
+      if found then exit repeat
+    end repeat
+  end tell
+  if not found then error "session not found"
+  if prevFront is not "" then
+    try
+      tell application "System Events"
+        set frontmost of process prevFront to true
+      end tell
+    end try
+  end if
+  return "submitted"
+end run
+"""
+
+
+def cmd_claim(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    claude_sid = claude_session_from_disk(cwd)
+    want = (d.get("session_id") or "").strip()
+    if want and len(want) == 36 and want.count("-") == 4:
+        claude_sid = want
+    if not claude_sid:
+        print(json.dumps({"ok": False, "reason": "claim_failed: no Claude sessionId for cwd"}))
+        sys.exit(1)
+    pid, tty = live_for_cwd(cwd, claude_sid)
+    print(
+        json.dumps(
+            {
+                "v": 1,
+                "ok": True,
+                "terminal": "terminal",
+                "session_id": claude_sid,
+                "cwd": cwd,
+                "live": bool(tty),
+                "typ": "session",
+                "tty": tty,
+                "pid": pid,
+                "launch": [
+                    "claude",
+                    "--dangerously-skip-permissions",
+                    "--resume",
+                    claude_sid,
+                ],
+            }
+        )
+    )
+
+
+def cmd_knock(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    resume_id = (d.get("session_id") or "").strip()
+    frm = (d.get("from") or "").strip()
+    body = (d.get("body") or d.get("title") or "").strip()
+    clean = "".join(c for c in body if c != "\x1b")
+    line = " ".join(clean.split())
+    payload = ("[from %s] %s" % (frm, line)) if frm else line
+    pid, tty = live_for_cwd(cwd, resume_id or None)
+    if not tty:
+        print(json.dumps({"ok": False, "reason": "not_live", "resume": True, "cwd": cwd}))
+        sys.exit(1)
+    want = tty.replace("/dev/", "")
+    r = osascript(INJECT_SCRIPT, [want, payload])
+    log(
+        "inject rc=%s out=%s err=%s tty=%s"
+        % (r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()[:300], tty)
+    )
+    err = (r.stderr or r.stdout or "").strip()
+    timed_out = "timed out" in err.lower()
+    if (r.returncode != 0 or "submitted" not in (r.stdout or "")) and not timed_out:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason": "knock: osascript %s %s"
+                    % (r.returncode, err[:200]),
+                }
+            )
+        )
+        sys.exit(1)
+    print(json.dumps({"ok": True, "injected": True, "pid": pid, "tty": tty, "timeout": timed_out}))
+
+
+def cmd_resume(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    resume_id = (d.get("session_id") or "").strip() or (claude_session_from_disk(cwd) or "")
+    if not resume_id:
+        print(json.dumps({"ok": False, "reason": "resume: no Claude session id"}))
+        sys.exit(1)
+    pid, tty = live_for_cwd(cwd, resume_id)
+    if tty:
+        print(json.dumps({"ok": True, "already": True, "pid": pid, "tty": tty, "session_id": resume_id}))
+        return
+    prev = frontmost_name()
+    launch = write_launch_command(cwd, resume_id)
+    r = subprocess.run(["open", "-g", launch], capture_output=True, text=True)
+    log("resume open -g %s rc=%s err=%s" % (launch, r.returncode, (r.stderr or "").strip()[:200]))
+    time.sleep(0.4)
+    restore_frontmost(prev)
+    if r.returncode != 0:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason": "resume: open %s %s"
+                    % (r.returncode, (r.stderr or "").strip()[:200]),
+                }
+            )
+        )
+        sys.exit(1)
+    deadline = time.time() + 35
+    while time.time() < deadline:
+        pid, tty = live_for_cwd(cwd, resume_id)
+        if tty:
+            break
+        time.sleep(0.4)
+    if not tty:
+        print(json.dumps({"ok": False, "reason": "resume: claude PTY did not appear in Terminal"}))
+        sys.exit(1)
+    time.sleep(1.6)
+    print(json.dumps({"ok": True, "spawned": True, "pid": pid, "tty": tty, "session_id": resume_id}))
+
+
+def main() -> None:
+    op = sys.argv[1] if len(sys.argv) > 1 else ""
+    try:
+        d = read_stdin()
+    except json.JSONDecodeError as e:
+        print(json.dumps({"ok": False, "reason": "bad json: %s" % e}))
+        sys.exit(1)
+    if op == "claim":
+        cmd_claim(d)
+    elif op == "knock":
+        cmd_knock(d)
+    elif op == "resume":
+        cmd_resume(d)
+    else:
+        print(json.dumps({"ok": False, "reason": "usage: terminal claim|knock|resume"}))
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

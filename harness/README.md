@@ -16,6 +16,11 @@ This is the OSS contribution surface. PRs: see [`CONTRIBUTING.md`](../CONTRIBUTI
 |---|---|
 | `k2` | `POST /cli/workspace/msg` (same route as `k2 msg`). Injects the **full** `body`. |
 | `grok` | loopback Grok Bot gateway (type `turn`): Bearer from `~/sand-data/gateway.json`, `POST /api/listAgents` for UUID, then `POST /api/sendPrompt` with **`body`**. |
+| `iterm2` (exec) | macOS iTerm2 + Claude Code. Live: k2-style paste+CR (`write text`, no focus). Dormant: `open -g`, no `activate`, restore frontmost, `claude --resume <id>`. `harness/iterm2`. |
+| `terminal` (exec) | macOS Terminal.app. Live: `do script in tab` (no `activate`). Dormant: `open -g` + `do script`, restore frontmost. `harness/terminal`. |
+| `ghostty` (exec) | Ghostty 1.3+ AppleScript. Live: `input text` + `send key enter` (no `focus`). Dormant: `new window with configuration`, `open -g`, restore frontmost. `harness/ghostty`. |
+| `zed` (exec) | Zed integrated terminal. No native inject API; System Events keystroke then restore frontmost (brief flash). `harness/zed`. |
+| `vscode` (exec) | VS Code integrated terminal (not Cursor). Same System Events pattern as Zed. `harness/vscode`. |
 
 Type `turn` with no other matching plugin defaults to `grok`.
 
@@ -33,6 +38,11 @@ if you fail.
 
 Copy `harness/webhook` to `~/.postal/harness/webhook` and set
 `homes.harness` to `webhook` plus `P5_WEBHOOK_URL`.
+
+New terminals/IDEs/host bots (iTerm2, Terminal.app, Ghostty, Zed,
+VS Code, OpenClaw, Hermes, Paperclip, …) are **exec plugins** with
+`claim` / `knock` / `resume`. Resume must revive after the app is
+quit. See the workspace wiki note **Wake Plugins**.
 
 ## Knock JSON v1
 

@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""Postal last-mile for Claude (or other TUIs) in iTerm2.
+
+claim  — pack Claude --resume id + cwd. Live iTerm tab is optional.
+knock  — if a claude PTY is live for that cwd, inject (k2-style paste+CR).
+resume — open iTerm, cd cwd, `claude --dangerously-skip-permissions --resume <id>`,
+         wait for the TUI, then knock can inject.
+
+Does not use TIOCSTI. iTerm owns the PTY master; AppleScript `write text` is
+the inject API (same job as k2-daemon LiveSession.write).
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+LOG = os.path.expanduser("~/.postal/iterm2-knock.log")
+
+
+def log(msg: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(msg.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def read_stdin() -> dict:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return {}
+    return json.loads(raw)
+
+
+def norm_iterm(sid: str) -> str:
+    return sid.split(":")[-1].upper()
+
+
+def encode_project_dir(cwd: str) -> str:
+    return os.path.expanduser("~/.claude/projects/") + cwd.replace("/", "-")
+
+
+def claude_session_from_disk(cwd: str) -> str | None:
+    cwd = os.path.abspath(cwd)
+    hist = os.path.expanduser("~/.claude/history.jsonl")
+    latest = None
+    latest_ts = -1
+    if os.path.isfile(hist):
+        try:
+            with open(hist, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if d.get("project") != cwd:
+                        continue
+                    sid = (d.get("sessionId") or "").strip()
+                    ts = d.get("timestamp") or 0
+                    if sid and ts >= latest_ts:
+                        latest, latest_ts = sid, ts
+        except OSError:
+            pass
+    if latest:
+        return latest
+    proj = encode_project_dir(cwd)
+    if not os.path.isdir(proj):
+        return None
+    files = []
+    try:
+        for name in os.listdir(proj):
+            if name.endswith(".jsonl") and len(name) > 10:
+                path = os.path.join(proj, name)
+                files.append((os.path.getmtime(path), name[: -len(".jsonl")]))
+    except OSError:
+        return None
+    if not files:
+        return None
+    files.sort()
+    return files[-1][1]
+
+
+def live_claude_for_cwd(cwd: str, resume_id: str | None) -> tuple[str | None, str | None]:
+    """Return (pid, iterm_uuid) for a live claude in cwd, optional --resume match."""
+    cwd = os.path.abspath(cwd)
+    try:
+        out = subprocess.check_output(["ps", "ax", "-o", "pid=,command="], text=True)
+    except OSError:
+        return None, None
+    for line in out.splitlines():
+        line = line.strip()
+        if "claude" not in line or "bg-spare" in line or "bg-pty-host" in line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 1:
+            continue
+        pid = parts[0]
+        cmd = parts[1] if len(parts) > 1 else ""
+        if resume_id and resume_id not in cmd:
+            # still allow a claude in this cwd without the flag (fresh session)
+            pass
+        try:
+            env = subprocess.check_output(
+                ["ps", "eww", "-p", pid], text=True, stderr=subprocess.DEVNULL
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if f"PWD={cwd}" not in env:
+            continue
+        # Don't match a longer path that shares this prefix.
+        idx = env.find("PWD=" + cwd)
+        after = env[idx + 4 + len(cwd) : idx + 4 + len(cwd) + 1] if idx >= 0 else ""
+        if after and after not in " \t\n":
+            continue
+        iterm = None
+        for tok in env.replace("\n", " ").split():
+            if tok.startswith("ITERM_SESSION_ID="):
+                iterm = tok.split("=", 1)[1]
+                break
+        if iterm:
+            return pid, iterm
+    return None, None
+
+
+def osascript(script: str, args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["osascript", "-", *args],
+        input=script,
+        text=True,
+        capture_output=True,
+    )
+
+
+INJECT_SCRIPT = r"""
+on run argv
+  set want to item 1 of argv
+  set payload to item 2 of argv
+  set esc to ASCII character 27
+  set cr to ASCII character 13
+  set framed to esc & "[200~" & payload & esc & "[201~"
+  tell application "iTerm"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          set sid to id of s as text
+          considering case
+            if sid is want then
+              tell s
+                write text framed newline no
+                delay 0.15
+                write text cr newline no
+                delay 0.25
+                write text cr newline no
+              end tell
+              return "submitted"
+            end if
+          end considering
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "session not found"
+end run
+"""
+
+RESUME_SCRIPT = r"""
+on run argv
+  set thePath to item 1 of argv
+  set theSid to item 2 of argv
+  set prevFront to ""
+  try
+    tell application "System Events"
+      set prevFront to name of first application process whose frontmost is true
+    end tell
+  end try
+  -- open -g: launch without making iTerm the focused app.
+  do shell script "open -g -a iTerm"
+  delay 1.0
+  tell application "iTerm"
+    set newWin to (create window with default profile)
+    delay 0.4
+    tell current session of newWin
+      write text "cd " & quoted form of thePath & " && exec claude --dangerously-skip-permissions --resume " & theSid newline yes
+    end tell
+  end tell
+  if prevFront is not "" then
+    try
+      tell application "System Events"
+        set frontmost of process prevFront to true
+      end tell
+    end try
+  end if
+  return "spawned"
+end run
+"""
+
+
+def inject(iterm_sid: str, payload: str) -> None:
+    want = norm_iterm(iterm_sid)
+    r = osascript(INJECT_SCRIPT, [want, payload])
+    log(
+        "inject rc=%s out=%s err=%s"
+        % (r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()[:300])
+    )
+    if r.returncode != 0 or "submitted" not in (r.stdout or ""):
+        raise SystemExit(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason": "knock: osascript %s %s"
+                    % (r.returncode, (r.stderr or r.stdout or "").strip()[:200]),
+                }
+            )
+        )
+
+
+def cmd_claim(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    env_iterm = (os.environ.get("ITERM_SESSION_ID") or "").strip()
+    want = (d.get("session_id") or env_iterm).strip()
+    claude_sid = claude_session_from_disk(cwd)
+    if want and len(want) == 36 and want.count("-") == 4 and want.lower() == want:
+        claude_sid = want
+    if not claude_sid:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason": "claim_failed: no Claude sessionId in ~/.claude for this cwd",
+                }
+            )
+        )
+        sys.exit(1)
+    pid, iterm = live_claude_for_cwd(cwd, claude_sid)
+    live = bool(iterm or env_iterm)
+    launch = [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--resume",
+        claude_sid,
+    ]
+    print(
+        json.dumps(
+            {
+                "v": 1,
+                "ok": True,
+                "terminal": "iterm2",
+                "session_id": claude_sid,
+                "cwd": cwd,
+                "live": live,
+                "typ": "session",
+                "iterm_session": iterm or env_iterm or None,
+                "launch": launch,
+                "pid": pid,
+            }
+        )
+    )
+
+
+def cmd_knock(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    resume_id = (d.get("session_id") or "").strip()
+    frm = (d.get("from") or "").strip()
+    body = (d.get("body") or d.get("title") or "").strip()
+    clean = "".join(c for c in body if c != "\x1b")
+    line = " ".join(clean.split())
+    payload = ("[from %s] %s" % (frm, line)) if frm else line
+    pid, iterm = live_claude_for_cwd(cwd, resume_id or None)
+    if not iterm:
+        print(
+            json.dumps(
+                {"ok": False, "reason": "not_live", "resume": True, "cwd": cwd}
+            )
+        )
+        sys.exit(1)
+    inject(iterm, payload)
+    print(json.dumps({"ok": True, "injected": True, "pid": pid, "iterm_session": iterm}))
+
+
+def cmd_resume(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    resume_id = (d.get("session_id") or "").strip()
+    if not resume_id:
+        resume_id = claude_session_from_disk(cwd) or ""
+    if not resume_id:
+        print(json.dumps({"ok": False, "reason": "resume: no Claude session id"}))
+        sys.exit(1)
+    pid, iterm = live_claude_for_cwd(cwd, resume_id)
+    if iterm:
+        print(
+            json.dumps(
+                {"ok": True, "already": True, "pid": pid, "iterm_session": iterm, "session_id": resume_id}
+            )
+        )
+        return
+    r = osascript(RESUME_SCRIPT, [cwd, resume_id])
+    log(
+        "resume spawn rc=%s out=%s err=%s cwd=%s sid=%s"
+        % (r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()[:300], cwd, resume_id)
+    )
+    if r.returncode != 0:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason": "resume: osascript %s %s"
+                    % (r.returncode, (r.stderr or "").strip()[:200]),
+                }
+            )
+        )
+        sys.exit(1)
+    deadline = time.time() + 35
+    iterm = None
+    pid = None
+    while time.time() < deadline:
+        pid, iterm = live_claude_for_cwd(cwd, resume_id)
+        if iterm:
+            break
+        time.sleep(0.4)
+    if not iterm:
+        print(json.dumps({"ok": False, "reason": "resume: claude PTY did not appear"}))
+        sys.exit(1)
+    # Claude injection profile settle (~1.5s) plus a beat for ?2004h.
+    time.sleep(1.6)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "spawned": True,
+                "pid": pid,
+                "iterm_session": iterm,
+                "session_id": resume_id,
+            }
+        )
+    )
+
+
+def main() -> None:
+    op = sys.argv[1] if len(sys.argv) > 1 else ""
+    try:
+        d = read_stdin()
+    except json.JSONDecodeError as e:
+        print(json.dumps({"ok": False, "reason": "bad json: %s" % e}))
+        sys.exit(1)
+    if op == "claim":
+        cmd_claim(d)
+    elif op == "knock":
+        cmd_knock(d)
+    elif op == "resume":
+        cmd_resume(d)
+    else:
+        print(json.dumps({"ok": False, "reason": "usage: iterm2 claim|knock|resume"}))
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

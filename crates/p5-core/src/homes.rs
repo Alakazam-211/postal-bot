@@ -23,6 +23,9 @@ pub struct HomeRow {
     pub launch: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// Terminal system the plugin revealed at claim (`k2` / `iterm2` / `grok`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
     #[serde(default)]
     pub tools: ToolFlags,
     pub enrolled_host: String,
@@ -118,6 +121,7 @@ mod tests {
             inbox_root: None,
             launch: vec!["claude".into(), "--resume".into()],
             harness: Some("claude".into()),
+            terminal: None,
             tools: ToolFlags {
                 files: false,
                 live_inject: true,
@@ -147,6 +151,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let homes = Homes::load(dir.path()).unwrap();
         assert!(homes.is_empty());
+    }
+
+    #[test]
+    fn two_handles_same_host_are_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut homes = Homes::new();
+        let mut a = sample_row();
+        a.address = addr("postal-bot::acme.postal.bot");
+        a.harness = Some("k2".into());
+        a.session_id = Some("sess-a".into());
+        let mut b = sample_row();
+        b.address = addr("claude::acme.postal.bot");
+        b.harness = Some("iterm2".into());
+        b.session_id = Some("sess-b".into());
+        b.cwd = PathBuf::from("/tmp/claude");
+        homes.insert(a.clone()).unwrap();
+        homes.insert(b.clone()).unwrap();
+        homes.save(dir.path()).unwrap();
+        let loaded = Homes::load(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded.get(&a.address).unwrap().session_id.as_deref(),
+            Some("sess-a")
+        );
+        assert_eq!(
+            loaded.get(&b.address).unwrap().cwd,
+            PathBuf::from("/tmp/claude")
+        );
+        assert_ne!(
+            loaded.get(&a.address).unwrap().harness,
+            loaded.get(&b.address).unwrap().harness
+        );
     }
 
     #[test]
