@@ -5,8 +5,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::{
-    AcceptRequest, CheckoutView, HoldEnvelope, HoldList, HoldPutResponse, MeRequest, MeResponse,
-    PairAddRequest, PairAddResponse, PairLists, PlaneError, UsageReport,
+    AcceptRequest, CheckoutView, DeviceAuth, DevicePollRequest, DeviceStartRequest, DeviceToken,
+    HoldEnvelope, HoldList, HoldPutResponse, HostList, MeRequest, MeResponse, PairAddRequest,
+    PairAddResponse, PairLists, PlaneError, UsageReport,
 };
 
 const TIMEOUT_SECS: u64 = 30;
@@ -147,6 +148,41 @@ impl PlaneClient {
         self.send_json("GET", "/postal/usage", None::<&()>)
     }
 
+    /// `GET /postal/hosts` — postal.bot labels this bearer may bind to a computer.
+    pub fn list_hosts(&self) -> Result<HostList, PlaneError> {
+        self.send_json("GET", "/postal/hosts", None::<&()>)
+    }
+
+    /// `POST /postal/cli/device` — start RFC 8628 device login (no bearer).
+    pub fn start_device(&self) -> Result<DeviceAuth, PlaneError> {
+        self.send_json(
+            "POST",
+            "/postal/cli/device",
+            Some(&DeviceStartRequest {
+                client: "p5".into(),
+            }),
+        )
+    }
+
+    /// `POST /postal/cli/device/token` — poll until the human approves.
+    pub fn poll_device(&self, device_code: &str) -> Result<DeviceToken, PlaneError> {
+        let code = device_code.trim();
+        if code.is_empty() {
+            return Err(PlaneError::Http {
+                status: 400,
+                message: "empty device_code".into(),
+            });
+        }
+        self.send_json(
+            "POST",
+            "/postal/cli/device/token",
+            Some(&DevicePollRequest {
+                device_code: code.to_string(),
+                grant_type: "urn:ietf:params:oauth:grant-type:device_code".into(),
+            }),
+        )
+    }
+
     /// Verify a Stripe Checkout session against the Postal site (no Connect token).
     pub fn checkout_session(
         api_base: impl Into<String>,
@@ -161,11 +197,10 @@ impl PlaneClient {
         B: Serialize,
     {
         let url = format!("{}{path}", self.base_url);
-        let req = self
-            .agent
-            .request(method, &url)
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .set("Accept", "application/json");
+        let mut req = self.agent.request(method, &url).set("Accept", "application/json");
+        if !self.token.trim().is_empty() {
+            req = req.set("Authorization", &format!("Bearer {}", self.token));
+        }
         let result = match body {
             Some(b) => req.set("Content-Type", "application/json").send_json(b),
             None => req.call(),
@@ -261,6 +296,19 @@ fn status_err(code: u16, resp: ureq::Response) -> PlaneError {
                 })
         })
         .unwrap_or_else(|| "error".into());
+    let err = message.trim();
+    if err == "authorization_pending" {
+        return PlaneError::AuthorizationPending;
+    }
+    if err == "slow_down" {
+        return PlaneError::SlowDown;
+    }
+    if err == "access_denied" {
+        return PlaneError::AccessDenied;
+    }
+    if err == "expired_token" {
+        return PlaneError::ExpiredToken;
+    }
     match code {
         401 => PlaneError::Unauthorized,
         403 => PlaneError::Forbidden(message),

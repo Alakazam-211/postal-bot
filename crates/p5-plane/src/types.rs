@@ -158,6 +158,111 @@ pub struct UsageReport {
     pub subdomain_included: u32,
 }
 
+/// One postal.bot hostname the Connect account owns.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct HostView {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub host: String,
+    /// `free` or `paid` / `unlimited`. Display only.
+    #[serde(default)]
+    pub plan: String,
+}
+
+/// `GET /postal/hosts` — every postal.bot hostname this bearer may enroll.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HostList {
+    #[serde(default, alias = "items", alias = "subdomains")]
+    pub hosts: Vec<HostView>,
+}
+
+/// `POST /postal/cli/device` — RFC 8628 device authorization (no bearer).
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceStartRequest {
+    pub client: String,
+}
+
+/// Device-code start. `verification_uri_complete` already contains `user_code`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeviceAuth {
+    pub device_code: String,
+    pub user_code: String,
+    #[serde(default)]
+    pub verification_uri: String,
+    #[serde(default)]
+    pub verification_uri_complete: String,
+    #[serde(default)]
+    pub expires_in: u64,
+    #[serde(default)]
+    pub interval: u64,
+}
+
+impl DeviceAuth {
+    pub fn approve_url(&self) -> String {
+        let complete = self.verification_uri_complete.trim();
+        if !complete.is_empty() {
+            return complete.to_string();
+        }
+        let base = self.verification_uri.trim();
+        if base.is_empty() {
+            return String::new();
+        }
+        let code = self.user_code.trim();
+        if code.is_empty() {
+            return base.to_string();
+        }
+        if base.contains('?') {
+            format!("{base}&code={code}")
+        } else {
+            format!("{base}?code={code}")
+        }
+    }
+
+    pub fn poll_interval(&self) -> u64 {
+        if self.interval == 0 {
+            5
+        } else {
+            self.interval
+        }
+    }
+
+    pub fn lifetime_secs(&self) -> u64 {
+        if self.expires_in == 0 {
+            300
+        } else {
+            self.expires_in
+        }
+    }
+}
+
+/// `POST /postal/cli/device/token`
+#[derive(Debug, Clone, Serialize)]
+pub struct DevicePollRequest {
+    pub device_code: String,
+    pub grant_type: String,
+}
+
+/// Approved device session. Any of the token fields may be set.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeviceToken {
+    #[serde(default)]
+    pub token: String,
+    #[serde(default, alias = "access_token")]
+    pub access_token: String,
+    #[serde(default)]
+    pub connect_token: String,
+}
+
+impl DeviceToken {
+    pub fn connect_token(&self) -> Option<&str> {
+        [&self.token, &self.connect_token, &self.access_token]
+            .into_iter()
+            .map(|s| s.trim())
+            .find(|s| !s.is_empty())
+    }
+}
+
 /// `GET {www}/api/session?id=cs_…` after Stripe Checkout.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CheckoutView {
@@ -202,5 +307,29 @@ mod tests {
         }"#;
         let v: PairView = serde_json::from_str(raw).unwrap();
         assert!(v.public_pem().unwrap().contains("BEGIN PUBLIC KEY"));
+    }
+
+    #[test]
+    fn device_auth_complete_url_wins() {
+        let auth = DeviceAuth {
+            device_code: "dev".into(),
+            user_code: "WXYZ-1234".into(),
+            verification_uri: "https://www.postal.bot/cli/approve".into(),
+            verification_uri_complete: "https://www.postal.bot/cli/approve?code=WXYZ-1234".into(),
+            expires_in: 0,
+            interval: 0,
+        };
+        assert_eq!(
+            auth.approve_url(),
+            "https://www.postal.bot/cli/approve?code=WXYZ-1234"
+        );
+        assert_eq!(auth.poll_interval(), 5);
+        assert_eq!(auth.lifetime_secs(), 300);
+    }
+
+    #[test]
+    fn device_token_aliases() {
+        let t: DeviceToken = serde_json::from_str(r#"{"access_token":"k2c_x"}"#).unwrap();
+        assert_eq!(t.connect_token(), Some("k2c_x"));
     }
 }

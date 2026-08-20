@@ -26,6 +26,14 @@ pub enum PlaneError {
     /// Wire lock: never PUT plaintext; hold store is ciphertext only.
     Plaintext,
     Crypto(String),
+    /// RFC 8628: human has not approved the device code yet. Poll again.
+    AuthorizationPending,
+    /// RFC 8628: increase poll interval.
+    SlowDown,
+    /// RFC 8628: user denied the device.
+    AccessDenied,
+    /// RFC 8628: device/user code expired.
+    ExpiredToken,
 }
 
 impl PlaneError {
@@ -41,7 +49,7 @@ impl fmt::Display for PlaneError {
             Self::Json(e) => write!(f, "postal plane json: {e}"),
             Self::Toml(msg) => write!(f, "postal config: {msg}"),
             Self::NoToken => {
-                f.write_str("no connect token; set P5_CONNECT_TOKEN or run p5 login --token")
+                f.write_str("no connect token; run p5 login or pass --token")
             }
             Self::Unauthorized => f.write_str("plane: unauthorized"),
             Self::Forbidden(msg) => write!(f, "plane: {msg}"),
@@ -53,6 +61,10 @@ impl fmt::Display for PlaneError {
             Self::BadHoldId => f.write_str("hold id contains invalid characters"),
             Self::Plaintext => f.write_str("refusing to upload plaintext hold body"),
             Self::Crypto(msg) => write!(f, "postal hold crypto: {msg}"),
+            Self::AuthorizationPending => f.write_str("authorization_pending"),
+            Self::SlowDown => f.write_str("slow_down"),
+            Self::AccessDenied => f.write_str("device login denied"),
+            Self::ExpiredToken => f.write_str("device code expired; run p5 login again"),
         }
     }
 }

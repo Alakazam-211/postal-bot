@@ -95,9 +95,17 @@ impl PairCtx {
     }
 }
 
-pub fn run_login(token: String) -> Result<(), PairError> {
+pub fn run_login(token: String, label: Option<String>) -> Result<(), PairError> {
     let mut ctx = PairCtx::load()?;
     ctx.cfg.file.connect_token = Some(token.clone());
+    if let Some(raw) = label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let host = p5_tunnel::hostname_for_label(raw)
+            .map_err(|e| PairError::BadAddress(e.to_string()))?;
+        let label = p5_tunnel::label_from_host(&host)
+            .map_err(|e| PairError::BadAddress(e.to_string()))?;
+        ctx.cfg.file.tunnel_label = Some(label.clone());
+        eprintln!("this computer: {host}");
+    }
     ctx.cfg.file.save(&ctx.root)?;
     ctx.cfg.token = Some(token);
     if ctx.cfg.require_token().is_ok() {

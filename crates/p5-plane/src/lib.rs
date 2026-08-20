@@ -21,8 +21,9 @@ pub use hold::{
 };
 pub use live::{live_send, LiveSend};
 pub use types::{
-    AcceptRequest, HoldEnvelope, HoldList, HoldPutResponse, MeRequest, MeResponse, PairAddRequest,
-    PairAddResponse, PairLists, PairView, UsageReport, CheckoutView,
+    AcceptRequest, CheckoutView, DeviceAuth, DevicePollRequest, DeviceStartRequest, DeviceToken,
+    HoldEnvelope, HoldList, HoldPutResponse, HostList, HostView, MeRequest, MeResponse,
+    PairAddRequest, PairAddResponse, PairLists, PairView, UsageReport,
 };
 
 /// Default plane origin (K2 Web).

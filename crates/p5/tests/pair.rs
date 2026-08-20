@@ -531,7 +531,7 @@ fn login_writes_connect_token() {
         .env("P5_HOME", home.path())
         .env("P5_LOGIN_NO_START", "1")
         .env("P5_PLANE_URL", &mock.url)
-        .args(["login", "--token", "k2c_saved"])
+        .args(["login", "--token", "k2c_saved", "--label", "acme"])
         .output()
         .unwrap();
     assert!(
@@ -539,14 +539,15 @@ fn login_writes_connect_token() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let reqs = mock.requests();
     assert!(
-        mock.requests().is_empty(),
-        "login without an addr must not hit the plane: {:?}",
-        mock.requests()
+        !reqs.iter().any(|r| r.path == "/postal/me" || r.path.starts_with("/postal/pair")),
+        "login without an addr must not PUT /postal/me: {reqs:?}"
     );
     let cfg_path = home.path().join("config.toml");
     let cfg = std::fs::read_to_string(&cfg_path).unwrap();
     assert!(cfg.contains("k2c_saved"));
+    assert!(cfg.contains("acme"), "{cfg}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -12,6 +12,9 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub struct PostalFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_token: Option<String>,
+    /// Tunnel base (`acme` → `acme.postal.bot`) this computer advertises.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +156,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = PostalFile {
             connect_token: Some("k2c_test".into()),
+            tunnel_label: Some("acme".into()),
             addr: Some("alice::acme.postal.bot".into()),
             typ: Some("session".into()),
             billing: BillingFile::default(),

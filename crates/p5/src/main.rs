@@ -14,9 +14,11 @@ mod session_map;
 mod sm;
 mod turn;
 
+mod login;
+
 use pair::{
-    finish as finish_pair, run_accept, run_add, run_list, run_login, run_me, run_reject,
-    run_revoke, run_set_key, run_show,
+    finish as finish_pair, run_accept, run_add, run_list, run_me, run_reject, run_revoke,
+    run_set_key, run_show,
 };
 use sm::{send_msg, MsgRequest, MsgResponse, SmContext, SmError};
 
@@ -84,11 +86,17 @@ enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
-    /// Install the agent; optional Connect token (`--token k2c_…`)
+    /// Sign in (device code) and pick this computer's hostname
     Login {
-        /// Connect token (`k2c_…`)
+        /// Connect token (`k2c_…`). Skips device approval.
         #[arg(long)]
         token: Option<String>,
+        /// Tunnel hostname to bind (`acme` → `acme.postal.bot`). Skips the picker.
+        #[arg(long)]
+        label: Option<String>,
+        /// Print the approval URL; do not try to open a browser (remote servers)
+        #[arg(long)]
+        no_browser: bool,
         /// Write the unit file without loading it
         #[arg(long, hide = true)]
         no_start: bool,
@@ -626,9 +634,15 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Login { token, no_start } => {
-            if let Some(token) = token {
-                finish_pair(run_login(token));
+        Commands::Login {
+            token,
+            label,
+            no_browser,
+            no_start,
+        } => {
+            if let Err(err) = login::run(token, label, no_browser) {
+                eprintln!("{err}");
+                std::process::exit(err.exit_code());
             }
             match agent::login(no_start) {
                 Ok(path) => println!("wrote {}", path.display()),

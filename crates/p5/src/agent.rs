@@ -66,12 +66,23 @@ pub fn env_secret() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Login already wrote the Connect token. Don't make the user export P5_TUNNEL.
+/// Login already wrote the Connect token and hostname. Don't make the user export env.
 fn arm_tunnel_env(root: &Path) {
-    if std::env::var_os("P5_CONNECT_TOKEN").is_none() {
-        if let Ok(cfg) = p5_plane::PlaneConfig::load(root) {
+    if let Ok(cfg) = p5_plane::PlaneConfig::load(root) {
+        if std::env::var_os("P5_CONNECT_TOKEN").is_none() {
             if let Some(t) = cfg.token.filter(|s| !s.is_empty()) {
                 std::env::set_var("P5_CONNECT_TOKEN", t);
+            }
+        }
+        if std::env::var_os("P5_TUNNEL_LABEL").is_none() {
+            if let Some(l) = cfg
+                .file
+                .tunnel_label
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                std::env::set_var("P5_TUNNEL_LABEL", l);
             }
         }
     }

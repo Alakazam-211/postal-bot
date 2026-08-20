@@ -380,8 +380,18 @@ fn login_writes_unit_file() {
     let home = tmp_home();
     let out = run_home(
         home.path(),
-        &["login", "--no-start"],
-        &[("HOME", home.path().to_str().unwrap())],
+        &[
+            "login",
+            "--token",
+            "k2c_test",
+            "--label",
+            "acme",
+            "--no-start",
+        ],
+        &[
+            ("HOME", home.path().to_str().unwrap()),
+            ("P5_PLANE_URL", "http://127.0.0.1:1"),
+        ],
     );
     assert!(
         out.status.success(),
