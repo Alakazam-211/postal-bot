@@ -212,7 +212,7 @@
         </tr>
         <tr>
           <td>curl install</td>
-          <td><span class="pill hold">script ok, binary stale</span> <code>install.sh</code> parses on macOS <code>/bin/sh</code> (<code>6214c24</code>). Prebuilt tarball is still the 00:09 pack — no cert reuse, no device login. npm unpublished. See <a href="#install">Install pipes</a>.</td>
+          <td><span class="pill go">live</span> <code>install.sh</code> parses on macOS <code>/bin/sh</code>. Native tarball <code>d0e2efe1…</code> (2026-08-20) includes RFC 8628 <code>p5 login</code> and cert reuse. npm unpublished. See <a href="#install">Install pipes</a>.</td>
         </tr>
         <tr>
           <td>Last mile</td>
@@ -257,7 +257,7 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
         <tr>
           <td><code>p5 login</code> client</td>
           <td>this repo</td>
-          <td><span class="pill go">git</span> <code>8b1cc13</code>. Prints complete URL, tries open, polls, picks hostname into <code>~/.postal/config.toml</code> (<code>connect_token</code> + <code>tunnel_label</code>). Tests against a mock plane. <span class="pill hold">not in the install tarball</span>.</td>
+          <td><span class="pill go">git + tarball</span> <code>8b1cc13</code>. Prints complete URL, tries open, polls, picks hostname into <code>~/.postal/config.toml</code>. Isolated live walk 2026-08-20 (approve <code>NYSN-M6MS</code> → <code>k2c_cli_*</code> → <code>GET /postal/hosts</code> 200). Now in <code>/releases/latest</code>.</td>
         </tr>
       </tbody>
     </table>
@@ -265,11 +265,10 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
     <p>The plane and the git CLI speak the same grant. A new user still cannot walk install → approve → tunnel up without a human who already knows the product. Remaining, in the order that hurts:</p>
     <ol>
       <li>
-        <strong>Ship a macOS (and Linux) tarball that includes device login + cert reuse.</strong>
-        <code>www.postal.bot/releases/latest/p5-macos-aarch64.tar.gz</code> is still the 00:09 pack. <code>curl | sh</code> installs a <code>p5</code> that only understands <code>--token</code>, always POSTs a new CSR, and has no hostname picker. Until that file changes, the friendly path does not exist for real users.
+        <strong>Ship a Linux prebuilt</strong> (macOS aarch64 tarball with device login + cert reuse is live: <code>d0e2efe1…</code>). Linux still falls back to <code>p5-src.tar.gz</code> + cargo.
       </li>
       <li>
-        <strong>One observed walk:</strong> <code>p5 login</code> → open/print <code>/cli/approve?code=…</code> → human (already signed in) approves → poll returns <code>k2c_cli_*</code> → picker lists hosts → this computer is <code>label.postal.bot</code> → <code>p5 status</code> agent up, tunnel up. Not done. Plane start was smoke-tested; the approve click was not.
+        <strong>Install-pipe walk on a fresh box:</strong> isolated git <code>p5 login --label rosson</code> already approved (2026-08-20, <code>NYSN-M6MS</code> → <code>k2c_cli_*</code> → hosts 200). Still need <code>curl | sh</code> then <code>p5 login</code> (interactive picker, agent start, tunnel up) on a machine that is not the live <code>rosson.postal.bot</code> agent.
       </li>
       <li>
         <strong><code>k2c_cli_*</code> must enroll the chosen label.</strong>
@@ -284,8 +283,7 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
         <code>p5 logout</code> unlinks the plist and <code>unload -w</code> leaves the job <em>disabled</em>. Next <code>p5 login</code> <code>bootstrap</code>s a missing path (EIO 5), prints <code>wrote …plist</code>, exits 0. Use <code>load -w</code>, <code>launchctl enable</code>, do not delete the plist before a successful load, exit non-zero if the job is not up. Plist needs <code>StandardOutPath</code> / <code>StandardErrorPath</code> → <code>~/.postal/agent.log</code> (today only the detached-spawn fallback creates that file; launchd users have no log).
       </li>
       <li>
-        <strong>Reuse the cert on disk in the binary we ship.</strong>
-        Source already skips the broker when <code>~/.postal/tunnel/cert.pem</code> + <code>key.pem</code> exist (<code>P5_TUNNEL_REISSUE=1</code> to force). The installed prebuilt does not. Five restarts in a week = Let’s Encrypt identical-SAN lockout (~34h). Friendly auth is worthless if bringing the tunnel up burns the cert quota.
+        <strong>Cert reuse is in the shipped macOS binary</strong> (skip broker when <code>tunnel/cert.pem</code> + <code>key.pem</code> exist; <code>P5_TUNNEL_REISSUE=1</code> forces). Existing 00:09 installs (appa) must re-<code>curl | sh</code> before tearing down a hand-written <code>frpc</code> unit. Do not restart an old binary against Let’s Encrypt.
       </li>
       <li>
         <strong>Pairing accept on the same Postal site.</strong>
@@ -355,7 +353,7 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
         </tr>
         <tr>
           <td><code>https://www.postal.bot/install.sh</code></td>
-          <td><span class="pill go">served</span> Vercel static, POSIX <code>/bin/sh</code> (the <code>case )</code> inside <code>$(…)</code> parse bug is gone). Native tarball under <code>/releases/latest</code> is still the 00:09 pack — no device login, no cert reuse. Apex <code>postal.bot</code> may time out — use www.</td>
+          <td><span class="pill go">served</span> POSIX <code>/bin/sh</code>. Native <code>p5-macos-aarch64.tar.gz</code> <code>d0e2efe1…</code> has device login + <code>P5_TUNNEL_REISSUE</code> / cert reuse. Linux = source tarball + cargo. Apex may time out — use www.</td>
         </tr>
         <tr>
           <td>GitHub Releases tarball</td>
@@ -380,7 +378,7 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
       <li>On that box: checkout + <code>P5_LOCAL=1 ./install/install.sh</code> (or a release, if we have one by then).</li>
       <li><code>p5 login --label grokbot</code> (device code; or <code>--token</code> from <code>~/.k2/tunnel.json</code> until the new tarball is on PATH).</li>
       <li><code>p5 me --from grok::grokbot.postal.bot --typ turn</code> — they are a turn peer. <code>p5 me</code> does not persist <code>addr</code> yet; put it in <code>config.toml</code> or pass <code>--from</code> every time.</li>
-      <li>Agent binds loopback 8443; frpc advertises <code>grokbot.postal.bot</code>. Need <code>tunnel_label=grokbot</code> (login picker) or <code>P5_TUNNEL_LABEL</code>. Git reuses <code>cert.pem</code>; the 00:09 tarball does not.</li>
+      <li>Agent binds loopback 8443; frpc advertises <code>grokbot.postal.bot</code>. Need <code>tunnel_label=grokbot</code> (login picker) or <code>P5_TUNNEL_LABEL</code>. Current tarball reuses <code>cert.pem</code> unless <code>P5_TUNNEL_REISSUE=1</code>.</li>
       <li>CSR to <code>https://cert.postal.bot/cert</code>. After enroll, <code>https://grokbot.postal.bot/health</code> should 200 from the agent.</li>
       <li>They <code>PUT /postal/me</code> via <code>p5 me --from grok::grokbot.postal.bot --typ turn</code>.</li>
       <li>We <code>p5 pair add grok::grokbot.postal.bot</code>. You accept on <code>/dashboard?tab=postal</code> (SAS). Agents do not expand trust by default.</li>
@@ -402,8 +400,7 @@ Install (www pipe; no GitHub)
    hash -r; p5 whoami
    # expect: Postal (postal.bot) / command: p5
    # If install.sh dies at line 212, the box has a stale cached script — retry.
-   # The current tarball may still be the 00:09 pack (no device login / cert reuse).
-   # Prefer P5_LOCAL=1 ./install/install.sh --from-cargo from a checkout until we republish.
+   # macOS arm64 tarball (2026-08-20) includes p5 login device grant + cert reuse.
 
 Token
 - Read ~/.k2/tunnel.json on THIS box. Use subdomain grokbot and its token.
