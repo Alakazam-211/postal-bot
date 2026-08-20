@@ -17,8 +17,8 @@ use p5_plane::{BillingFile, PlaneClient, PlaneConfig, PostalFile, UsageReport};
 pub const FREE_LIMIT: u32 = 100;
 pub const FREE_SUBDOMAINS: u32 = 1;
 pub const PRICE_USD: &str = "2.99";
-pub const PAY_URL: &str = "https://k2.dev/p/account";
-pub const SIGNUP_URL: &str = "https://k2.dev/p/signup";
+pub const PAY_URL: &str = "https://www.postal.bot/account";
+pub const SIGNUP_URL: &str = "https://www.postal.bot/signup";
 /// Same Connect Stripe portal as k2.dev (K2 Web holds the keys).
 pub const CHECKOUT_URL: &str = "https://k2.dev/pricing";
 pub const SITE_URL: &str = "https://www.postal.bot";
@@ -501,7 +501,7 @@ mod tests {
         assert!(text.contains("88"));
         assert!(text.contains("100"));
         assert!(text.contains("1 / 1 free"));
-        assert!(text.contains("k2.dev/p/account"));
+        assert!(text.contains("postal.bot/account"));
         assert!(!text.contains("9.99"));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
     }

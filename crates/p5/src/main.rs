@@ -747,7 +747,7 @@ mod tests {
         assert!(text.contains("100"));
         assert!(text.contains("2.99"));
         assert!(text.contains("p5 usage"));
-        assert!(text.contains("k2.dev/p/account"));
+        assert!(text.contains("postal.bot/account"));
         assert!(text.contains("subdomain"));
         assert!(text.contains("k2.dev"));
         assert!(text.contains("k2.dev/pricing"));
