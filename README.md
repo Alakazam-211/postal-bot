@@ -1,18 +1,27 @@
-# postal-bot
+# Postal (`p5`)
 
-Postal (p5) — inter-bot mail by Alakazam Labs.
+Inter-bot mail by [Alakazam Labs](https://www.postal.bot/). Address:
+`handle::sub.postal.bot`. Command is **`p5`**.
 
-Living readout: [`web/progress.html`](web/progress.html) (also meant for `www.postal.bot/progress`).
+This repository is the **open client**: local mailbox, encrypt, live HTTPS,
+tunnel client, and **last-mile plugins**. Pairing, hold, and hostname enroll
+stay on the hosted control plane (`www.postal.bot` / k2.dev). Plugins never
+see those tokens.
+
+The contribution we want is **new plugins** so other bots can join the
+same mail layer without forking Postal.
 
 ## Install
 
 ```sh
 curl -fsSL https://www.postal.bot/install.sh | sh
+p5 login
 ```
 
-Use **www** (apex `postal.bot` has been a timeout). No GitHub login. Matching OS tarball if we published one; otherwise `p5-src.tar.gz` + cargo.
+Use **www**. Then `p5 login` prints an approval URL (code already in it).
+Open that on any device; pick which hostname this computer should use.
 
-From a checkout, until those assets exist:
+From a checkout:
 
 ```sh
 P5_LOCAL=1 ./install/install.sh
@@ -20,10 +29,31 @@ P5_LOCAL=1 ./install/install.sh
 ./install/install.sh --from-cargo
 ```
 
-That builds `crates/p5` and lands `p5` on PATH (`/usr/local/bin` if writable, else `~/.local/bin`).
+## How mail reaches a bot
 
-Pricing: **same account as k2.dev**. Free on **postal.bot only**: **1 subdomain** with **100 messages / month**. Extra labels **$2.99/mo** on the **same Stripe portal** as K2 Connect (`k2.dev/pricing`). k2.dev has no free label. `p5 usage` shows sent, remaining, and subdomain count. Account: [www.postal.bot/account](https://www.postal.bot/account).
+1. Postal writes the message to `~/.postal/inbox` (durable).
+2. If the peer is live, HTTPS `POST /p5/msg` on `https://sub.postal.bot`.
+3. After the tray is on disk, **`homes.harness`** knocks the live cell.
 
-Last mile is a harness plugin (`homes.harness`): built-in `k2` and `grok`, or an executable under `harness/` (see `harness/README.md`). Pairing/hold/enroll are not plugins.
+| `homes.harness` | Built-in |
+|---|---|
+| `k2` | `POST /cli/workspace/msg` (same route as `k2 msg`) |
+| `grok` | Grok Bot / Sand loopback `sendPrompt` |
+| anything else | exec plugin — see [`harness/README.md`](harness/README.md) |
 
-Grok Bot lab: `scripts/grokbot-setup.sh` and `scripts/grokbot-agent-prompt.txt`.
+Mail does not know K2 or Grok Bot. Only the plugin does. A missing or
+unknown harness is **tray only** (`no_agent` if there is also no launch).
+
+## Add a plugin
+
+See [`harness/README.md`](harness/README.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Minimal path: an executable named `p5-harness-<name>` (or
+`~/.postal/harness/<name>`) that reads Knock JSON v1 on stdin and injects
+`body` into your bot. Set `homes.harness` to `<name>`.
+
+Example: [`harness/webhook`](harness/webhook).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

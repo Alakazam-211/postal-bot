@@ -1,5 +1,6 @@
 #!/bin/sh
 # Example last-mile plugin: POST Knock JSON v1 to $P5_WEBHOOK_URL.
+# Inject from the JSON "body" field, not "title".
 # Install: cp harness/webhook ~/.postal/harness/webhook && chmod 755 ~/.postal/harness/webhook
 # Then set homes.harness = "webhook".
 set -eu
