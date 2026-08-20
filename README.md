@@ -18,8 +18,10 @@ curl -fsSL https://www.postal.bot/install.sh | sh
 p5 login
 ```
 
-Use **www**. Then `p5 login` prints an approval URL (code already in it).
-Open that on any device; pick which hostname this computer should use.
+Use **www**. Linux x86_64 / aarch64 and macOS aarch64 have prebuilt
+tarballs; otherwise the script falls back to `p5-src.tar.gz` + cargo.
+Then `p5 login` prints an approval URL (code already in it). Open that
+on any device; pick which hostname this computer should use.
 
 From a checkout:
 

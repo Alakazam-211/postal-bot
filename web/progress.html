@@ -265,7 +265,7 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
     <p>The plane and the git CLI speak the same grant. A new user still cannot walk install → approve → tunnel up without a human who already knows the product. Remaining, in the order that hurts:</p>
     <ol>
       <li>
-        <strong>Ship a Linux prebuilt</strong> (macOS aarch64 tarball with device login + cert reuse is live: <code>d0e2efe1…</code>). Linux still falls back to <code>p5-src.tar.gz</code> + cargo.
+        <strong>Linux prebuilt (0.1.3)</strong> — GitHub Actions builds <code>p5-linux-x86_64.tar.gz</code> and <code>p5-linux-aarch64.tar.gz</code>. <code>CommandExt::pre_exec</code> is wrapped so rustc 1.97 source builds also work. macOS aarch64 tarball already live.
       </li>
       <li>
         <strong>Install-pipe walk on a fresh box:</strong> isolated git <code>p5 login --label rosson</code> already approved (2026-08-20, <code>NYSN-M6MS</code> → <code>k2c_cli_*</code> → hosts 200). Still need <code>curl | sh</code> then <code>p5 login</code> (interactive picker, agent start, tunnel up) on a machine that is not the live <code>rosson.postal.bot</code> agent.
@@ -353,7 +353,7 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
         </tr>
         <tr>
           <td><code>https://www.postal.bot/install.sh</code></td>
-          <td><span class="pill go">served</span> POSIX <code>/bin/sh</code>. Native <code>p5-macos-aarch64.tar.gz</code> <code>d0e2efe1…</code> has device login + <code>P5_TUNNEL_REISSUE</code> / cert reuse. Linux = source tarball + cargo. Apex may time out — use www.</td>
+          <td><span class="pill go">served</span> POSIX <code>/bin/sh</code>. Native <code>p5-macos-aarch64.tar.gz</code> plus linux x86_64 / aarch64 (0.1.3). Device login + cert reuse. Apex may time out — use www.</td>
         </tr>
         <tr>
           <td>GitHub Releases tarball</td>
@@ -375,7 +375,7 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
     <p>When you say go, the other side is Grok Bot software on their box, not a K2 sidecar.</p>
     <ol>
       <li>Same Connect account that already owns label <code>grokbot</code> (so <code>grokbot.k2.dev</code> keeps working).</li>
-      <li>On that box: checkout + <code>P5_LOCAL=1 ./install/install.sh</code> (or a release, if we have one by then).</li>
+      <li>On that box: <code>curl -fsSL https://www.postal.bot/install.sh | sh</code> (linux tarball). <code>P5_LOCAL=1</code> only if you mean to cargo-build.</li>
       <li><code>p5 login --label grokbot</code> (device code; or <code>--token</code> from <code>~/.k2/tunnel.json</code> until the new tarball is on PATH).</li>
       <li><code>p5 me --from grok::grokbot.postal.bot --typ turn</code> — they are a turn peer. <code>p5 me</code> does not persist <code>addr</code> yet; put it in <code>config.toml</code> or pass <code>--from</code> every time.</li>
       <li>Agent binds loopback 8443; frpc advertises <code>grokbot.postal.bot</code>. Need <code>tunnel_label=grokbot</code> (login picker) or <code>P5_TUNNEL_LABEL</code>. Current tarball reuses <code>cert.pem</code> unless <code>P5_TUNNEL_REISSUE=1</code>.</li>

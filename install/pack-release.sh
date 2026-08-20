@@ -1,5 +1,14 @@
 #!/bin/sh
 # Build source + native prebuilt tarballs into web/releases/latest for Vercel.
+#
+# Run on each pack host:
+#   macOS aarch64 → p5-macos-aarch64.tar.gz
+#   Linux x86_64  → p5-linux-x86_64.tar.gz   (GitHub Actions ubuntu-latest)
+#   Linux aarch64 → p5-linux-aarch64.tar.gz  (GitHub Actions ubuntu-24.04-arm)
+#
+# DIST is not wiped. Copy a CI linux tarball in before a macOS pack so
+# SHA256SUMS lists every platform. Never `vercel --prod` from repo root
+# (that can steal www). Deploy the linked `web/` postal-bot project only.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 DIST="${ROOT}/web/releases/latest"

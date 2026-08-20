@@ -1,0 +1,45 @@
+# Native linux p5 tarballs. macOS pack is still `install/pack-release.sh`
+# on a Darwin host. Artifacts are merged into web/releases/latest before
+# deploying the postal-bot Vercel project (never alias www onto it).
+name: linux-tarball
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "install/**"
+      - "harness/**"
+      - "scripts/**"
+      - ".github/workflows/linux-tarball.yml"
+
+jobs:
+  pack:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: p5-linux-x86_64
+          - os: ubuntu-24.04-arm
+            artifact: p5-linux-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: pack native tarball
+        run: ./install/pack-release.sh
+      - name: upload p5 tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: web/releases/latest/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+      - name: upload SHA256SUMS fragment
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-sums
+          path: web/releases/latest/SHA256SUMS

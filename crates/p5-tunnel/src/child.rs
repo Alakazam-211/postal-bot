@@ -186,8 +186,10 @@ pub fn spawn_frpc(bin: &FrpcBinary, config: &Path) -> Result<TunnelChild, String
     {
         use std::os::unix::process::CommandExt;
         // Parent gone (SIGKILL/abort) → kernel delivers SIGKILL to this child.
-        cmd.pre_exec(|| {
-            unsafe {
+        // rustc 1.97 treats CommandExt::pre_exec as unsafe (E0133). Inner libc
+        // calls are async-signal-safe. The closure runs after fork, before exec.
+        unsafe {
+            cmd.pre_exec(|| {
                 libc::prctl(
                     libc::PR_SET_PDEATHSIG,
                     libc::SIGKILL as libc::c_ulong,
@@ -198,9 +200,9 @@ pub fn spawn_frpc(bin: &FrpcBinary, config: &Path) -> Result<TunnelChild, String
                 if libc::getppid() == 1 {
                     libc::raise(libc::SIGKILL);
                 }
-            }
-            Ok(())
-        });
+                Ok(())
+            });
+        }
     }
     let child = cmd
         .spawn()
