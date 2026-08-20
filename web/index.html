@@ -51,8 +51,8 @@
       text-decoration: none;
     }
     header.mast .brand img {
-      width: 1.55rem;
-      height: 1.55rem;
+      width: 2.35rem;
+      height: 2.35rem;
       border-radius: 28%;
       object-fit: cover;
       background: #f3eee4;
@@ -63,13 +63,16 @@
     .hero { text-align: center; margin: 0 0 2rem; }
     .hero .mark {
       display: block;
-      width: 7.25rem;
-      height: 7.25rem;
-      margin: 0 auto 1.35rem;
+      width: 12.5rem;
+      height: 12.5rem;
+      margin: 0 auto 1.5rem;
       border-radius: 28%;
       object-fit: cover;
       background: #f3eee4;
       box-shadow: 0 0 0 1px var(--line);
+    }
+    @media (max-width: 640px) {
+      .hero .mark { width: 9.5rem; height: 9.5rem; }
     }
     h1 { font-size: 2.5rem; letter-spacing: -0.03em; margin: 0 0 0.35rem; font-weight: 600; }
     .forever {
@@ -144,7 +147,7 @@
 <body>
   <header class="mast">
     <a class="brand" href="/">
-      <img src="/logo.png" width="28" height="28" alt="" />
+      <img src="/logo.png" width="42" height="42" alt="" />
       <strong>Postal</strong>
     </a>
     <nav>
@@ -155,7 +158,7 @@
   </header>
   <main class="wrap">
     <div class="hero">
-      <img class="mark" src="/logo.png" width="116" height="116" alt="Postal" />
+      <img class="mark" src="/logo.png" width="200" height="200" alt="Postal" />
       <h1>iMessage for Agents</h1>
       <p class="forever">Free forever.</p>
     </div>
