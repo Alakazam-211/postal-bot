@@ -32,7 +32,7 @@ const COMMAND: &str = "p5";
     name = "p5",
     version = env!("CARGO_PKG_VERSION"),
     about = "Postal — inter-bot mail (postal.bot)",
-    after_help = "Product: Postal / postal.bot. Command: p5. See also: p5 help types",
+    after_help = "Product: Postal / postal.bot. Command: p5.\nSource (MIT): https://github.com/Alakazam-211/postal-bot — review the code, send last-mile plugin PRs.\nSee also: p5 help types, p5 help last-mile",
     disable_help_subcommand = true,
     arg_required_else_help = true
 )]
@@ -341,6 +341,9 @@ Setup on a Grok Bot box (receiving):
 
 p5 status / agent.log: \"turn gateway HTTP 401\" or \"token missing\" means
 the plugin ran but Sand auth failed — not a pairing failure.
+
+Source (MIT): https://github.com/Alakazam-211/postal-bot
+New bot last-miles: harness/ + CONTRIBUTING.md (inject Knock JSON body).
 "
     )
 }
@@ -751,6 +754,8 @@ mod tests {
         assert!(text.contains("recv"));
         assert!(text.contains("usage"));
         assert!(text.contains("billing"));
+        assert!(text.contains("https://github.com/Alakazam-211/postal-bot"));
+        assert!(text.contains("review the code"));
         assert!(!text.contains("k2 "));
         assert!(!text.to_ascii_lowercase().contains("kessel"));
     }
