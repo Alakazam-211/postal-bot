@@ -40,7 +40,7 @@ Copy `harness/webhook` to `~/.postal/harness/webhook` and set
 `homes.harness` to `webhook` plus `P5_WEBHOOK_URL`.
 
 New terminals/IDEs/host bots (iTerm2, Terminal.app, Ghostty, Zed,
-VS Code, OpenClaw, Hermes, Paperclip, …) are **exec plugins** with
+VS Code, OpenClaw, Hermes, Paperclip, Herdr, …) are **exec plugins** with
 `claim` / `knock` / `resume`. Resume must revive after the app is
 quit. See the workspace wiki note **Wake Plugins**.
 
