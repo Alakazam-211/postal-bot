@@ -45,8 +45,6 @@ pub struct MsgRequest {
     pub to: String,
     pub body: String,
     pub no_wake: bool,
-    /// Display From (K14). Not the pairing identity.
-    pub from: Option<String>,
 }
 
 /// PRD §6 `--json` object. `success` matches exit 0.
@@ -268,7 +266,7 @@ impl fmt::Display for SmError {
             Self::Store(err) => write!(f, "{err}"),
             Self::BadAddress(msg) => write!(f, "{msg}"),
             Self::NoIdentity => f.write_str(
-                "no local identity; set P5_FROM or add a homes row (handle::sub.postal.bot)",
+                "no handle for this session; run p5 from the claimed cwd (or export K2_SESSION_ID / GROK_SESSION_ID) — From is forced by the homes row, not --from",
             ),
         }
     }
@@ -314,7 +312,7 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         }
     };
 
-    let from = match resolve_from(ctx, req.from.as_deref(), &to) {
+    let from = match resolve_from(ctx) {
         Ok(addr) => addr,
         Err(SmError::NoIdentity) => {
             return Ok(MsgResponse::fail(
@@ -322,7 +320,7 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
                 Some(&to),
                 None,
                 REASON_NO_IDENTITY,
-                "set P5_FROM or add a homes row",
+                "From is this session's claimed handle, not --from",
             ));
         }
         Err(SmError::BadAddress(msg)) => {
@@ -830,45 +828,68 @@ fn session_id_hint(ctx: &SmContext, to: &PostalAddr) -> Option<String> {
         .or_else(|| ctx.homes.get(to).and_then(|h| h.session_id.clone()))
 }
 
-fn resolve_from(
-    ctx: &SmContext,
-    display: Option<&str>,
-    to: &PostalAddr,
-) -> Result<PostalAddr, SmError> {
-    if let Some(raw) = display.map(str::trim).filter(|s| !s.is_empty()) {
-        return parse_from(raw, ctx);
-    }
-    if let Some(raw) = std::env::var("P5_FROM")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return parse_from(&raw, ctx);
-    }
-    if let Ok(cfg) = p5_plane::PlaneConfig::load(ctx.mailbox.root()) {
-        if let Some(raw) = cfg.addr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            return parse_from(raw, ctx);
+fn caller_session_ids() -> Vec<String> {
+    let mut out = Vec::new();
+    for name in ["K2_SESSION_ID", "GROK_SESSION_ID", "CLAUDE_SESSION_ID"] {
+        if let Ok(raw) = std::env::var(name) {
+            let s = raw.trim();
+            if !s.is_empty() {
+                out.push(s.to_string());
+            }
         }
     }
-    // Never BTreeMap-first: claude sorts before postal-bot and became From.
-    if let Some((addr, _)) = ctx
-        .homes
+    out
+}
+
+fn same_cwd(a: &Path, b: &Path) -> bool {
+    let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+    let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+    ca == cb
+}
+
+/// From is the homes row for *this* process. Never a CLI flag (impersonation).
+pub(crate) fn resolve_from_homes(homes: &Homes) -> Result<PostalAddr, SmError> {
+    let ids = caller_session_ids();
+    let mut by_sid: Vec<PostalAddr> = homes
         .iter()
-        .find(|(a, _)| a.handle() == "postal-bot")
-    {
-        return Ok(addr.clone());
+        .filter(|(_, row)| {
+            row.session_id
+                .as_deref()
+                .is_some_and(|sid| ids.iter().any(|id| id == sid))
+        })
+        .map(|(addr, _)| addr.clone())
+        .collect();
+    by_sid.sort();
+    by_sid.dedup();
+    if by_sid.len() == 1 {
+        return Ok(by_sid.remove(0));
+    }
+    if by_sid.len() > 1 {
+        return Err(SmError::NoIdentity);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut by_cwd: Vec<PostalAddr> = homes
+            .iter()
+            .filter(|(_, row)| same_cwd(&row.cwd, &cwd))
+            .map(|(addr, _)| addr.clone())
+            .collect();
+        by_cwd.sort();
+        by_cwd.dedup();
+        if by_cwd.len() == 1 {
+            return Ok(by_cwd.remove(0));
+        }
+        if by_cwd.len() > 1 {
+            return Err(SmError::NoIdentity);
+        }
+    }
+    if homes.len() == 1 {
+        return Ok(homes.iter().next().unwrap().0.clone());
     }
     Err(SmError::NoIdentity)
 }
 
-fn parse_from(raw: &str, ctx: &SmContext) -> Result<PostalAddr, SmError> {
-    let default_host = ctx
-        .homes
-        .iter()
-        .next()
-        .map(|(_, row)| row.enrolled_host.clone());
-    PostalAddr::parse(raw, default_host.as_deref())
-        .map_err(|err| SmError::BadAddress(err.to_string()))
+fn resolve_from(ctx: &SmContext) -> Result<PostalAddr, SmError> {
+    resolve_from_homes(&ctx.homes)
 }
 
 fn permanent(reason: &'static str, hint: impl Into<String>) -> ReceiveError {
@@ -994,7 +1015,6 @@ mod tests {
             to: to.into(),
             body: body.into(),
             no_wake: false,
-            from: Some("alice::acme.postal.bot".into()),
         }
     }
 
@@ -1014,14 +1034,17 @@ mod tests {
         assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
         let inbox = ctx.mailbox.read_inbox(id).unwrap();
         assert_eq!(inbox.body, "hello scout");
-        assert_eq!(inbox.from, addr("alice::acme.postal.bot"));
+        assert_eq!(inbox.from, addr("scout::acme.postal.bot"));
         assert!(session_map_not_on_disk(tmp.path()));
     }
 
     #[test]
     fn remote_stays_queued() {
         let tmp = tempfile::tempdir().unwrap();
-        let ctx = SmContext::new(tmp.path());
+        let mut ctx = SmContext::new(tmp.path());
+        ctx.homes
+            .insert(home("alice::acme.postal.bot", true, true))
+            .unwrap();
         let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "hold please")).unwrap();
         assert!(resp.success);
         assert_eq!(resp.status.as_deref(), Some("queued"));
@@ -1046,14 +1069,10 @@ mod tests {
         ctx.live =
             LiveClient::with_root_der(std::time::Duration::from_secs(2), &peer.cert_der).unwrap();
         let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
-        assert_eq!(resp.status.as_deref(), Some("queued"));
+        assert_eq!(resp.reason.as_deref(), Some(REASON_NO_IDENTITY));
+        assert!(!resp.success);
         assert!(peer.recorded().is_empty());
-        assert!(ctx
-            .mailbox
-            .read_sent(resp.id.as_deref().unwrap())
-            .unwrap()
-            .last_error
-            .is_none());
+        assert!(resp.id.is_none());
     }
 
     fn remote_peer_msg() -> MsgRequest {
@@ -1063,6 +1082,9 @@ mod tests {
     fn live_ctx_https(root: &Path, peer: &p5_live::mock::HttpsPeer) -> SmContext {
         KeyPair::load_or_create(root).unwrap();
         let mut ctx = SmContext::new(root);
+        ctx.homes
+            .insert(home("alice::acme.postal.bot", true, true))
+            .unwrap();
         ctx.live_base = Some(peer.base_url.clone());
         ctx.live =
             LiveClient::with_root_der(std::time::Duration::from_secs(2), &peer.cert_der).unwrap();
@@ -1097,6 +1119,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         KeyPair::load_or_create(tmp.path()).unwrap();
         let mut ctx = SmContext::new(tmp.path());
+        ctx.homes
+            .insert(home("alice::acme.postal.bot", true, true))
+            .unwrap();
         ctx.live_base = Some(p5_live::spawn_hang());
         ctx.live = LiveClient::with_timeout(std::time::Duration::from_millis(250));
         let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
@@ -1183,15 +1208,9 @@ mod tests {
         let mut ctx = SmContext::new(tmp.path());
         ctx.local_recv = true;
         let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "anyone home")).unwrap();
-        assert!(resp.success);
-        assert_eq!(resp.status.as_deref(), Some("queued"));
-        assert_eq!(resp.exit_code(), EXIT_OK);
-        let id = resp.id.as_deref().unwrap();
-        assert_eq!(
-            ctx.mailbox.read_sent(id).unwrap().status,
-            DeliveryStatus::Queued
-        );
-        assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1);
+        assert!(!resp.success);
+        assert_eq!(resp.reason.as_deref(), Some(REASON_NO_IDENTITY));
+        assert!(resp.id.is_none());
         assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
     }
 
@@ -1199,6 +1218,9 @@ mod tests {
     fn local_recv_declared_session_without_home_is_no_agent() {
         let tmp = tempfile::tempdir().unwrap();
         let mut ctx = SmContext::new(tmp.path());
+        ctx.homes
+            .insert(home("alice::acme.postal.bot", true, true))
+            .unwrap();
         ctx.local_recv = true;
         ctx.roster.insert(
             addr("scout::acme.postal.bot"),

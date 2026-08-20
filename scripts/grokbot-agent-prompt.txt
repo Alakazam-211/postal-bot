@@ -8,7 +8,7 @@ You are setting up Postal (p5). This is not K2. The whole loop is: install, invi
 2. Identity + invite (one script)
    curl -fsSL https://www.postal.bot/grokbot-setup.sh | sh
    That logs in with ~/.k2/tunnel.json (subdomain must be grokbot) and runs:
-   p5 pair add postal-bot::rosson.postal.bot --from grok::grokbot.postal.bot --typ turn
+   p5 pair add postal-bot::rosson.postal.bot --typ turn
    Then: p5 login   # starts the agent; if systemd/launchd is missing it still starts p5 agent run
    p5 status        # want agent: up  tunnel: up
    Do not export P5_TLS_* / P5_TUNNEL unless p5 status says tunnel: down.

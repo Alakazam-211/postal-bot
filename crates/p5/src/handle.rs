@@ -108,7 +108,7 @@ pub fn run_claim(
         cwd: row_cwd.display().to_string(),
         live,
         me: me.clone(),
-        next: format!("p5 pair add <peer> --from {addr}"),
+        next: format!("p5 pair add <peer>"),
         test: format!("p5 msg {addr} \"hi\""),
     };
     if json {
@@ -267,7 +267,7 @@ fn resolve_show_addr(raw: &str, host: Option<&str>) -> Result<PostalAddr, Handle
 }
 
 fn publish_me(addr: &PostalAddr, typ: &str) -> String {
-    match pair::run_me(Some(addr.to_string()), Some(typ.to_string()), false) {
+    match pair::run_me(Some(typ.to_string()), false) {
         Ok(()) => "ok".into(),
         Err(err) => format!("skipped ({err})"),
     }

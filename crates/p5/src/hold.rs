@@ -306,19 +306,7 @@ fn take_one(
 }
 
 fn is_ours(ctx: &SmContext, to: &PostalAddr) -> bool {
-    if ctx.dest_is_local(to) || ctx.homes.get(to).is_some() {
-        return true;
-    }
-    if let Some(raw) = std::env::var("P5_FROM")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        if PostalAddr::parse(&raw, None).ok().as_ref() == Some(to) {
-            return true;
-        }
-    }
-    false
+    ctx.dest_is_local(to) || ctx.homes.get(to).is_some()
 }
 
 fn from_trusted(ctx: &SmContext, from: &PostalAddr) -> bool {
@@ -421,7 +409,6 @@ mod tests {
             to: to.into(),
             body: body.into(),
             no_wake: false,
-            from: Some("alice::acme.postal.bot".into()),
         }
     }
 
@@ -590,6 +577,7 @@ mod tests {
         ctx.plane_url = plane.into();
         ctx.plane_token = Some("k2c_test".into());
         ctx.live_timeout = Duration::from_secs(2);
+        ctx.homes.insert(home_row("alice::acme.postal.bot")).unwrap();
         ctx.roster
             .insert(addr("scout::acme.postal.bot"), roster_peer(peer));
         ctx
@@ -753,7 +741,10 @@ mod tests {
     #[test]
     fn hold_off_does_not_touch_live_or_plane() {
         let tmp = tempfile::tempdir().unwrap();
-        let ctx = SmContext::new(tmp.path());
+        let mut ctx = SmContext::new(tmp.path());
+        ctx.homes
+            .insert(home_row("alice::acme.postal.bot"))
+            .unwrap();
         let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "offline")).unwrap();
         assert_eq!(resp.status.as_deref(), Some("queued"));
     }

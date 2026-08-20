@@ -148,11 +148,11 @@ if [ "$PAIR_ONLY" -eq 0 ]; then
     write_identity
     # --no-start: identity + token only. Agent/tunnel is a later step.
     p5 login --token "$TOKEN" --no-start
-    p5 me --from "$ADDR" --typ "$TYP"
+    p5 me --typ "$TYP"
 fi
 
 info "requesting pair with $PEER (owner must accept on /dashboard?tab=postal)"
-p5 pair add "$PEER" --from "$ADDR" --typ "$TYP"
+p5 pair add "$PEER" --typ "$TYP"
 p5 pair list || true
 
 info "done. Report pair id + SAS to the human. Do not p5 pair accept (owner-gated)."

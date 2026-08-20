@@ -52,17 +52,8 @@ impl PairCtx {
         Ok(pem)
     }
 
-    fn resolve_from(&self, from_flag: Option<&str>) -> Result<PostalAddr, PairError> {
-        if let Some(raw) = from_flag.map(str::trim).filter(|s| !s.is_empty()) {
-            return parse_addr(raw, self.default_host());
-        }
-        if let Some(raw) = self.cfg.addr.as_deref() {
-            return parse_addr(raw, self.default_host());
-        }
-        if let Some((addr, _)) = self.homes.iter().next() {
-            return Ok(addr.clone());
-        }
-        Err(PairError::NoIdentity)
+    fn resolve_from(&self) -> Result<PostalAddr, PairError> {
+        crate::sm::resolve_from_homes(&self.homes).map_err(|_| PairError::NoIdentity)
     }
 
     /// Our declared type. Defaults to session — this CLI's identity, not a peer guess.
@@ -83,15 +74,8 @@ impl PairCtx {
             .map(|(_, row)| row.enrolled_host.as_str())
     }
 
-    fn configured_addrs(&self, from_flag: Option<&str>) -> Vec<PostalAddr> {
-        let mut out = BTreeSet::new();
-        if let Ok(a) = self.resolve_from(from_flag) {
-            out.insert(a);
-        }
-        for (addr, _) in self.homes.iter() {
-            out.insert(addr.clone());
-        }
-        out.into_iter().collect()
+    fn configured_addrs(&self) -> Vec<PostalAddr> {
+        self.homes.iter().map(|(addr, _)| addr.clone()).collect()
     }
 }
 
@@ -109,15 +93,15 @@ pub fn run_login(token: String, label: Option<String>) -> Result<(), PairError> 
     ctx.cfg.file.save(&ctx.root)?;
     ctx.cfg.token = Some(token);
     if ctx.cfg.require_token().is_ok() {
-        publish_handles(&ctx, None, None)?;
+        publish_handles(&ctx, None)?;
     }
     println!("ok");
     Ok(())
 }
 
-pub fn run_me(from: Option<String>, typ: Option<String>, print_pem: bool) -> Result<(), PairError> {
+pub fn run_me(typ: Option<String>, print_pem: bool) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
-    let published = publish_handles(&ctx, from.as_deref(), typ.as_deref())?;
+    let published = publish_handles(&ctx, typ.as_deref())?;
     if published.is_empty() {
         return Err(PairError::NoIdentity);
     }
@@ -181,16 +165,16 @@ pub fn run_set_key(addr: String, pem_path: Option<String>) -> Result<(), PairErr
     Ok(())
 }
 
-pub fn run_add(addr: String, from: Option<String>, typ: Option<String>) -> Result<(), PairError> {
+pub fn run_add(addr: String, typ: Option<String>) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let to = parse_addr(&addr, ctx.default_host())?;
-    let from_addr = ctx.resolve_from(from.as_deref())?;
+    let from_addr = ctx.resolve_from()?;
     let typ = ctx.resolve_typ(typ.as_deref())?;
     let pem = ctx.public_pem()?;
     let client = ctx.client()?;
     let _me = client.put_me(&from_addr.to_string(), &pem, typ)?;
     let add = client.add_pair(&from_addr.to_string(), &to.to_string(), typ, &pem)?;
-    refresh_roster(&client, &ctx.root, &ctx.configured_addrs(from.as_deref()))?;
+    refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
     print_add(&add.id, &from_addr, &to, add.sas.as_deref(), add.created);
     Ok(())
 }
@@ -198,7 +182,7 @@ pub fn run_add(addr: String, from: Option<String>, typ: Option<String>) -> Resul
 pub fn run_list(inbox_only: bool) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let lists = ctx.client()?.list_pairs(inbox_only)?;
-    sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None))?;
+    sync_roster(&ctx.root, &lists, &ctx.configured_addrs())?;
     if inbox_only {
         print_views(&lists.inbox);
         return Ok(());
@@ -212,7 +196,7 @@ pub fn run_list(inbox_only: bool) -> Result<(), PairError> {
 pub fn run_show(id: String) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let lists = ctx.client()?.list_pairs(false)?;
-    if let Err(err) = sync_roster(&ctx.root, &lists, &ctx.configured_addrs(None)) {
+    if let Err(err) = sync_roster(&ctx.root, &lists, &ctx.configured_addrs()) {
         eprintln!("postal roster: {err}");
     }
     let view = lists.find(&id).ok_or(PairError::NotFound(id.clone()))?;
@@ -231,7 +215,7 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
         None => resolve_sas(&ctx, view)?,
     };
     client.accept(&id, &sas)?;
-    refresh_roster(&client, &ctx.root, &ctx.configured_addrs(None))?;
+    refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
     println!("ok");
     if let Some(view) = client.list_pairs(false).ok().as_ref().and_then(|l| l.find(&id)) {
         if let Some(peer) = peer_of(&ctx, view) {
@@ -255,7 +239,7 @@ pub fn run_reject(id: String) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let client = ctx.client()?;
     client.reject(&id)?;
-    refresh_roster(&client, &ctx.root, &ctx.configured_addrs(None))?;
+    refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
     println!("ok");
     Ok(())
 }
@@ -265,7 +249,7 @@ pub fn run_revoke(id: String) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let client = ctx.client()?;
     client.revoke(&id)?;
-    refresh_roster(&client, &ctx.root, &ctx.configured_addrs(None))?;
+    refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
     println!("ok");
     Ok(())
 }
@@ -290,13 +274,12 @@ fn require_owner_pair() -> Result<(), PairError> {
 
 fn publish_handles(
     ctx: &PairCtx,
-    from_flag: Option<&str>,
     typ_flag: Option<&str>,
 ) -> Result<Vec<(PostalAddr, String)>, PairError> {
     let typ = ctx.resolve_typ(typ_flag)?;
     let pem = ctx.public_pem()?;
     let client = ctx.client()?;
-    let addrs = ctx.configured_addrs(from_flag);
+    let addrs = ctx.configured_addrs();
     if addrs.is_empty() {
         return Ok(Vec::new());
     }
@@ -407,7 +390,7 @@ fn local_sas(ctx: &PairCtx, view: &PairView) -> Option<LocalSas> {
 }
 
 fn peer_of(ctx: &PairCtx, view: &PairView) -> Option<PostalAddr> {
-    let selves: BTreeSet<_> = ctx.configured_addrs(None).into_iter().collect();
+    let selves: BTreeSet<_> = ctx.configured_addrs().into_iter().collect();
     peer_of_view(&selves, view)
 }
 
@@ -541,7 +524,7 @@ impl fmt::Display for PairError {
             Self::BadAddress(msg) => write!(f, "{msg}"),
             Self::BadTyp(e) => write!(f, "{e}"),
             Self::NoIdentity => f.write_str(
-                "no local identity; set P5_FROM or add a homes row (handle::sub.postal.bot)",
+                "no handle for this session; run p5 from a claimed cwd (From is not a flag)",
             ),
             Self::NoSas => f.write_str("no SAS; pass --sas after p5 pair show"),
             Self::MissingPem => f.write_str("empty public key PEM"),

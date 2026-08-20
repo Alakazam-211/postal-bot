@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use p5_core::{PeerType, PostalAddr, Roster, RosterEntry, ToolFlags, Trust};
+use p5_core::{HomeRow, Homes, PeerType, PostalAddr, Roster, RosterEntry, ToolFlags, Trust};
 use p5_crypto::{fingerprint_spki_pem, sas_code, KeyPair};
 use p5_plane::PairView;
 
@@ -19,18 +19,44 @@ fn p5() -> Command {
 fn isolate_pair_env(cmd: &mut Command) {
     cmd.env_remove("P5_OWNER_PAIR")
         .env_remove("P5_TYP")
-        .env_remove("P5_FROM")
         .env_remove("P5_CONNECT_TOKEN")
         .env_remove("P5_PLANE_URL");
 }
 
+fn seed_alice(root: &Path) {
+    let address: PostalAddr = "alice::acme.postal.bot".parse().unwrap();
+    let host = address.host().to_string();
+    let mut homes = Homes::load(root).unwrap();
+    if homes.get(&address).is_some() {
+        return;
+    }
+    homes
+        .insert(HomeRow {
+            address,
+            session_id: Some("alice".into()),
+            cwd: root.to_path_buf(),
+            inbox_root: None,
+            launch: vec!["p5".into()],
+            harness: Some("k2".into()),
+            terminal: None,
+            tools: ToolFlags {
+                files: false,
+                live_inject: true,
+                wake: true,
+            },
+            enrolled_host: host,
+        })
+        .unwrap();
+    homes.save(root).unwrap();
+}
+
 fn run_home(home: &Path, url: &str, args: &[&str], extra: &[(&str, &str)]) -> std::process::Output {
+    seed_alice(home);
     let mut cmd = p5();
     isolate_pair_env(&mut cmd);
     cmd.env("P5_HOME", home)
         .env("P5_PLANE_URL", url)
         .env("P5_CONNECT_TOKEN", "k2c_test")
-        .env("P5_FROM", "alice::acme.postal.bot")
         .args(args);
     for (k, v) in extra {
         cmd.env(k, v);

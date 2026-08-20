@@ -21,7 +21,6 @@ fn p5() -> Command {
 fn isolate(cmd: &mut Command) {
     cmd.env_remove("P5_HOLD")
         .env_remove("P5_TYP")
-        .env_remove("P5_FROM")
         .env_remove("P5_CONNECT_TOKEN")
         .env_remove("P5_PLANE_URL")
         .env_remove("P5_LIVE_URL");
@@ -33,7 +32,6 @@ fn run_home(home: &Path, url: &str, args: &[&str], extra: &[(&str, &str)]) -> st
     cmd.env("P5_HOME", home)
         .env("P5_PLANE_URL", url)
         .env("P5_CONNECT_TOKEN", "k2c_test")
-        .env("P5_FROM", "alice::acme.postal.bot")
         .env("P5_HOLD", "1")
         .env("P5_LIVE_URL", "http://127.0.0.1:1")
         .args(args);
@@ -234,6 +232,7 @@ fn msg_tunnel_down_plane_up_is_held() {
     let home = tempfile::tempdir().unwrap();
     let bob = KeyPair::generate();
     add_peer(home.path(), "scout::acme.postal.bot", &bob);
+    add_home(home.path(), "alice::acme.postal.bot");
     let plane = MockPlane::start();
     let out = run_home(
         home.path(),
@@ -242,8 +241,6 @@ fn msg_tunnel_down_plane_up_is_held() {
             "msg",
             "scout::acme.postal.bot",
             "secret cover",
-            "--from",
-            "alice::acme.postal.bot",
         ],
         &[],
     );
@@ -309,7 +306,6 @@ fn recv_without_p5_hold_does_not_hit_plane() {
         .env("P5_HOME", home.path())
         .env("P5_PLANE_URL", &plane.url)
         .env("P5_CONNECT_TOKEN", "k2c_test")
-        .env("P5_FROM", "alice::acme.postal.bot")
         .args(["recv"])
         .output()
         .unwrap();

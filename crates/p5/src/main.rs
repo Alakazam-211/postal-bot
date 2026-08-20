@@ -63,9 +63,6 @@ enum Commands {
         /// Print a JSON object
         #[arg(long)]
         json: bool,
-        /// Display From (not identity)
-        #[arg(long)]
-        from: Option<String>,
     },
     /// Local inbox (cover markdown + optional sidecars)
     Inbox {
@@ -133,9 +130,6 @@ enum Commands {
     },
     /// Publish this handle's public pairing key (`PUT /postal/me`)
     Me {
-        /// Display / pairing address (`handle::sub.postal.bot`)
-        #[arg(long)]
-        from: Option<String>,
         /// Our type: session or turn (default session — this CLI's identity)
         #[arg(long)]
         typ: Option<String>,
@@ -191,9 +185,6 @@ enum PairAction {
     Add {
         /// Peer `handle::sub.postal.bot`
         addr: String,
-        /// Our address
-        #[arg(long)]
-        from: Option<String>,
         /// Our type: session or turn (default session — this CLI's identity)
         #[arg(long)]
         typ: Option<String>,
@@ -255,9 +246,6 @@ enum InboxAction {
         /// Print a JSON object
         #[arg(long)]
         json: bool,
-        /// Display From (not identity)
-        #[arg(long)]
-        from: Option<String>,
     },
 }
 
@@ -602,7 +590,7 @@ fn run_handle(action: HandleAction) {
     }
 }
 
-fn inbox_respond(id: String, text: String, no_wake: bool, json: bool, from: Option<String>) {
+fn inbox_respond(id: String, text: String, no_wake: bool, json: bool) {
     let mb = mailbox();
     match mb.read_inbox(&id) {
         Ok(item) => run_msg(
@@ -610,7 +598,6 @@ fn inbox_respond(id: String, text: String, no_wake: bool, json: bool, from: Opti
                 to: item.from.to_string(),
                 body: text,
                 no_wake,
-                from,
             },
             json,
         ),
@@ -671,13 +658,11 @@ fn main() {
             text,
             no_wake,
             json,
-            from,
         } => run_msg(
             MsgRequest {
                 to: addr,
                 body: text,
                 no_wake,
-                from,
             },
             json,
         ),
@@ -688,9 +673,8 @@ fn main() {
                     text,
                     no_wake,
                     json,
-                    from,
                 }),
-        } => inbox_respond(id, text, no_wake, json, from),
+        } => inbox_respond(id, text, no_wake, json),
         Commands::Inbox { action } => run_mailbox(inbox_cmd(action)),
         Commands::Sent { action } => run_mailbox(sent_cmd(action)),
         Commands::Outbox { action } => run_mailbox(outbox_cmd(action)),
@@ -736,8 +720,8 @@ fn main() {
         }
         Commands::Status => print!("{}", agent::status_text()),
         Commands::Pair {
-            action: PairAction::Add { addr, from, typ },
-        } => finish_pair(run_add(addr, from, typ)),
+            action: PairAction::Add { addr, typ },
+        } => finish_pair(run_add(addr, typ)),
         Commands::Pair {
             action: PairAction::List { inbox },
         } => finish_pair(run_list(inbox)),
@@ -756,7 +740,7 @@ fn main() {
         Commands::Pair {
             action: PairAction::SetKey { addr, pem_file },
         } => finish_pair(run_set_key(addr, pem_file)),
-        Commands::Me { from, typ, pem } => finish_pair(run_me(from, typ, pem)),
+        Commands::Me { typ, pem } => finish_pair(run_me(typ, pem)),
         Commands::Recv => match hold::run_recv() {
             Ok(report) => println!("pulled {}", report.pulled),
             Err(err) => {

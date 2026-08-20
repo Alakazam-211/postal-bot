@@ -40,6 +40,7 @@ fn run_home(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::proc
         .env_remove("P5_PLANE_URL")
         .env_remove("P5_LIVE_URL")
         .env_remove("P5_CONNECT_TOKEN")
+        .env_remove("P5_FROM")
         .args(args);
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -51,11 +52,12 @@ fn run_home(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::proc
 fn add_home(root: &Path, address: &str, wake: bool) {
     let address: PostalAddr = address.parse().unwrap();
     let host = address.host().to_string();
+    let sid = address.handle().to_string();
     let mut homes = Homes::load(root).unwrap();
     homes
         .insert(HomeRow {
             address,
-            session_id: Some("sess-1".into()),
+            session_id: Some(sid),
             cwd: root.to_path_buf(),
             inbox_root: None,
             launch: vec!["claude".into()],
@@ -221,8 +223,6 @@ fn msg_local_home_delivers() {
             "msg",
             "scout::acme.postal.bot",
             "hello scout",
-            "--from",
-            "alice::acme.postal.bot",
         ],
     );
     assert!(out.contains("delivered"));
@@ -234,7 +234,7 @@ fn msg_local_home_delivers() {
     assert!(stdout_home(home.path(), &["outbox"]).is_empty());
     let inbox = stdout_home(home.path(), &["inbox"]);
     assert!(inbox.contains(id));
-    assert!(inbox.contains("alice::acme.postal.bot"));
+    assert!(inbox.contains("scout::acme.postal.bot"));
     let cover = stdout_home(home.path(), &["inbox", "read", id]);
     assert!(cover.contains("hello scout"));
 }
@@ -250,8 +250,6 @@ fn msg_json_local_deliver() {
             "--json",
             "scout::acme.postal.bot",
             "json body",
-            "--from",
-            "alice::acme.postal.bot",
         ],
     );
     let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
@@ -265,14 +263,13 @@ fn msg_json_local_deliver() {
 #[test]
 fn msg_remote_stays_queued() {
     let home = tmp_home();
+    add_home(home.path(), "alice::acme.postal.bot", true);
     let out = stdout_home(
         home.path(),
         &[
             "msg",
             "scout::acme.postal.bot",
             "later",
-            "--from",
-            "alice::acme.postal.bot",
         ],
     );
     assert!(out.contains("queued"));
@@ -294,8 +291,6 @@ fn msg_no_wake_is_dormant() {
             "--no-wake",
             "scout::acme.postal.bot",
             "shh",
-            "--from",
-            "alice::acme.postal.bot",
         ],
         &[],
     );
@@ -308,31 +303,19 @@ fn msg_no_wake_is_dormant() {
 }
 
 #[test]
-fn msg_local_recv_without_declared_typ_stays_queued() {
+fn msg_without_homes_has_no_from() {
     let home = tmp_home();
-    // P5_LOCAL_RECV without a roster row or HomeRow is unknown typ (K22):
-    // do not guess session / enter the receiver.
     let out = run_home(
         home.path(),
-        &[
-            "msg",
-            "scout::acme.postal.bot",
-            "anyone",
-            "--from",
-            "alice::acme.postal.bot",
-        ],
+        &["msg", "scout::acme.postal.bot", "anyone"],
         &[("P5_LOCAL_RECV", "1")],
     );
+    let err = String::from_utf8_lossy(&out.stderr);
+    let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
+        err.contains("no_identity") || text.contains("no_identity"),
+        "stderr={err} stdout={text}"
     );
-    let text = String::from_utf8(out.stdout).unwrap();
-    assert!(text.contains("queued"));
-    let sent = stdout_home(home.path(), &["sent"]);
-    assert!(sent.contains("queued"));
-    assert!(stdout_home(home.path(), &["inbox"]).is_empty());
 }
 
 #[test]
@@ -345,8 +328,6 @@ fn msg_wake_off_is_gated() {
             "msg",
             "scout::acme.postal.bot",
             "wake me",
-            "--from",
-            "alice::acme.postal.bot",
         ],
         &[],
     );
@@ -356,12 +337,34 @@ fn msg_wake_off_is_gated() {
 }
 
 #[test]
+fn msg_rejects_from_flag() {
+    let home = tmp_home();
+    add_home(home.path(), "scout::acme.postal.bot", true);
+    let out = run_home(
+        home.path(),
+        &[
+            "msg",
+            "scout::acme.postal.bot",
+            "nope",
+            "--from",
+            "alice::acme.postal.bot",
+        ],
+        &[],
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("unexpected") || err.contains("--from") || err.contains("usage"),
+        "{err}"
+    );
+}
+
 fn msg_bad_address_exits_2() {
     let home = tmp_home();
     let out = run_home(
         home.path(),
         &["msg", "scout@acme.postal.bot", "nope"],
-        &[("P5_FROM", "alice::acme.postal.bot")],
+        &[],
     );
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
@@ -498,28 +501,29 @@ fn inbox_respond_is_msg_to_from() {
     let home = tmp_home();
     add_home(home.path(), "alice::acme.postal.bot", true);
     add_home(home.path(), "scout::acme.postal.bot", true);
-    let sent = stdout_home(
+    let sent_out = run_home(
         home.path(),
-        &[
-            "msg",
-            "scout::acme.postal.bot",
-            "ping",
-            "--from",
-            "alice::acme.postal.bot",
-        ],
+        &["msg", "scout::acme.postal.bot", "ping"],
+        &[("K2_SESSION_ID", "alice")],
     );
+    assert!(
+        sent_out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&sent_out.stderr)
+    );
+    let sent = String::from_utf8(sent_out.stdout).unwrap();
     let id = sent.split_whitespace().next().unwrap();
-    let reply = stdout_home(
+    let reply_out = run_home(
         home.path(),
-        &[
-            "inbox",
-            "respond",
-            id,
-            "pong",
-            "--from",
-            "scout::acme.postal.bot",
-        ],
+        &["inbox", "respond", id, "pong"],
+        &[("K2_SESSION_ID", "scout")],
     );
+    assert!(
+        reply_out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&reply_out.stderr)
+    );
+    let reply = String::from_utf8(reply_out.stdout).unwrap();
     assert!(reply.contains("delivered"));
     assert!(reply.contains("alice::acme.postal.bot"));
     let reply_id = reply.split_whitespace().next().unwrap();

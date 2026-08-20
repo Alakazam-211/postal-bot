@@ -396,16 +396,16 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
       <li>Same Connect account that already owns label <code>grokbot</code> (so <code>grokbot.k2.dev</code> keeps working).</li>
       <li>On that box: <code>curl -fsSL https://www.postal.bot/install.sh | sh</code> (linux tarball). <code>P5_LOCAL=1</code> only if you mean to cargo-build.</li>
       <li><code>p5 login --label grokbot</code> (device code; or <code>--token</code> from <code>~/.k2/tunnel.json</code> until the new tarball is on PATH).</li>
-      <li><code>p5 me --from grok::grokbot.postal.bot --typ turn</code> — they are a turn peer. <code>p5 me</code> does not persist <code>addr</code> yet; put it in <code>config.toml</code> or pass <code>--from</code> every time.</li>
+      <li><code>p5 me --typ turn</code> from the grok handle’s claimed session. From is forced by that homes row (0.1.5; no <code>--from</code> flag).</li>
       <li>Agent binds loopback 8443; frpc advertises <code>grokbot.postal.bot</code>. Need <code>tunnel_label=grokbot</code> (login picker) or <code>P5_TUNNEL_LABEL</code>. Current tarball reuses <code>cert.pem</code> unless <code>P5_TUNNEL_REISSUE=1</code>.</li>
       <li>CSR to <code>https://cert.postal.bot/cert</code>. After enroll, <code>https://grokbot.postal.bot/health</code> should 200 from the agent.</li>
-      <li>They <code>PUT /postal/me</code> via <code>p5 me --from grok::grokbot.postal.bot --typ turn</code>.</li>
+      <li>They <code>PUT /postal/me</code> via <code>p5 me --typ turn</code> in that session.</li>
       <li>We <code>p5 pair add grok::grokbot.postal.bot</code>. You accept on <code>/dashboard?tab=postal</code> (SAS). Agents do not expand trust by default.</li>
       <li>Then: <code>p5 msg grok::grokbot.postal.bot "hello"</code> from this CLI, and a reply the other way.</li>
     </ol>
     <p>Their turn receiver will hit <strong>local</strong> <code>GET :1340/health</code> then sendPrompt. If Grok Bot’s health port is not 1340, they set <code>P5_TURN_HEALTH</code>. We never call SendToAgent over HTTP.</p>
     <h3>Copy-paste prompt for the Grok Bot</h3>
-    <p>Repo files: <code>scripts/grokbot-setup.sh</code> (runnable) and <code>scripts/grokbot-agent-prompt.txt</code>. Give the prompt to a bot <em>inside Grok Bot software</em> on the box that already has <code>grokbot.k2.dev</code>. Not a K2 workspace agent. Friend request is <code>p5 pair add postal-bot::rosson.postal.bot --from grok::grokbot.postal.bot --typ turn</code> — you accept on the dashboard.</p>
+    <p>Repo files: <code>scripts/grokbot-setup.sh</code> (runnable) and <code>scripts/grokbot-agent-prompt.txt</code>. Give the prompt to a bot <em>inside Grok Bot software</em> on the box that already has <code>grokbot.k2.dev</code>. Not a K2 workspace agent. Friend request is <code>p5 pair add postal-bot::rosson.postal.bot --typ turn</code> from that session — you accept on the dashboard.</p>
     <pre>You are setting up Postal (p5) so you can mail another bot. This is not K2.
 
 Goal
@@ -439,7 +439,7 @@ Write ~/.postal/config.toml (mode 0600):
   typ = "turn"
 
 p5 login --token "&lt;same token&gt;" --no-start
-p5 me --from grok::grokbot.postal.bot --typ turn
+p5 me --typ turn
 # If this 401s: the pairing plane currently wants a k2c_ bearer. Report that
 # and continue local agent setup. We are asking K2 Web to accept the tunnel token.
 
@@ -455,7 +455,7 @@ p5 agent run
 # If tunnel: down with issuance_failed, report the log line from ~/.postal/agent.log
 
 Pair
-p5 pair add postal-bot::rosson.postal.bot --from grok::grokbot.postal.bot --typ turn
+p5 pair add postal-bot::rosson.postal.bot --typ turn
 Then: p5 pair list
 Tell the human: SAS code, pair id, and "waiting for owner accept on /dashboard?tab=postal".
 Do not p5 pair accept yourself (that is owner-gated).
