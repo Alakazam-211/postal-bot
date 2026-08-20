@@ -91,8 +91,10 @@ enum Commands {
         /// Connect token (`k2c_…`). Skips device approval.
         #[arg(long)]
         token: Option<String>,
-        /// Tunnel hostname to bind (`acme` → `acme.postal.bot`). Skips the picker.
-        #[arg(long)]
+        /// Bind this computer to this subdomain now (`acme` → `acme.postal.bot`).
+        /// Use when you already know which hostname the human wants (scripts).
+        /// Skips asking. Alias: `--host`.
+        #[arg(long, visible_alias = "host")]
         label: Option<String>,
         /// Print the approval URL; do not try to open a browser (remote servers)
         #[arg(long)]

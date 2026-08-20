@@ -125,8 +125,9 @@ fn device_token(no_browser: bool) -> Result<String, LoginError> {
     if url.is_empty() {
         return Err(LoginError::NoUrl);
     }
-    eprintln!("To approve this computer, open this URL on any device");
-    eprintln!("(the code is already in the URL):");
+    eprintln!("Send this URL to the human who owns the Postal account.");
+    eprintln!("They open it (any device), sign in if needed, and click approve.");
+    eprintln!("The code in the URL must match the user code below:");
     eprintln!("{url}");
     if !auth.user_code.trim().is_empty() {
         eprintln!("User code: {}", auth.user_code.trim());
@@ -134,7 +135,8 @@ fn device_token(no_browser: bool) -> Result<String, LoginError> {
     if no_browser {
         eprintln!("Not opening a browser (--no-browser).");
     } else if open_browser(&url).is_err() {
-        eprintln!("Could not open a browser on this machine (normal on a remote server).");
+        eprintln!("Could not open a browser here (normal on a headless server).");
+        eprintln!("Still send the URL to the human — this CLI will wait.");
     }
     eprintln!("Waiting for approval…");
     let _ = io::stderr().flush();
@@ -184,10 +186,13 @@ fn poll_until_token(client: &PlaneClient, auth: &DeviceAuth) -> Result<String, L
 fn resolve_label(token: &str, label_flag: Option<String>) -> Result<String, LoginError> {
     let flag = nonempty(label_flag);
     match load_hosts(token) {
-        Ok(hosts) => match flag {
-            Some(raw) => match_choice(&hosts, &raw),
-            None => pick_host(&hosts),
-        },
+        Ok(hosts) => {
+            print_hosts(&hosts);
+            match flag {
+                Some(raw) => match_choice(&hosts, &raw),
+                None => pick_host(&hosts),
+            }
+        }
         Err(LoginError::Plane(PlaneError::NotFound))
         | Err(LoginError::Plane(PlaneError::Http { status: 404, .. }))
         | Err(LoginError::Plane(PlaneError::Transport(_))) => match flag {
@@ -247,26 +252,31 @@ fn normalize_label(raw: &str) -> Result<String, LoginError> {
     label_from_host(&host).map_err(|e| LoginError::BadLabel(e.to_string()))
 }
 
+fn print_hosts(hosts: &[HostView]) {
+    eprintln!("Hostnames on this Postal account (this computer will be one of them):");
+    for (i, h) in hosts.iter().enumerate() {
+        eprintln!("  {}. {}  ({})", i + 1, h.host, plan_label(h));
+    }
+}
+
 fn pick_host(hosts: &[HostView]) -> Result<String, LoginError> {
     if hosts.len() == 1 {
+        eprintln!(
+            "Only one hostname — using {}. Pass --label to override.",
+            hosts[0].host
+        );
         return Ok(hosts[0].label.clone());
     }
-    eprintln!("Which hostname should this computer use?");
-    for (i, h) in hosts.iter().enumerate() {
-        eprintln!("  {}. {}  {}", i + 1, h.host, plan_label(h));
-    }
+    eprintln!("Ask the human which subdomain this computer should represent.");
+    eprintln!("Then type that label here (or pass it next time: p5 login --label acme).");
     if !stdin_is_tty() {
+        let labels: Vec<&str> = hosts.iter().map(|h| h.label.as_str()).collect();
         return Err(LoginError::BadLabel(format!(
-            "this account has {} hostnames; pass --label (one of: {})",
-            hosts.len(),
-            hosts
-                .iter()
-                .map(|h| h.label.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "no TTY — send the list above to your user, then run: p5 login --label <subdomain>  (one of: {})",
+            labels.join(", ")
         )));
     }
-    eprint!("Enter number or label: ");
+    eprint!("Subdomain (label or number): ");
     let _ = io::stderr().flush();
     let mut line = String::new();
     io::stdin().lock().read_line(&mut line)?;

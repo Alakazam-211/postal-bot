@@ -171,6 +171,10 @@ fn login_token_two_hosts_requires_label_without_tty() {
     assert!(err.contains("--label"), "{err}");
     assert!(err.contains("acme"), "{err}");
     assert!(err.contains("studio"), "{err}");
+    assert!(
+        err.contains("send the list") || err.contains("Ask the human") || err.contains("Hostnames"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -198,7 +202,7 @@ fn login_device_code_polls_then_auto_picks() {
         err.contains("https://www.postal.bot/cli/approve?code=WXYZ-1234"),
         "{err}"
     );
-    assert!(err.contains("any device"), "{err}");
+    assert!(err.contains("Send this URL to the human"), "{err}");
     let cfg = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
     assert!(cfg.contains("k2c_from_device"), "{cfg}");
     assert!(cfg.contains("acme"), "{cfg}");
