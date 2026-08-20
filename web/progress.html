@@ -148,18 +148,19 @@
 <body>
   <header class="mast">
     <strong><a href="/">Postal</a> · postal.bot</strong>
-    <span>Updated 2026-08-19 evening · Alakazam Labs</span>
+    <span>Updated 2026-08-20 · Alakazam Labs</span>
   </header>
   <div class="wrap">
-    <div class="postmark">Postal<br />19 Aug 26<br />k2e-01</div>
+    <div class="postmark">Postal<br />20 Aug 26<br />k2e-01</div>
     <h1>Progress</h1>
-    <p class="lede">Inter-bot mail. Command is <code>p5</code>. This page is the living readout — what is on <code>main</code>, what has actually been proven live, and the Grok Bot lab next.</p>
+    <p class="lede">Inter-bot mail. Command is <code>p5</code>. Living readout: what is on <code>main</code>, what has been proven live, and what is left so <code>p5 login</code> is friendly (Grok-style device code, no token paste, works on a remote server).</p>
 
     <nav class="toc">
       <p>Contents</p>
       <ol>
-        <li><a href="#verdict">Does grokbot.postal.bot sound good?</a></li>
         <li><a href="#now">Where we are</a></li>
+        <li><a href="#auth">Auth — friendly <code>p5 login</code></a></li>
+        <li><a href="#verdict">Does grokbot.postal.bot sound good?</a></li>
         <li><a href="#built">What is built</a></li>
         <li><a href="#tested">What has been tested</a></li>
         <li><a href="#install">Install pipes</a></li>
@@ -183,42 +184,121 @@
       <tbody>
         <tr>
           <td>GitHub <code>Alakazam-211/postal-bot</code></td>
-          <td><span class="pill go">main</span> tip <code>0f827d5</code> (2026-08-19). Private.</td>
+          <td><span class="pill go">main</span> tip <code>8b1cc13</code> (2026-08-20). Device-code <code>p5 login</code> in git. Private.</td>
         </tr>
         <tr>
-          <td>CLI phases P5-1…P5-10 + HoldSeal-v1</td>
-          <td><span class="pill go">coded + reviewed</span> unit/CLI tests green. Not proven on two live boxes.</td>
+          <td><code>www.postal.bot</code></td>
+          <td><span class="pill go">split</span> k2-dev Next: <code>/login</code> <code>/signup</code> <code>/account</code> <code>/cli/approve</code> (Postal chrome). Static postal-bot: <code>/</code> <code>/install.sh</code> <code>/releases/*</code> <code>/progress</code>. Do not alias <code>www</code> onto Vercel project postal-bot.</td>
         </tr>
         <tr>
-          <td>DNS</td>
-          <td><span class="pill go">PowerDNS</span> <code>ns1</code>/<code>ns2.k2.dev</code>. <code>*.postal.bot</code> + <code>cert</code> grey to k2e-01. Apex <code>10.10.0.1</code> is public Vercel. <code>www</code> is Vercel (this stub site).</td>
+          <td>Device grant (RFC 8628)</td>
+          <td><span class="pill go">plane live</span> k2-dev-web 2026-08-20. <code>POST /postal/cli/device</code>, poll <code>/postal/cli/device/token</code>, <code>GET /postal/hosts</code>, <code>verification_uri_complete</code> already has <code>?code=</code>. Approve mints account-scoped <code>k2c_cli_*</code>. No loopback. CLI client in git; <strong>not</strong> in the install tarball yet. See <a href="#auth">Auth</a>.</td>
         </tr>
         <tr>
-          <td>Relay CP-1 / CP-2 / CP-2b</td>
-          <td><span class="pill go">on k2e-01</span> 2026-08-19 07:42 UTC. Enroll <code>&lt;label&gt;.postal.bot</code> works. <code>ninja.postal.bot</code> enroll was 201.</td>
+          <td>DNS / relay / cert</td>
+          <td><span class="pill go">live</span> <code>*.postal.bot</code> + <code>cert</code> grey to k2e-01. <code>https://rosson.postal.bot/health</code> and <code>https://baden.postal.bot/health</code> have returned p5 200. SAN is <code>{label}.postal.bot</code> only.</td>
         </tr>
         <tr>
-          <td>Cert broker / public TLS</td>
-          <td><span class="pill go">live</span> <code>https://rosson.postal.bot</code> is p5 (not K2). SAN <code>rosson.postal.bot</code> only. <code>rosson.k2.dev</code> unchanged.</td>
+          <td>Pairing</td>
+          <td><span class="pill go">plane live</span> Trusted: grokbot ↔ <code>postal-bot::rosson.postal.bot</code> (SAS 526919). Pending invite to <code>appa::baden.postal.bot</code> (SAS 719206). Accept is still owner-gated CLI (<code>P5_OWNER_PAIR=1</code>) or a dashboard we have not shipped on www.</td>
         </tr>
         <tr>
-          <td>Pairing tables / dashboard</td>
-          <td><span class="pill go">pair trusted</span> Plane rows live. First friend: <code>grok::grokbot.postal.bot</code> ↔ <code>postal-bot::rosson.postal.bot</code> (SAS 526919), owner-accepted from this CLI. k2.dev Postal tab is <strong>not</strong> a usable login. Accept UI will be <strong>our</strong> site/app, not k2.dev.</td>
+          <td>First-run (appa / Baden’s box)</td>
+          <td><span class="pill hold">workaround</span> Tunnel is up via a hand-written <code>frpc</code> LaunchAgent and a homes row. Installed prebuilt always re-issues certs (Let’s Encrypt 5/168h). <code>p5 login</code> / launchd still hostile. He did not guess <code>homes.harness=k2</code>.</td>
         </tr>
         <tr>
           <td>Hold store (CP-4)</td>
-          <td><span class="pill stop">not cut</span> Client is in <code>p5</code> behind <code>P5_HOLD=1</code>. Do not enable against prod until K2 Web ships <code>/postal/hold</code>.</td>
+          <td><span class="pill stop">not cut</span> Client behind <code>P5_HOLD=1</code>. Do not enable against prod until K2 Web ships <code>/postal/hold</code>.</td>
         </tr>
         <tr>
-          <td>curl / npm install</td>
-          <td><span class="pill stop">not working</span> See <a href="#install">Install pipes</a>.</td>
+          <td>curl install</td>
+          <td><span class="pill hold">script ok, binary stale</span> <code>install.sh</code> parses on macOS <code>/bin/sh</code> (<code>6214c24</code>). Prebuilt tarball is still the 00:09 pack — no cert reuse, no device login. npm unpublished. See <a href="#install">Install pipes</a>.</td>
         </tr>
         <tr>
-          <td>Live mail to another product</td>
-          <td><span class="pill go">plugin last mile</span> After inbox fsync, <code>homes.harness</code> selects a plugin. Built-in <code>k2</code> → <code>/cli/workspace/msg</code> (landed in this cell). Built-in <code>grok</code> → sendPrompt. Anything else is an exec plugin. No <code>typ=k2</code>. Grok Bot pair: <code>scripts/grokbot-setup.sh</code>.</td>
+          <td>Last mile</td>
+          <td><span class="pill go">plugin</span> After inbox fsync, <code>homes.harness</code>: built-in <code>k2</code> / <code>grok</code>, else exec plugin. No harness + no launch → <code>no_agent</code>. Users do not discover this on their own.</td>
         </tr>
       </tbody>
     </table>
+
+    <h2 id="auth">Auth — friendly <code>p5 login</code></h2>
+    <p>Locked shape (Rosson + k2-dev-web): <strong>OAuth 2.0 Device Authorization Grant</strong> (RFC 8628), Grok-style. Print a URL that already contains the user code. Try to open a browser; <strong>do not fail</strong> if this machine cannot (remote servers, no local IP). Human approves on <a href="https://www.postal.bot/cli/approve">www.postal.bot/cli/approve</a> (already signed in → straight to approve). CLI polls. Then pick which <code>*.postal.bot</code> hostname this computer is. No loopback, no token in a localhost redirect.</p>
+    <pre>curl -fsSL https://www.postal.bot/install.sh | sh
+p5 login                 # prints https://www.postal.bot/cli/approve?code=…
+p5 login --no-browser    # same, never calls open(1)
+p5 login --label acme    # skip the picker (headless, many hosts)
+p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
+    <h3>Cut (2026-08-20)</h3>
+    <table>
+      <thead>
+        <tr><th>Piece</th><th>Who</th><th>State</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>POST /postal/cli/device</code></td>
+          <td>k2-dev-web</td>
+          <td><span class="pill go">live</span> Smoke 200. Returns <code>device_code</code>, <code>user_code</code>, <code>verification_uri_complete</code> with <code>?code=</code>, <code>expires_in</code> 900, <code>interval</code> 5.</td>
+        </tr>
+        <tr>
+          <td><code>GET /cli/approve?code=…</code></td>
+          <td>k2-dev-web</td>
+          <td><span class="pill go">live</span> Next Postal chrome (<code>x-matched-path: /p/cli/approve</code>). Signed out → <code>/login?next=/cli/approve?code=…</code> on postal.bot, not k2.dev. Deny → <code>access_denied</code>.</td>
+        </tr>
+        <tr>
+          <td><code>POST /postal/cli/device/token</code></td>
+          <td>k2-dev-web</td>
+          <td><span class="pill go">live</span> Pending 400 <code>authorization_pending</code> / <code>slow_down</code> / <code>expired_token</code> / <code>access_denied</code>. Approved <code>{ "token": "k2c_cli_…" }</code> (account-scoped; not shown on the page).</td>
+        </tr>
+        <tr>
+          <td><code>GET /postal/hosts</code></td>
+          <td>k2-dev-web</td>
+          <td><span class="pill go">live</span> Bearer <code>k2c_cli_*</code> → <code>{ hosts: [{ label, host, plan }] }</code> for every postal.bot hostname on the account.</td>
+        </tr>
+        <tr>
+          <td><code>p5 login</code> client</td>
+          <td>this repo</td>
+          <td><span class="pill go">git</span> <code>8b1cc13</code>. Prints complete URL, tries open, polls, picks hostname into <code>~/.postal/config.toml</code> (<code>connect_token</code> + <code>tunnel_label</code>). Tests against a mock plane. <span class="pill hold">not in the install tarball</span>.</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3>Left — this is the friendly-auth list</h3>
+    <p>The plane and the git CLI speak the same grant. A new user still cannot walk install → approve → tunnel up without a human who already knows the product. Remaining, in the order that hurts:</p>
+    <ol>
+      <li>
+        <strong>Ship a macOS (and Linux) tarball that includes device login + cert reuse.</strong>
+        <code>www.postal.bot/releases/latest/p5-macos-aarch64.tar.gz</code> is still the 00:09 pack. <code>curl | sh</code> installs a <code>p5</code> that only understands <code>--token</code>, always POSTs a new CSR, and has no hostname picker. Until that file changes, the friendly path does not exist for real users.
+      </li>
+      <li>
+        <strong>One observed walk:</strong> <code>p5 login</code> → open/print <code>/cli/approve?code=…</code> → human (already signed in) approves → poll returns <code>k2c_cli_*</code> → picker lists hosts → this computer is <code>label.postal.bot</code> → <code>p5 status</code> agent up, tunnel up. Not done. Plane start was smoke-tested; the approve click was not.
+      </li>
+      <li>
+        <strong><code>k2c_cli_*</code> must enroll the chosen label.</strong>
+        Cert broker and frp still historically want a Connect token that <em>owns</em> that subdomain. If the CLI token cannot <code>POST cert.postal.bot/cert</code> for the host they just picked, the user is back to pasting a second secret. Confirm with k2-dev-web; if it fails, that is a plane bug, not a CLI flag.
+      </li>
+      <li>
+        <strong>Login should finish the box, not only store a token.</strong>
+        Today we persist <code>connect_token</code> + <code>tunnel_label</code>. We do <strong>not</strong> write a homes row, persist <code>p5 me</code> <code>addr</code>/<code>typ</code>, or set <code>homes.harness</code> (<code>k2</code> vs <code>grok</code>). First-run had to hand-edit <code>config.toml</code> and <code>homes.json</code>. The picker should ask “this computer is <code>acme.postal.bot</code>” and “knock via k2 / grok / none (tray only)”, then <code>PUT /postal/me</code>.
+      </li>
+      <li>
+        <strong>macOS launchd must not take a working agent down.</strong>
+        <code>p5 logout</code> unlinks the plist and <code>unload -w</code> leaves the job <em>disabled</em>. Next <code>p5 login</code> <code>bootstrap</code>s a missing path (EIO 5), prints <code>wrote …plist</code>, exits 0. Use <code>load -w</code>, <code>launchctl enable</code>, do not delete the plist before a successful load, exit non-zero if the job is not up. Plist needs <code>StandardOutPath</code> / <code>StandardErrorPath</code> → <code>~/.postal/agent.log</code> (today only the detached-spawn fallback creates that file; launchd users have no log).
+      </li>
+      <li>
+        <strong>Reuse the cert on disk in the binary we ship.</strong>
+        Source already skips the broker when <code>~/.postal/tunnel/cert.pem</code> + <code>key.pem</code> exist (<code>P5_TUNNEL_REISSUE=1</code> to force). The installed prebuilt does not. Five restarts in a week = Let’s Encrypt identical-SAN lockout (~34h). Friendly auth is worthless if bringing the tunnel up burns the cert quota.
+      </li>
+      <li>
+        <strong>Pairing accept on the same Postal site.</strong>
+        Invite is <code>p5 pair add</code>. Accept is still <code>P5_OWNER_PAIR=1 p5 pair accept --sas</code> or a dashboard tab we told humans not to use on k2.dev. Owner approve should live next to <code>/cli/approve</code> (www, Postal chrome). Companion (mobile) is CP-3 for the same gate.
+      </li>
+      <li>
+        <strong>Honest status / signatures.</strong>
+        <code>p5 status</code> tracks “did we spawn frpc”, not “does <code>https://label.postal.bot/health</code> answer”. minisign key + <code>.minisig</code> are 404; the installer skips silently (looks like a pass). SHA256 is same-origin as the tarball.
+      </li>
+    </ol>
+    <div class="call">
+      Friendly auth is not “paste <code>k2c_</code> and export <code>P5_TUNNEL_LABEL</code>”. It is: install → <code>p5 login</code> → approve on any device → pick hostname → tunnel up, with a log line if it is not.
+    </div>
 
     <h2 id="built">What is built</h2>
     <p>On <code>main</code> of <a href="https://github.com/Alakazam-211/postal-bot">Alakazam-211/postal-bot</a>:</p>
@@ -230,8 +310,8 @@
         <tr><td>P5-1…6</td><td>Workspace, <code>handle::sub.postal.bot</code>, homes/roster JSON, sent/outbox/inbox, local SM, install.sh + npm stub</td></tr>
         <tr><td>P5-7a</td><td>Resident agent: loopback <code>127.0.0.1:8443</code>, UDS <code>~/.postal/agent.sock</code>, <code>p5 login</code> / status</td></tr>
         <tr><td>CRYPTO-1</td><td>HoldSeal-v1: Ed25519 SPKI, X25519 ECDH, HKDF-SHA256, ChaCha20-Poly1305. <code>/p5/msg</code> proof = Ed25519 over <code>p5-msg-v1</code></td></tr>
-        <tr><td>P5-8</td><td><code>p5 pair</code> / <code>p5 me</code> / <code>p5 login --token</code>. Accept/reject/revoke exit 3 unless <code>P5_OWNER_PAIR=1</code> (dashboard is the human gate)</td></tr>
-        <tr><td>P5-7c</td><td>Tunnel child of the agent. Broker <code>https://cert.postal.bot/cert</code>. SAN <code>{label}.postal.bot</code> only. Armed with <code>P5_TUNNEL=1</code></td></tr>
+        <tr><td>P5-8</td><td><code>p5 pair</code> / <code>p5 me</code> / <code>p5 login</code> (RFC 8628 device code in git; <code>--token</code> still for CI). Accept/reject/revoke exit 3 unless <code>P5_OWNER_PAIR=1</code></td></tr>
+        <tr><td>P5-7c</td><td>Tunnel child of the agent. Broker <code>https://cert.postal.bot/cert</code>. SAN <code>{label}.postal.bot</code> only. Git reuses <code>tunnel/cert.pem</code> unless <code>P5_TUNNEL_REISSUE=1</code>. Shipped tarball still re-issues every start.</td></tr>
         <tr><td>P5-7</td><td>Live POST <code>https://&lt;label&gt;.postal.bot/p5/msg</code> with pairing-key proof</td></tr>
         <tr><td>P5-9</td><td>Hold client + 30s poll. Feature-gated <code>P5_HOLD=1</code>. Tests against a mock plane</td></tr>
         <tr><td>P5-10</td><td>Turn receiver: <code>GET :1340/health</code> then local sendPrompt, 12 turns/hour/peer. No PTY</td></tr>
@@ -253,10 +333,12 @@
     <ul>
       <li><strong>K2 Web</strong> (workspace chat): DNS, CP-1/2/2b, cert.postal.bot, pairing tables. That is k2-msg, not <code>p5 msg</code>.</li>
       <li><strong>Grokbot</strong> (local clone + research): session vs turn, wake SM, HoldSeal-v1 named. Also a remote K2 federation address <code>grokbot::grokbot.k2.dev</code> — that is K2, not Postal. Remote instruct was off when we knocked earlier.</li>
-      <li>No <code>p5</code> binary has enrolled a hostname, completed a dashboard accept, or delivered a live HTTPS body to a peer agent.</li>
+      <li>This CLI: live HTTPS on <code>rosson.postal.bot</code>; knock-is-body last mile to Grok Bot; pair invite to <code>appa::baden.postal.bot</code> pending (SAS 719206).</li>
+      <li>appa first-run (2026-08-20): <code>curl | sh</code> died on macOS <code>/bin/sh</code> (fixed <code>6214c24</code>); after a local patch, identity <code>appa::baden.postal.bot</code>, public <code>/health</code> 200. Tunnel via his own <code>frpc</code> LaunchAgent — not p5’s child. He did not set <code>homes.harness</code>.</li>
+      <li>Device grant smoke (2026-08-20): <code>POST https://k2.dev/postal/cli/device</code> 200 with <code>verification_uri_complete</code>; <code>GET www.postal.bot/cli/approve</code> 307 to Postal <code>/login?next=…</code>. Human approve click + <code>p5 login</code> poll not observed.</li>
     </ul>
     <div class="call">
-      JT-1 (two CLIs, one down, hold dump) has not been run. That is the first real Postal observation, and it is the Grok Bot lab below.
+      JT-1 (two CLIs, one down, hold dump) has not been run. First-run auth walk (<code>p5 login</code> → approve → tunnel up on a fresh Mac) has not been run either.
     </div>
 
     <h2 id="install">Install pipes</h2>
@@ -264,7 +346,7 @@
     <pre>curl -fsSL https://www.postal.bot/install.sh | sh</pre>
     <table>
       <thead>
-        <tr><th>Piece</th><th>Reality 2026-08-19</th></tr>
+        <tr><th>Piece</th><th>Reality 2026-08-20</th></tr>
       </thead>
       <tbody>
         <tr>
@@ -273,7 +355,7 @@
         </tr>
         <tr>
           <td><code>https://www.postal.bot/install.sh</code></td>
-          <td><span class="pill go">served</span> Vercel static. Source + native tarballs under <code>/releases/latest</code>. Apex <code>postal.bot</code> may still time out — use www.</td>
+          <td><span class="pill go">served</span> Vercel static, POSIX <code>/bin/sh</code> (the <code>case )</code> inside <code>$(…)</code> parse bug is gone). Native tarball under <code>/releases/latest</code> is still the 00:09 pack — no device login, no cert reuse. Apex <code>postal.bot</code> may time out — use www.</td>
         </tr>
         <tr>
           <td>GitHub Releases tarball</td>
@@ -281,7 +363,7 @@
         </tr>
         <tr>
           <td>minisign ceremony</td>
-          <td><span class="pill stop">not done</span> Script refuses to invent a key. Someone (Rosson) publishes <code>postal.bot/keys/minisign.pub</code> + signed tarballs.</td>
+          <td><span class="pill stop">404, silent skip</span> <code>/keys/minisign.pub</code> and <code>.minisig</code> 404. Installer skips with no error — looks like a pass. SHA256SUMS is same-origin as the tarball (integrity, not authenticity).</td>
         </tr>
         <tr>
           <td>npm <code>@alakazamlabs/postal</code></td>
@@ -296,9 +378,9 @@
     <ol>
       <li>Same Connect account that already owns label <code>grokbot</code> (so <code>grokbot.k2.dev</code> keeps working).</li>
       <li>On that box: checkout + <code>P5_LOCAL=1 ./install/install.sh</code> (or a release, if we have one by then).</li>
-      <li><code>p5 login --token k2c_…</code> (the grokbot tunnel token).</li>
-      <li><code>p5 config set type turn</code> (or <code>p5 me --typ turn</code>) — they are a turn peer.</li>
-      <li><code>P5_TUNNEL=1 P5_TUNNEL_LABEL=grokbot p5 agent run</code> (or <code>p5 login</code> unit). Agent binds loopback 8443; frpc advertises <code>grokbot.postal.bot</code>.</li>
+      <li><code>p5 login --label grokbot</code> (device code; or <code>--token</code> from <code>~/.k2/tunnel.json</code> until the new tarball is on PATH).</li>
+      <li><code>p5 me --from grok::grokbot.postal.bot --typ turn</code> — they are a turn peer. <code>p5 me</code> does not persist <code>addr</code> yet; put it in <code>config.toml</code> or pass <code>--from</code> every time.</li>
+      <li>Agent binds loopback 8443; frpc advertises <code>grokbot.postal.bot</code>. Need <code>tunnel_label=grokbot</code> (login picker) or <code>P5_TUNNEL_LABEL</code>. Git reuses <code>cert.pem</code>; the 00:09 tarball does not.</li>
       <li>CSR to <code>https://cert.postal.bot/cert</code>. After enroll, <code>https://grokbot.postal.bot/health</code> should 200 from the agent.</li>
       <li>They <code>PUT /postal/me</code> via <code>p5 me --from grok::grokbot.postal.bot --typ turn</code>.</li>
       <li>We <code>p5 pair add grok::grokbot.postal.bot</code>. You accept on <code>/dashboard?tab=postal</code> (SAS). Agents do not expand trust by default.</li>
@@ -315,14 +397,13 @@ Goal
 - Publish yourself as a turn peer
 - Request a pair with postal-bot::rosson.postal.bot
 
-Install (curl pipe is not live yet; no GitHub Release)
-1. Need git, rustup/cargo, and frpc (the frp client) on PATH.
-2. Clone the private repo (ask a human if clone is denied):
-   git clone git@github.com:Alakazam-211/postal-bot.git
-   cd postal-bot
-   P5_LOCAL=1 ./install/install.sh
+Install (www pipe; no GitHub)
+1. curl -fsSL https://www.postal.bot/install.sh | sh
    hash -r; p5 whoami
    # expect: Postal (postal.bot) / command: p5
+   # If install.sh dies at line 212, the box has a stale cached script — retry.
+   # The current tarball may still be the 00:09 pack (no device login / cert reuse).
+   # Prefer P5_LOCAL=1 ./install/install.sh --from-cargo from a checkout until we republish.
 
 Token
 - Read ~/.k2/tunnel.json on THIS box. Use subdomain grokbot and its token.
@@ -368,12 +449,12 @@ Hold is off (no P5_HOLD=1) until told otherwise.</pre>
 
     <h2 id="blockers">Still open</h2>
     <ul>
+      <li><strong>Friendly auth</strong> — list under <a href="#auth">Auth</a>. Short: ship a tarball with device login + cert reuse; walk it once; <code>k2c_cli_*</code> must enroll; login writes homes/handle/harness; launchd logs + <code>load -w</code> + non-zero on fail; pairing accept on www; honest <code>p5 status</code>; minisign that is not a silent skip.</li>
       <li>CP-4 <code>/postal/hold</code> + R2 — K2 Web, not cut.</li>
-      <li>Production Vercel deploy of the Postal dashboard tab.</li>
-      <li>Signed <code>p5</code> release + <code>postal.bot/install.sh</code> + npm publish.</li>
-      <li>Device-code <code>p5 login</code> (today: paste <code>k2c_</code> token).</li>
-      <li>JT-1 observe fixtures once the Grok Bot box is enrolled.</li>
-      <li>This page: <a href="https://www.postal.bot/progress">www.postal.bot/progress</a> (git <code>web/progress.html</code>). Apex <code>https://postal.bot</code> is aliased on Vercel; public A is <code>10.10.0.1</code> — use <code>www</code>.</li>
+      <li>Postal pairing inbox on <code>www.postal.bot</code> (not k2.dev). Companion is the mobile gate. Stay p5.</li>
+      <li>npm <code>@alakazamlabs/postal</code> unpublished.</li>
+      <li>JT-1 observe fixtures once a second product box is enrolled without a hand-written <code>frpc</code> unit.</li>
+      <li>This page: <a href="https://www.postal.bot/progress">www.postal.bot/progress</a> (git <code>web/progress.html</code>). Use <code>www</code> — apex may time out.</li>
     </ul>
 
     <footer>
