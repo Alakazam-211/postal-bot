@@ -207,11 +207,8 @@ find_src_root() {
             return 0
         fi
     done
-    _hit=$(find "$_dir" -maxdepth 6 -name Cargo.toml 2>/dev/null | while read -r _p; do
-        case "$_p" in
-            */crates/p5/Cargo.toml) printf '%s\n' "$_p"; break ;;
-        esac
-    done)
+    # Do not put a case-arm `)` inside `$(...)` — /bin/sh ends the substitution there.
+    _hit=$(find "$_dir" -maxdepth 6 -path '*/crates/p5/Cargo.toml' -print 2>/dev/null | head -n 1)
     if [ -n "$_hit" ]; then
         CDPATH= cd -- "$(dirname "$_hit")/../.." && pwd
         return 0

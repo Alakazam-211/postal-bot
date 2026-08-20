@@ -81,6 +81,11 @@ fetch_frpc linux aarch64 linux arm64
 
 cp "${ROOT}/install/install.sh" "${ROOT}/web/install.sh"
 chmod 644 "${ROOT}/web/install.sh"
+# macOS /bin/sh parses the whole file; catch case-arm `)` inside `$(...)`.
+/bin/sh -n "${ROOT}/web/install.sh" || {
+    echo "pack-release: web/install.sh failed sh -n" >&2
+    exit 1
+}
 cp "${ROOT}/scripts/grokbot-setup.sh" "${ROOT}/web/grokbot-setup.sh"
 chmod 644 "${ROOT}/web/grokbot-setup.sh"
 
