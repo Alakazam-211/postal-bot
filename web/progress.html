@@ -216,7 +216,7 @@
         </tr>
         <tr>
           <td>Last mile</td>
-          <td><span class="pill go">plugin</span> After inbox fsync, <code>homes.harness</code>: built-in <code>k2</code> / <code>grok</code>, else exec plugin. No harness + no launch → <code>no_agent</code>. Users do not discover this on their own.</td>
+          <td><span class="pill go">plugin</span> <code>p5 handle claim</code>. Built-in <code>k2</code> / <code>grok</code>. Field: <code>iterm2</code> / <code>terminal</code> / <code>ghostty</code>. Written: <code>zed</code> / <code>vscode</code>. Queued: OpenClaw, Hermes, Paperclip, Superset, Orca, Herdr. See <a href="#plugins">plugins</a>.</td>
         </tr>
       </tbody>
     </table>
@@ -316,6 +316,25 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
       </tbody>
     </table>
     <p>Brand on the wire is Postal / <code>postal.bot</code>. Command is <code>p5</code>. Never K2 Bot / Kessel Bot.</p>
+
+    <h2 id="plugins">Last-mile plugins (0.1.4)</h2>
+    <p><code>p5 handle claim --plugin &lt;name&gt;</code>. Live = inject + wake after quit. Queued = no stub. Custom: <code>~/.postal/harness/&lt;name&gt;</code>.</p>
+    <table>
+      <thead>
+        <tr><th>Plugin</th><th>Host</th><th>State</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>k2</code></td><td>K2 cells</td><td><span class="pill go">live</span></td></tr>
+        <tr><td><code>grok</code></td><td>Grok Bot / Sand</td><td><span class="pill go">live</span> turn</td></tr>
+        <tr><td><code>iterm2</code></td><td>iTerm2 + Claude Code</td><td><span class="pill go">live</span> inject + wake, ACK <code>claude::</code></td></tr>
+        <tr><td><code>terminal</code></td><td>Terminal.app</td><td><span class="pill go">live</span> inject + wake, ACK <code>terminal::</code></td></tr>
+        <tr><td><code>ghostty</code></td><td>Ghostty 1.3+</td><td><span class="pill go">live</span> inject + wake, ACK <code>ghostty::</code></td></tr>
+        <tr><td><code>zed</code> / <code>vscode</code></td><td>editor terminals</td><td><span class="pill hold">plugin</span> not field-proven (keystroke TCC)</td></tr>
+        <tr><td><code>openclaw</code> / <code>hermes</code></td><td>host-scheduled</td><td><span class="pill stop">queued</span></td></tr>
+        <tr><td><code>paperclip</code> / <code>superset</code> / <code>orca</code> / <code>herdr</code></td><td>lab hosts / multiplexer</td><td><span class="pill stop">queued</span> finish Superset + Orca on z3mbpZ</td></tr>
+        <tr><td>custom</td><td>OSS exec</td><td><span class="pill go">always open</span></td></tr>
+      </tbody>
+    </table>
 
     <h2 id="tested">What has been tested</h2>
     <h3>Proven (this repo)</h3>
