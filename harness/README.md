@@ -21,6 +21,7 @@ This is the OSS contribution surface. PRs: see [`CONTRIBUTING.md`](../CONTRIBUTI
 | `ghostty` (exec) | Ghostty 1.3+ AppleScript. Live: `input text` + `send key enter` (no `focus`). Dormant: `new window with configuration`, `open -g`, restore frontmost. `harness/ghostty`. |
 | `zed` (exec) | Zed integrated terminal. No native inject API; System Events keystroke then restore frontmost (brief flash). `harness/zed`. |
 | `vscode` (exec) | VS Code integrated terminal (not Cursor). Same System Events pattern as Zed. `harness/vscode`. |
+| `superset` (exec) | [Superset](https://superset.sh) host. Live: `superset terminals send`. Dormant: `open -g -a Superset` + `agents create --resume-session`. Needs CLI with those verbs (not the 0.2.19 app bundle) and `superset auth login` / `SUPERSET_API_KEY`. `harness/superset`. |
 
 Type `turn` with no other matching plugin defaults to `grok`.
 
@@ -40,7 +41,7 @@ Copy `harness/webhook` to `~/.postal/harness/webhook` and set
 `homes.harness` to `webhook` plus `P5_WEBHOOK_URL`.
 
 New terminals/IDEs/host bots (iTerm2, Terminal.app, Ghostty, Zed,
-VS Code, OpenClaw, Hermes, Paperclip, Herdr, …) are **exec plugins** with
+VS Code, Superset, OpenClaw, Hermes, Paperclip, Herdr, …) are **exec plugins** with
 `claim` / `knock` / `resume`. Resume must revive after the app is
 quit. See the workspace wiki note **Wake Plugins**.
 

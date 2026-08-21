@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Postal progress — postal.bot</title>
   <meta name="description" content="Living progress for Postal (p5) by Alakazam Labs. What is built, what is tested, what is next." />
+  <link rel="icon" href="/favicon.ico?v=3" sizes="any" />
+  <link rel="icon" type="image/png" href="/favicon.png?v=3" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3" />
   <style>
     :root {
       color-scheme: dark;
@@ -39,13 +42,42 @@
       padding: 1.25rem 1.5rem 1.1rem;
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
+      align-items: center;
       gap: 1rem;
       flex-wrap: wrap;
       background: #0e0d0b;
       position: sticky;
       top: 0;
       z-index: 2;
+    }
+    header.mast .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    header.mast .brand a {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: inherit;
+      text-decoration: none;
+    }
+    header.mast .brand img {
+      width: 2rem;
+      height: 2rem;
+      object-fit: cover;
+    }
+    header.mast .brand img.alak { border-radius: 0.28rem; }
+    header.mast .brand img.product {
+      border-radius: 28%;
+      background: #f3eee4;
+    }
+    header.mast .slash {
+      color: var(--muted);
+      font-weight: 300;
+      font-size: 1.15rem;
+      line-height: 1;
+      user-select: none;
     }
     header.mast strong { letter-spacing: 0.08em; font-size: 0.78rem; text-transform: uppercase; }
     header.mast span { color: var(--muted); font-size: 0.9rem; }
@@ -147,8 +179,21 @@
 </head>
 <body>
   <header class="mast">
-    <strong><a href="/">Postal</a> · postal.bot</strong>
-    <span>Updated 2026-08-20 · Alakazam Labs</span>
+    <div class="brand">
+      <a href="https://alakazamlabs.com" target="_blank" rel="noopener noreferrer">
+        <img class="alak" src="/alakzm-logo.jpg" width="32" height="32" alt="Alakazam Labs" />
+      </a>
+      <span class="slash" aria-hidden="true">/</span>
+      <a href="/">
+        <img class="product" src="/logo.png?v=3" width="32" height="32" alt="" />
+        <strong>Postal Bot</strong>
+      </a>
+    </div>
+    <nav style="display:flex;gap:1.1rem;font-size:0.95rem">
+      <a href="/docs">Docs</a>
+      <a href="/account">Account</a>
+      <span>Updated 2026-08-21</span>
+    </nav>
   </header>
   <div class="wrap">
     <div class="postmark">Postal<br />20 Aug 26<br />k2e-01</div>
@@ -216,7 +261,7 @@
         </tr>
         <tr>
           <td>Last mile</td>
-          <td><span class="pill go">plugin</span> <code>p5 handle claim</code>. Built-in <code>k2</code> / <code>grok</code>. Field: <code>iterm2</code> / <code>terminal</code> / <code>ghostty</code>. Written: <code>zed</code> / <code>vscode</code>. Queued: OpenClaw, Hermes, Paperclip, Superset, Orca, Herdr. See <a href="#plugins">plugins</a>.</td>
+          <td><span class="pill go">plugin</span> <code>p5 handle claim</code>. Built-in <code>k2</code> / <code>grok</code>. Field: <code>iterm2</code> / <code>terminal</code> / <code>ghostty</code> (z3 wake ACK too). Written: <code>zed</code> / <code>vscode</code> / <code>superset</code>. Queued: OpenClaw, Hermes, Paperclip, Orca, Herdr. See <a href="#plugins">plugins</a>.</td>
         </tr>
       </tbody>
     </table>
@@ -331,7 +376,8 @@ p5 login --token k2c_…   # CI / grokbot; skip the website</pre>
         <tr><td><code>ghostty</code></td><td>Ghostty 1.3+</td><td><span class="pill go">live</span> inject + wake, ACK <code>ghostty::</code></td></tr>
         <tr><td><code>zed</code> / <code>vscode</code></td><td>editor terminals</td><td><span class="pill hold">plugin</span> not field-proven (keystroke TCC)</td></tr>
         <tr><td><code>openclaw</code> / <code>hermes</code></td><td>host-scheduled</td><td><span class="pill stop">queued</span></td></tr>
-        <tr><td><code>paperclip</code> / <code>superset</code> / <code>orca</code> / <code>herdr</code></td><td>lab hosts / multiplexer</td><td><span class="pill stop">queued</span> finish Superset + Orca on z3mbpZ</td></tr>
+        <tr><td><code>superset</code></td><td>Superset host</td><td><span class="pill hold">plugin</span> written; z3mbpZ CLI 0.2.19 + not logged in</td></tr>
+        <tr><td><code>paperclip</code> / <code>orca</code> / <code>herdr</code></td><td>lab hosts / multiplexer</td><td><span class="pill stop">queued</span> Orca not installed on z3mbpZ</td></tr>
         <tr><td>custom</td><td>OSS exec</td><td><span class="pill go">always open</span></td></tr>
       </tbody>
     </table>

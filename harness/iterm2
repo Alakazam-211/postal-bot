@@ -154,9 +154,11 @@ on run argv
             if sid is want then
               tell s
                 write text framed newline no
-                delay 0.15
+                delay 0.5
                 write text cr newline no
-                delay 0.25
+                delay 0.45
+                write text cr newline no
+                delay 0.45
                 write text cr newline no
               end tell
               return "submitted"
@@ -327,8 +329,9 @@ def cmd_resume(d: dict) -> None:
     if not iterm:
         print(json.dumps({"ok": False, "reason": "resume: claude PTY did not appear"}))
         sys.exit(1)
-    # Claude injection profile settle (~1.5s) plus a beat for ?2004h.
-    time.sleep(1.6)
+    # Claude TUI after --resume: two CRs typed the body but did not
+    # submit (z3 wake 2026-08-20). Extra settle + a third CR in inject.
+    time.sleep(2.5)
     print(
         json.dumps(
             {

@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""Postal last-mile for a CLI agent hosted in Superset (superset.sh).
+
+claim  — pack workspace + terminal + Claude --resume id.
+knock  — `superset terminals send --text` (Enter by default).
+resume — `open -g -a Superset`, then `agents create --resume-session`.
+
+Needs a current CLI (`terminals send`, `--resume-session`) and
+`superset auth login` or `$SUPERSET_API_KEY`. The June 2026 app-bundle
+binary (0.2.19) is too old — fail closed, do not stub inject.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+LOG = os.path.expanduser("~/.postal/superset-knock.log")
+APP_BIN = "/Applications/Superset.app/Contents/Resources/resources/bin/superset"
+
+
+def log(msg: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(msg.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def read_stdin() -> dict:
+    raw = sys.stdin.read()
+    return json.loads(raw) if raw.strip() else {}
+
+
+def fail(reason: str, extra: dict | None = None) -> None:
+    d = {"ok": False, "reason": reason}
+    if extra:
+        d.update(extra)
+    print(json.dumps(d))
+    sys.exit(1)
+
+
+def find_bin() -> str | None:
+    env = (os.environ.get("SUPERSET") or os.environ.get("SUPERSET_BIN") or "").strip()
+    for cand in (env, shutil.which("superset") or "", APP_BIN):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def run_ss(bin_path: str, args: list[str], timeout: int = 20) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [bin_path, *args],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+
+
+def help_text(bin_path: str, args: list[str]) -> str:
+    try:
+        r = run_ss(bin_path, [*args, "--help"], timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return ((r.stdout or "") + "\n" + (r.stderr or "")).lower()
+
+
+def capabilities(bin_path: str) -> dict:
+    term = help_text(bin_path, ["terminals"])
+    create = help_text(bin_path, ["agents", "create"])
+    return {
+        "send": "send" in term and "unknown command" not in term,
+        "term_list": "list" in term,
+        "resume": "--resume-session" in create,
+    }
+
+
+def cli_json(bin_path: str, args: list[str]) -> tuple[object | None, str]:
+    try:
+        r = run_ss(bin_path, ["--json", *args], timeout=25)
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    out = (r.stdout or "").strip()
+    err = (r.stderr or "").strip()
+    blob = out or err
+    if "not logged in" in (out + err).lower():
+        return None, "not_logged_in"
+    if r.returncode != 0 and not out:
+        return None, err[:240] or f"exit {r.returncode}"
+    if not out:
+        return None, err[:240] or "empty"
+    try:
+        return json.loads(out), ""
+    except json.JSONDecodeError:
+        return None, "bad json: %s" % out[:160]
+
+
+def as_items(payload: object) -> list:
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for k in ("workspaces", "terminals", "agents", "items", "data", "result"):
+            v = payload.get(k)
+            if isinstance(v, list):
+                return v
+        if any(k in payload for k in ("id", "workspaceId", "cwd", "path")):
+            return [payload]
+    return []
+
+
+def packed(ws: str, term: str, claude: str) -> str:
+    return "|".join(p for p in (ws, term, claude) if p)
+
+
+def unpack(session_id: str) -> tuple[str, str, str]:
+    ws = term = claude = ""
+    for p in (session_id or "").split("|"):
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("ws_"):
+            ws = p
+        elif p.startswith("term_"):
+            term = p
+        elif len(p) == 36 and p.count("-") == 4:
+            claude = p
+        elif not ws:
+            ws = p
+    return ws, term, claude
+
+
+def encode_project_dir(cwd: str) -> str:
+    return os.path.expanduser("~/.claude/projects/") + cwd.replace("/", "-")
+
+
+def claude_session_from_disk(cwd: str) -> str | None:
+    cwd = os.path.abspath(cwd)
+    hist = os.path.expanduser("~/.claude/history.jsonl")
+    latest, latest_ts = None, -1
+    if os.path.isfile(hist):
+        try:
+            with open(hist, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if d.get("project") != cwd:
+                        continue
+                    sid = (d.get("sessionId") or "").strip()
+                    ts = d.get("timestamp") or 0
+                    if sid and ts >= latest_ts:
+                        latest, latest_ts = sid, ts
+        except OSError:
+            pass
+    if latest:
+        return latest
+    proj = encode_project_dir(cwd)
+    if not os.path.isdir(proj):
+        return None
+    files = []
+    try:
+        for name in os.listdir(proj):
+            if name.endswith(".jsonl") and len(name) > 10:
+                path = os.path.join(proj, name)
+                files.append((os.path.getmtime(path), name[: -len(".jsonl")]))
+    except OSError:
+        return None
+    if not files:
+        return None
+    files.sort()
+    return files[-1][1]
+
+
+def path_of(item: dict) -> str:
+    for k in ("cwd", "path", "worktree", "directory", "localPath", "repoPath", "workingDirectory"):
+        v = item.get(k)
+        if isinstance(v, str) and v.strip():
+            return os.path.abspath(os.path.expanduser(v.strip()))
+    return ""
+
+
+def id_of(item: dict, *keys: str) -> str:
+    for k in keys:
+        v = item.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def match_cwd(items: list, cwd: str) -> dict | None:
+    cwd = os.path.abspath(cwd)
+    exact, prefix = None, None
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        p = path_of(it)
+        if not p:
+            continue
+        if p == cwd:
+            exact = it
+            break
+        if cwd.startswith(p + os.sep) or p.startswith(cwd + os.sep):
+            prefix = prefix or it
+    return exact or prefix
+
+
+def frontmost_name() -> str:
+    r = subprocess.run(
+        [
+            "osascript",
+            "-e",
+            'tell application "System Events" to get name of first application process whose frontmost is true',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return (r.stdout or "").strip()
+
+
+def restore_frontmost(name: str) -> None:
+    if not name:
+        return
+    subprocess.run(
+        [
+            "osascript",
+            "-e",
+            'tell application "System Events" to set frontmost of process "%s" to true'
+            % name.replace('"', ""),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def require_bin() -> str:
+    bin_path = find_bin()
+    if not bin_path:
+        fail("no_superset_cli: install Superset.app or put `superset` on PATH")
+    return bin_path
+
+
+def require_current_cli(bin_path: str) -> dict:
+    caps = capabilities(bin_path)
+    if not caps["send"]:
+        fail(
+            "cli_too_old: need `superset terminals send` (0.2.19 app bundle lacks it; run `superset update`)",
+            {"caps": caps},
+        )
+    if not caps["resume"]:
+        fail(
+            "cli_too_old: need `superset agents create --resume-session` (run `superset update`)",
+            {"caps": caps},
+        )
+    return caps
+
+
+def load_workspace(bin_path: str, cwd: str, ws_hint: str) -> dict | None:
+    payload, err = cli_json(bin_path, ["workspaces", "list"])
+    if err == "not_logged_in":
+        fail("not_logged_in: run `superset auth login` or set SUPERSET_API_KEY")
+    items = as_items(payload)
+    if ws_hint:
+        for it in items:
+            if isinstance(it, dict) and id_of(it, "id", "workspaceId") == ws_hint:
+                return it
+    return match_cwd(items, cwd)
+
+
+def load_terminal(bin_path: str, ws: str, cwd: str, term_hint: str) -> dict | None:
+    payload, err = cli_json(bin_path, ["terminals", "list", "--workspace", ws])
+    if err == "not_logged_in":
+        fail("not_logged_in: run `superset auth login` or set SUPERSET_API_KEY")
+    if err and err not in ("empty",):
+        log("terminals list err=%s" % err)
+    items = as_items(payload)
+    if term_hint:
+        for it in items:
+            if isinstance(it, dict) and id_of(it, "id", "terminalId") == term_hint:
+                return it
+    hit = match_cwd(items, cwd)
+    if hit:
+        return hit
+    for it in items:
+        if isinstance(it, dict):
+            return it
+    return None
+
+
+def cmd_claim(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    bin_path = require_bin()
+    caps = require_current_cli(bin_path)
+    want = (d.get("session_id") or "").strip()
+    ws_h, term_h, claude_h = unpack(want)
+    if want and len(want) == 36 and want.count("-") == 4:
+        claude_h = want
+    claude = claude_h or claude_session_from_disk(cwd) or ""
+    ws_row = load_workspace(bin_path, cwd, ws_h)
+    if not ws_row:
+        fail("claim_failed: no Superset workspace matching this cwd (create one in the app, then retry)")
+    ws = id_of(ws_row, "id", "workspaceId")
+    term_row = load_terminal(bin_path, ws, cwd, term_h) if caps.get("term_list") else None
+    term = id_of(term_row or {}, "id", "terminalId")
+    if not claude:
+        fail("claim_failed: no Claude sessionId in ~/.claude for this cwd")
+    sid = packed(ws, term, claude)
+    print(
+        json.dumps(
+            {
+                "v": 1,
+                "ok": True,
+                "terminal": "superset",
+                "session_id": sid,
+                "cwd": cwd,
+                "live": bool(term),
+                "typ": "session",
+                "launch": [
+                    bin_path,
+                    "agents",
+                    "create",
+                    "--workspace",
+                    ws,
+                    "--agent",
+                    "claude",
+                    "--resume-session",
+                    claude,
+                ],
+                "workspace": ws,
+                "superset_terminal": term or None,
+            }
+        )
+    )
+
+
+def cmd_knock(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    bin_path = require_bin()
+    require_current_cli(bin_path)
+    ws, term, _claude = unpack((d.get("session_id") or "").strip())
+    frm = (d.get("from") or "").strip()
+    body = (d.get("body") or d.get("title") or "").strip()
+    clean = "".join(c for c in body if c != "\x1b")
+    line = " ".join(clean.split())
+    payload = ("[from %s] %s" % (frm, line)) if frm else line
+    if not ws:
+        row = load_workspace(bin_path, cwd, "")
+        ws = id_of(row or {}, "id", "workspaceId")
+    if not ws:
+        fail("not_live", {"resume": True, "cwd": cwd})
+    if not term:
+        trow = load_terminal(bin_path, ws, cwd, "")
+        term = id_of(trow or {}, "id", "terminalId")
+    if not term:
+        fail("not_live", {"resume": True, "cwd": cwd, "workspace": ws})
+    r = run_ss(
+        bin_path,
+        ["terminals", "send", "--workspace", ws, "--terminal", term, "--text", payload],
+        timeout=20,
+    )
+    log(
+        "send rc=%s out=%s err=%s"
+        % (r.returncode, (r.stdout or "").strip()[:200], (r.stderr or "").strip()[:200])
+    )
+    if r.returncode != 0:
+        err = ((r.stderr or r.stdout or "").strip())[:200]
+        if "not logged in" in err.lower():
+            fail("not_logged_in: run `superset auth login` or set SUPERSET_API_KEY")
+        fail("not_live", {"resume": True, "cwd": cwd, "detail": err})
+    print(json.dumps({"ok": True, "injected": True, "workspace": ws, "terminal": term}))
+
+
+def cmd_resume(d: dict) -> None:
+    cwd = os.path.abspath((d.get("cwd") or os.getcwd()).strip() or os.getcwd())
+    bin_path = require_bin()
+    require_current_cli(bin_path)
+    ws, term, claude = unpack((d.get("session_id") or "").strip())
+    if not claude:
+        claude = claude_session_from_disk(cwd) or ""
+    if not claude:
+        fail("resume: no Claude session id")
+    if not ws:
+        row = load_workspace(bin_path, cwd, "")
+        ws = id_of(row or {}, "id", "workspaceId")
+    if not ws:
+        fail("resume: no Superset workspace for this cwd")
+    # Already live?
+    trow = load_terminal(bin_path, ws, cwd, term)
+    if trow:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "already": True,
+                    "session_id": packed(ws, id_of(trow, "id", "terminalId"), claude),
+                    "workspace": ws,
+                }
+            )
+        )
+        return
+    prev = frontmost_name()
+    subprocess.run(["open", "-g", "-a", "Superset"], capture_output=True)
+    time.sleep(1.2)
+    # Host may be down until the app/CLI daemon is up.
+    run_ss(bin_path, ["start", "--daemon"], timeout=20)
+    r = run_ss(
+        bin_path,
+        [
+            "--json",
+            "agents",
+            "create",
+            "--workspace",
+            ws,
+            "--agent",
+            "claude",
+            "--resume-session",
+            claude,
+        ],
+        timeout=40,
+    )
+    restore_frontmost(prev)
+    log(
+        "resume rc=%s out=%s err=%s cwd=%s sid=%s"
+        % (r.returncode, (r.stdout or "").strip()[:300], (r.stderr or "").strip()[:300], cwd, claude)
+    )
+    if r.returncode != 0:
+        err = ((r.stderr or r.stdout or "").strip())[:200]
+        if "not logged in" in err.lower():
+            fail("not_logged_in: run `superset auth login` or set SUPERSET_API_KEY")
+        fail("resume: agents create %s %s" % (r.returncode, err))
+    new_term = term
+    try:
+        created = json.loads((r.stdout or "").strip() or "{}")
+        if isinstance(created, dict):
+            new_term = (
+                id_of(created, "terminalId", "id", "sessionId") or new_term
+            )
+    except json.JSONDecodeError:
+        pass
+    restore_frontmost(prev)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "spawned": True,
+                "session_id": packed(ws, new_term, claude),
+                "workspace": ws,
+            }
+        )
+    )
+
+
+def main() -> None:
+    op = sys.argv[1] if len(sys.argv) > 1 else ""
+    try:
+        d = read_stdin()
+    except json.JSONDecodeError as e:
+        fail("bad json: %s" % e)
+    if op == "claim":
+        cmd_claim(d)
+    elif op == "knock":
+        cmd_knock(d)
+    elif op == "resume":
+        cmd_resume(d)
+    else:
+        fail("usage: superset claim|knock|resume")
+
+
+if __name__ == "__main__":
+    main()

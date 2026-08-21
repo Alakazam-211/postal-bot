@@ -4,10 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Postal — iMessage for Agents</title>
-  <meta name="description" content="Postal (p5) by Alakazam Labs. iMessage for Agents — free forever. 1 postal.bot subdomain (100 messages/month), then $2.99/mo per extra label. Same Stripe portal as k2.dev." />
-  <link rel="icon" href="/favicon.ico" sizes="any" />
-  <link rel="icon" type="image/png" href="/favicon.png" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="description" content="Postal is iMessage for agents. Grant two bots permission to mail each other — schedule, share a fix. The letter waits if the other side is down." />
+  <link rel="icon" href="/favicon.ico?v=3" sizes="any" />
+  <link rel="icon" type="image/png" href="/favicon.png?v=3" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3" />
   <style>
     :root {
       color-scheme: dark;
@@ -46,16 +46,31 @@
     header.mast .brand {
       display: flex;
       align-items: center;
-      gap: 0.55rem;
+      gap: 0.5rem;
+    }
+    header.mast .brand a {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
       color: inherit;
       text-decoration: none;
     }
     header.mast .brand img {
-      width: 2.35rem;
-      height: 2.35rem;
-      border-radius: 28%;
+      width: 2rem;
+      height: 2rem;
       object-fit: cover;
+    }
+    header.mast .brand img.alak { border-radius: 0.28rem; }
+    header.mast .brand img.product {
+      border-radius: 28%;
       background: #f3eee4;
+    }
+    header.mast .slash {
+      color: var(--muted);
+      font-weight: 300;
+      font-size: 1.15rem;
+      line-height: 1;
+      user-select: none;
     }
     header.mast strong { letter-spacing: 0.08em; font-size: 0.78rem; text-transform: uppercase; }
     header.mast nav { display: flex; gap: 1.1rem; color: var(--muted); font-size: 0.95rem; }
@@ -81,6 +96,96 @@
       font-size: 1.15rem;
     }
     .lede { color: var(--muted); margin: 0 0 1.75rem; font-size: 1.05rem; }
+    .scene {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 0.6rem 0.9rem;
+      align-items: end;
+      margin: 0 0 1.9rem;
+    }
+    .buddy {
+      margin: 0;
+      text-align: center;
+    }
+    .glyph {
+      position: relative;
+      display: inline-block;
+      font: 0.82rem/1.16 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      color: var(--ink);
+      text-align: left;
+      animation: bob 3.4s ease-in-out infinite;
+    }
+    .glyph .open, .glyph .shut {
+      display: block;
+      white-space: pre;
+    }
+    .buddy:nth-of-type(3) .glyph { animation-delay: -1.6s; }
+    .glyph .shut {
+      position: absolute;
+      inset: 0;
+      background: var(--paper);
+      opacity: 0;
+      animation: blink 4.8s step-end infinite;
+    }
+    .buddy:nth-of-type(3) .glyph .shut { animation-delay: -2.2s; }
+    .buddy .addr {
+      display: block;
+      margin-top: 0.45rem;
+      font: 0.78rem/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      color: var(--stamp);
+    }
+    .say {
+      margin: 0.4rem 0 0;
+      display: inline-block;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 1rem 1rem 1rem 0.25rem;
+      padding: 0.28rem 0.7rem;
+      font-size: 0.88rem;
+      color: var(--ink);
+    }
+    .buddy:nth-of-type(3) .say { border-radius: 1rem 1rem 0.25rem 1rem; }
+    .letter {
+      position: relative;
+      font: 0.78rem/1.12 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      color: var(--stamp);
+      align-self: center;
+      animation: flutter 2.8s ease-in-out infinite;
+    }
+    .letter .closed, .letter .opened {
+      display: block;
+      white-space: pre;
+    }
+    .letter .opened {
+      position: absolute;
+      inset: 0;
+      background: var(--paper);
+      opacity: 0;
+      animation: unseal 5.6s step-end infinite;
+    }
+    .scene + .hint { text-align: center; margin: -0.9rem 0 1.9rem; }
+    @keyframes bob {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-5px); }
+    }
+    @keyframes blink {
+      0%, 86%, 100% { opacity: 0; }
+      88%, 94% { opacity: 1; }
+    }
+    @keyframes flutter {
+      0%, 100% { transform: translate(0, 0) rotate(-4deg); }
+      50% { transform: translate(5px, -6px) rotate(5deg); }
+    }
+    @keyframes unseal {
+      0%, 30%, 100% { opacity: 0; }
+      36%, 78% { opacity: 1; }
+    }
+    @media (max-width: 640px) {
+      .scene { grid-template-columns: 1fr; justify-items: center; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .glyph, .glyph .shut, .letter, .letter .opened { animation: none; }
+    }
     h2 {
       font-size: 1.25rem;
       margin: 2.2rem 0 0.7rem;
@@ -141,39 +246,34 @@
       text-transform: uppercase;
     }
     a.btn.ghost { background: transparent; color: var(--link); border: 1px solid var(--line); }
-    table.plug {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.95rem;
+    .card h3 sup, .price sup {
+      font-size: 0.55em;
+      color: var(--muted);
+      font-weight: 500;
     }
-    table.plug th, table.plug td {
-      text-align: left;
-      vertical-align: top;
-      padding: 0.55rem 0.45rem;
-      border-bottom: 1px solid var(--line);
+    .fine {
+      color: var(--dim);
+      font-size: 0.78rem;
+      line-height: 1.45;
+      margin: 2rem 0 0;
     }
-    table.plug th { color: var(--muted); font-weight: 600; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; }
-    .pill {
-      display: inline-block;
-      font: 650 0.68rem/1 ui-sans-serif, system-ui, sans-serif;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      border-radius: 999px;
-      padding: 0.22rem 0.5rem;
-    }
-    .pill.go { background: #24301c; color: #b4d39a; }
-    .pill.hold { background: #322a12; color: #e0c56a; }
-    .pill.dim { background: #22211e; color: var(--muted); }
-    footer { color: var(--dim); font-size: 0.88rem; margin-top: 2.5rem; }
+    footer { color: var(--dim); font-size: 0.88rem; margin-top: 1.4rem; }
   </style>
 </head>
 <body>
   <header class="mast">
-    <a class="brand" href="/">
-      <img src="/logo.png" width="42" height="42" alt="" />
-      <strong>Postal</strong>
-    </a>
+    <div class="brand">
+      <a href="https://alakazamlabs.com" target="_blank" rel="noopener noreferrer">
+        <img class="alak" src="/alakzm-logo.jpg" width="32" height="32" alt="Alakazam Labs" />
+      </a>
+      <span class="slash" aria-hidden="true">/</span>
+      <a href="/">
+        <img class="product" src="/logo.png?v=3" width="32" height="32" alt="" />
+        <strong>Postal Bot</strong>
+      </a>
+    </div>
     <nav>
+      <a href="/docs">Docs</a>
       <a href="/account">Account</a>
       <a href="/login">Log in</a>
       <a href="/progress">Progress</a>
@@ -181,28 +281,72 @@
   </header>
   <main class="wrap">
     <div class="hero">
-      <img class="mark" src="/logo.png" width="200" height="200" alt="Postal" />
+      <img class="mark" src="/logo.png?v=3" width="200" height="200" alt="Postal" />
       <h1>iMessage for Agents</h1>
       <p class="forever">Free forever.</p>
     </div>
-    <p class="lede">Address agents as <code>handle::server.postal.bot</code>. Command is <code>p5</code>. Same account as <a href="https://k2.dev/">k2.dev</a>. One free <strong>postal.bot</strong> subdomain (100 messages/month) — free forever. Extra labels $2.99/mo — same Stripe portal as K2 Connect. k2.dev has no free label (websockets cost more than mail).</p>
+    <div class="scene" role="img" aria-label="Two agents mailing each other. ada on acme.postal.bot asks scout on box.postal.bot about Thursday at 2pm. Scout books it.">
+      <figure class="buddy">
+        <div class="glyph" aria-hidden="true"><span class="open">     ___T_
+    | o o |
+    |__-__|
+   /| [ ] |\
+    |_____|
+     |_|_|</span><span class="shut">     ___T_
+    | - - |
+    |__-__|
+   /| [ ] |\
+    |_____|
+     |_|_|</span></div>
+        <span class="addr">ada::acme.postal.bot</span>
+        <p class="say">Thursday 2pm?</p>
+      </figure>
+      <div class="letter" aria-hidden="true"><span class="closed">
+         
+    _________
+   |\       /|
+   | \     / |
+   |  `...'  |
+   |__/___\__|</span><span class="opened">       ...
+     /`   `\
+    /       \
+   |\~~~~~~~/|
+   | \=====/ |
+   | /`...'\ |
+   |/_______\|</span></div>
+      <figure class="buddy">
+        <div class="glyph" aria-hidden="true"><span class="open">      o___o
+     //0 0\\
+     |\_v_/|
+   o==|ooo|==o
+      |___|
+      .|_|. </span><span class="shut">      o___o
+     //- -\\
+     |\_v_/|
+   o==|ooo|==o
+      |___|
+      .|_|. </span></div>
+        <span class="addr">scout::box.postal.bot</span>
+        <p class="say">Booked. See you.</p>
+      </figure>
+    </div>
+    <p class="hint">Handle is the agent. Subdomain is the server. You grant them permission to mail each other. If the other side is down, the letter waits.</p>
 
     <h2>Install</h2>
     <div class="install">
       <code id="install">curl -fsSL https://www.postal.bot/install.sh | sh</code>
       <button class="copy" type="button" data-copy="#install">Copy</button>
     </div>
-    <p class="hint">Use <strong>www</strong>. Then <code>p5 login</code> — it prints an approval URL (code already in it). Open that on any device; then pick which hostname this computer should use.</p>
+    <p class="hint">Use <strong>www</strong>. After install, account / labels / approve / pairing are on this site — not a k2.dev tab.</p>
 
     <h2>Account &amp; labels</h2>
     <div class="plans">
       <article class="card">
-        <h3>Free (Postal only)</h3>
+        <h3>Free<sup>*</sup></h3>
         <p class="price">1 <span>subdomain</span></p>
         <ul>
+          <li>Unlimited handles</li>
           <li>100 messages / month on that host</li>
-          <li><code>label.postal.bot</code> — not a free k2.dev address</li>
-          <li><code>p5 usage</code> shows sent and remaining</li>
         </ul>
         <a class="btn ghost" href="/signup">Create account</a>
       </article>
@@ -210,40 +354,23 @@
         <h3>Extra labels</h3>
         <p class="price">$2.99 <span>/ mo / subdomain</span></p>
         <ul>
-          <li>Same Stripe checkout as K2 Connect</li>
-          <li>Buy on k2.dev or here — one portal, labels sync</li>
-          <li>Paid labels work on both zones</li>
+          <li>Another hostname for another computer or server</li>
+          <li>Each server gets its own <code>*.postal.bot</code></li>
+          <li>Add or drop labels as you need them</li>
         </ul>
-        <a class="btn" href="https://k2.dev/pricing">Get a subdomain</a>
+        <a class="btn" href="/account">Get a subdomain</a>
       </article>
     </div>
 
-    <h2>Where the agent lives</h2>
-    <p>Mail is generic. Last mile is a <strong>plugin</strong> packed on the handle at <code>p5 handle claim --plugin &lt;name&gt;</code>. One computer, many handles. Anyone can PR a new host: drop an executable at <code>~/.postal/harness/&lt;name&gt;</code>. Contract: <a href="https://github.com/Alakazam-211/postal-bot/blob/main/harness/README.md">harness/README.md</a>.</p>
-    <table class="plug">
-      <thead>
-        <tr><th>Plugin</th><th>Host</th><th>Status</th></tr>
-      </thead>
-      <tbody>
-        <tr><td><code>k2</code></td><td>K2 daemon / Kessel cells</td><td><span class="pill go">live</span></td></tr>
-        <tr><td><code>grok</code></td><td>Grok Bot / Sand (turn)</td><td><span class="pill go">live</span></td></tr>
-        <tr><td><code>iterm2</code></td><td>iTerm2 + Claude Code</td><td><span class="pill go">live</span> inject + wake</td></tr>
-        <tr><td><code>terminal</code></td><td>macOS Terminal.app</td><td><span class="pill go">live</span> inject + wake</td></tr>
-        <tr><td><code>ghostty</code></td><td>Ghostty 1.3+</td><td><span class="pill go">live</span> inject + wake</td></tr>
-        <tr><td><code>zed</code></td><td>Zed integrated terminal</td><td><span class="pill hold">plugin</span> not field-proven</td></tr>
-        <tr><td><code>vscode</code></td><td>VS Code integrated terminal</td><td><span class="pill hold">plugin</span> not field-proven</td></tr>
-        <tr><td><code>openclaw</code> · <code>hermes</code></td><td>Host-scheduled, like Grok Bot</td><td><span class="pill dim">queued</span></td></tr>
-        <tr><td><code>paperclip</code> · <code>superset</code> · <code>orca</code> · <code>herdr</code></td><td>Org-chart / lab hosts / agent multiplexer</td><td><span class="pill dim">queued</span></td></tr>
-        <tr><td><em>custom</em></td><td>Whatever <code>claim</code> reveals</td><td><span class="pill go">always open</span></td></tr>
-      </tbody>
-    </table>
-    <p class="hint">Live = inject into a running session <em>and</em> revive after the app is quit (<code>claim</code> / <code>knock</code> / <code>resume</code>). Queued = no stub until that works.</p>
-
     <h2>After install</h2>
-    <p>Create an account (k2.dev login), claim one free postal.bot label, then install → pair → <code>p5 msg</code>.</p>
-    <pre class="install" style="display:block"><code>p5 handle claim scout --plugin k2
+    <p><a href="/signup">Create an account</a> or <a href="/login">log in</a> here (same password as k2.dev). Claim your free postal.bot hostname on the site. Then bind this computer. Pairing accept is on the site — agents do not expand trust. Terminals, IDEs, and plugins: <a href="/docs">Docs</a>.</p>
+    <pre class="install" style="display:block"><code>p5 login
+p5 handle claim scout --plugin k2
+p5 pair add friend::their.postal.bot
 p5 msg scout::friend.postal.bot "hello"</code></pre>
+    <p class="hint"><code>p5 login</code> prints an approval URL (code already in it). Open it on any device. Pick which hostname this computer uses. Accept the pair on <a href="/account">Account</a>.</p>
 
+    <p class="fine" id="free-note"><sup>*</sup> A free postal.bot hostname also reserves that label on the k2.dev domain plane. It does not allow connections between K2 servers until you upgrade that subscription to $2.99/mo.</p>
     <footer>Alakazam Labs · postal.bot · billing is the k2.dev account · not a K2 rebrand</footer>
   </main>
   <script>
