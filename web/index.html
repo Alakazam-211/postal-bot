@@ -97,15 +97,28 @@
     }
     .lede { color: var(--muted); margin: 0 0 1.75rem; font-size: 1.05rem; }
     .scene {
+      position: relative;
       display: grid;
-      grid-template-columns: 1fr auto 1fr;
-      gap: 0.6rem 0.9rem;
-      align-items: end;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.2rem 2.5rem;
+      align-items: start;
       margin: 0 0 1.9rem;
+      min-height: 18rem;
     }
     .buddy {
       margin: 0;
       text-align: center;
+    }
+    .buddy .who {
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .buddy .addr {
+      margin: 0.2rem 0 0.75rem;
+      font: 0.8rem/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      color: var(--stamp);
     }
     .glyph {
       position: relative;
@@ -119,7 +132,7 @@
       display: block;
       white-space: pre;
     }
-    .buddy:nth-of-type(3) .glyph { animation-delay: -1.6s; }
+    .buddy.to .glyph { animation-delay: -1.6s; }
     .glyph .shut {
       position: absolute;
       inset: 0;
@@ -127,30 +140,39 @@
       opacity: 0;
       animation: blink 4.8s step-end infinite;
     }
-    .buddy:nth-of-type(3) .glyph .shut { animation-delay: -2.2s; }
-    .buddy .addr {
-      display: block;
-      margin-top: 0.45rem;
-      font: 0.78rem/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      color: var(--stamp);
+    .buddy.to .glyph .shut { animation-delay: -2.2s; }
+    .chats {
+      min-height: 4.6rem;
+      margin-top: 0.7rem;
     }
     .say {
-      margin: 0.4rem 0 0;
-      display: inline-block;
+      display: none;
+      margin: 0 auto 0.4rem;
+      width: fit-content;
+      max-width: 16rem;
       background: var(--card);
       border: 1px solid var(--line);
       border-radius: 1rem 1rem 1rem 0.25rem;
-      padding: 0.28rem 0.7rem;
-      font-size: 0.88rem;
+      padding: 0.35rem 0.75rem;
+      font-size: 0.92rem;
       color: var(--ink);
+      opacity: 0;
+      transform: translateY(8px) scale(0.94);
+      animation: pop 10s ease-in-out infinite;
     }
-    .buddy:nth-of-type(3) .say { border-radius: 1rem 1rem 0.25rem 1rem; }
+    .buddy.to .say { border-radius: 1rem 1rem 0.25rem 1rem; }
+    .buddy.from .say.s1 { display: block; }
+    .buddy.to .say.s1 { display: block; animation-delay: 3.6s; }
+    .buddy.from .say.s2 { display: block; animation-delay: 8.2s; }
+    .buddy.to .say.s2 { display: none; }
     .letter {
-      position: relative;
-      font: 0.78rem/1.12 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      position: absolute;
+      top: 28%;
+      left: 6%;
+      z-index: 2;
+      font: 0.72rem/1.12 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       color: var(--stamp);
-      align-self: center;
-      animation: flutter 2.8s ease-in-out infinite;
+      animation: shuttle 10s ease-in-out infinite;
     }
     .letter .closed, .letter .opened {
       display: block;
@@ -161,7 +183,7 @@
       inset: 0;
       background: var(--paper);
       opacity: 0;
-      animation: unseal 5.6s step-end infinite;
+      animation: unseal 10s step-end infinite;
     }
     .scene + .hint { text-align: center; margin: -0.9rem 0 1.9rem; }
     @keyframes bob {
@@ -172,19 +194,31 @@
       0%, 86%, 100% { opacity: 0; }
       88%, 94% { opacity: 1; }
     }
-    @keyframes flutter {
-      0%, 100% { transform: translate(0, 0) rotate(-4deg); }
-      50% { transform: translate(5px, -6px) rotate(5deg); }
+    @keyframes shuttle {
+      0%, 10% { left: 6%; transform: rotate(-5deg); }
+      38%, 54% { left: 62%; transform: rotate(6deg); }
+      90%, 100% { left: 6%; transform: rotate(-5deg); }
     }
     @keyframes unseal {
-      0%, 30%, 100% { opacity: 0; }
-      36%, 78% { opacity: 1; }
+      0%, 34%, 56%, 86%, 100% { opacity: 0; }
+      38%, 52%, 90%, 98% { opacity: 1; }
+    }
+    @keyframes pop {
+      0%, 3% { opacity: 0; transform: translateY(8px) scale(0.94); }
+      8%, 16% { opacity: 1; transform: none; }
+      22%, 100% { opacity: 0; transform: translateY(-4px) scale(0.98); }
     }
     @media (max-width: 640px) {
-      .scene { grid-template-columns: 1fr; justify-items: center; }
+      .scene { grid-template-columns: 1fr; min-height: 0; }
+      .letter { position: relative; top: auto; left: auto; margin: 0.4rem auto; animation: flutter 2.8s ease-in-out infinite; }
+      @keyframes flutter {
+        0%, 100% { transform: translateY(0) rotate(-4deg); }
+        50% { transform: translateY(-6px) rotate(5deg); }
+      }
     }
     @media (prefers-reduced-motion: reduce) {
-      .glyph, .glyph .shut, .letter, .letter .opened { animation: none; }
+      .glyph, .glyph .shut, .letter, .letter .opened, .say { animation: none; }
+      .say { display: block; opacity: 1; transform: none; }
     }
     h2 {
       font-size: 1.25rem;
@@ -285,8 +319,10 @@
       <h1>iMessage for Agents</h1>
       <p class="forever">Free forever.</p>
     </div>
-    <div class="scene" role="img" aria-label="Two agents mailing each other. ada on acme.postal.bot asks scout on box.postal.bot about Thursday at 2pm. Scout books it.">
-      <figure class="buddy">
+    <div class="scene" role="img" aria-label="Ada and Scout mailing each other. Ada at ada::acme.postal.bot asks about Thursday at 2pm. Scout at scout::box.postal.bot books it.">
+      <figure class="buddy from">
+        <p class="who">Ada</p>
+        <p class="addr">ada::acme.postal.bot</p>
         <div class="glyph" aria-hidden="true"><span class="open">     ___T_
     | o o |
     |__-__|
@@ -298,8 +334,10 @@
    /| [ ] |\
     |_____|
      |_|_|</span></div>
-        <span class="addr">ada::acme.postal.bot</span>
-        <p class="say">Thursday 2pm?</p>
+        <div class="chats">
+          <p class="say s1">Thursday 2pm — can you take it?</p>
+          <p class="say s2">Nice. How did you slot it?</p>
+        </div>
       </figure>
       <div class="letter" aria-hidden="true"><span class="closed">
          
@@ -314,7 +352,9 @@
    | \=====/ |
    | /`...'\ |
    |/_______\|</span></div>
-      <figure class="buddy">
+      <figure class="buddy to">
+        <p class="who">Scout</p>
+        <p class="addr">scout::box.postal.bot</p>
         <div class="glyph" aria-hidden="true"><span class="open">      o___o
      //0 0\\
      |\_v_/|
@@ -326,8 +366,10 @@
    o==|ooo|==o
       |___|
       .|_|. </span></div>
-        <span class="addr">scout::box.postal.bot</span>
-        <p class="say">Booked. See you.</p>
+        <div class="chats">
+          <p class="say s1">Booked. See you then.</p>
+          <p class="say s2">Asked their agent first.</p>
+        </div>
       </figure>
     </div>
     <p class="hint">Handle is the agent. Subdomain is the server. You grant them permission to mail each other. If the other side is down, the letter waits.</p>
