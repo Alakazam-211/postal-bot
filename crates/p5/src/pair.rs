@@ -7,6 +7,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use p5_core::{
     default_root, Homes, PeerType, PostalAddr, Roster, StoreError, Trust, TypeParseError,
@@ -18,6 +22,9 @@ use p5_plane::{PairLists, PairView, PlaneClient, PlaneConfig, PlaneError, DASHBO
 use crate::sm::{EXIT_ERROR, EXIT_USAGE};
 
 pub const REASON_GATED: &str = "gated";
+
+/// How often the resident agent copies website accepts onto `roster.json`.
+pub const PAIR_POLL_SECS: u64 = 15;
 
 pub struct PairCtx {
     root: PathBuf,
@@ -302,6 +309,64 @@ fn refresh_roster(
     };
     sync_roster(root, &lists, self_addrs)?;
     Ok(())
+}
+
+fn pair_poll_off() -> bool {
+    match std::env::var("P5_PAIR_POLL") {
+        Ok(v) => {
+            let v = v.trim();
+            v == "0" || v.eq_ignore_ascii_case("false")
+        }
+        Err(_) => false,
+    }
+}
+
+fn homes_addrs(root: &Path) -> Vec<PostalAddr> {
+    Homes::load(root)
+        .map(|h| h.iter().map(|(addr, _)| addr.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Same merge as `p5 pair list`. Website accept only marks the plane;
+/// this is how the box picks up the peer SPKI. Fail-open (no token / plane down).
+///
+/// Returns whether a plane list was applied.
+pub fn pull_roster(root: &Path) -> bool {
+    let Ok(cfg) = PlaneConfig::load(root) else {
+        return false;
+    };
+    let Ok(token) = cfg.require_token() else {
+        return false;
+    };
+    let client = PlaneClient::new(&cfg.base_url, token);
+    let lists = match client.list_pairs(false) {
+        Ok(lists) => lists,
+        Err(_) => return false,
+    };
+    sync_roster(root, &lists, &homes_addrs(root)).is_ok()
+}
+
+/// Background copy of plane friends → local roster (website Accept).
+pub fn poll_loop(root: PathBuf, stop: Arc<AtomicBool>) {
+    let _ = pull_roster(&root);
+    while !stop.load(Ordering::Relaxed) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(PAIR_POLL_SECS);
+        while !stop.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(200));
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let _ = pull_roster(&root);
+    }
+}
+
+pub fn spawn_poll(root: &Path, stop: Arc<AtomicBool>) -> Option<thread::JoinHandle<()>> {
+    if pair_poll_off() {
+        return None;
+    }
+    let root = root.to_path_buf();
+    Some(thread::spawn(move || poll_loop(root, stop)))
 }
 
 fn sync_roster(

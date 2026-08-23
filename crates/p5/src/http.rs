@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use p5_core::{DeliveryMode, PeerType, PostalAddr, Trust};
+use p5_core::{DeliveryMode, PeerType, PostalAddr, Roster, Trust};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -265,7 +265,7 @@ fn handle_msg(state: &AgentState, headers: &[(String, String)], body: &[u8]) -> 
         }
     }
 
-    let ctx = match state.context() {
+    let mut ctx = match state.context() {
         Ok(ctx) => ctx,
         Err(err) => {
             return HttpOut::json(500, json!({"error": err.to_string()}));
@@ -291,7 +291,22 @@ fn handle_msg(state: &AgentState, headers: &[(String, String)], body: &[u8]) -> 
     };
     if auth == MsgAuth::Proof {
         if let Err(out) = verify_pairing_proof(&ctx, headers, body, &from) {
-            return out;
+            // Website Accept only writes the plane. CLI accept also
+            // `p5 pair list`s onto roster.json. Pull once and retry.
+            if crate::pair::pull_roster(&state.root) {
+                if let Ok(roster) = Roster::load(&state.root) {
+                    ctx.roster = roster;
+                    if verify_pairing_proof(&ctx, headers, body, &from).is_ok() {
+                        // fall through with refreshed roster
+                    } else {
+                        return out;
+                    }
+                } else {
+                    return out;
+                }
+            } else {
+                return out;
+            }
         }
     }
     let mode = match parsed.mode.parse::<DeliveryMode>() {
@@ -593,8 +608,11 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use std::net::TcpListener;
+
     use p5_core::{HomeRow, Homes, Mailbox, PeerType, Roster, RosterEntry, ToolFlags, Trust};
     use p5_crypto::{proof_create, KeyPair};
+    use p5_plane::{PairView, PostalFile};
 
     use crate::session_map::LiveSession;
 
@@ -889,6 +907,68 @@ mod tests {
             .list_inbox(None, None)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn post_msg_pulls_roster_after_website_accept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kp = KeyPair::generate();
+        let pem = kp.public_key_pem();
+        let friend = PairView {
+            id: "pair-web".into(),
+            from: "jarvis::other.postal.bot".into(),
+            to: "scout::acme.postal.bot".into(),
+            from_handle: Some("jarvis".into()),
+            from_host: Some("other.postal.bot".into()),
+            from_typ: Some(PeerType::Session),
+            owner_email: None,
+            owner_name: None,
+            sas: Some("123456".into()),
+            status: "trusted".into(),
+            epoch: 0,
+            public_key_pem: Some(pem.clone()),
+            public_key_pem_camel: None,
+            fingerprint: Some(kp.fingerprint()),
+        };
+        let payload = serde_json::to_string(&serde_json::json!({
+            "inbox": [],
+            "friends": [friend],
+            "sent": [],
+        }))
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let plane_addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        PostalFile {
+            connect_token: Some("k2c_test".into()),
+            plane_url: Some(format!("http://{plane_addr}")),
+            ..PostalFile::default()
+        }
+        .save(tmp.path())
+        .unwrap();
+
+        let state = state_with_home(tmp.path(), None);
+        let body = sample_msg(SAMPLE_ID);
+        let headers = proof_headers(&kp, &body, SAMPLE_ID);
+        let out = handle_http(&state, "POST", "/p5/msg", &headers, &body);
+        assert_eq!(out.status, 200, "{}", out.body);
+        let row = Roster::load(tmp.path())
+            .unwrap()
+            .get(&addr("jarvis::other.postal.bot"))
+            .cloned()
+            .expect("roster");
+        assert_eq!(row.trust, Trust::Trusted);
+        assert_eq!(row.public_key_pem, pem);
     }
 
     #[test]

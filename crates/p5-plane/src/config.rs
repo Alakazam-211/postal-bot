@@ -19,6 +19,9 @@ pub struct PostalFile {
     pub addr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typ: Option<String>,
+    /// Optional plane base. Env `P5_PLANE_URL` still wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane_url: Option<String>,
     #[serde(default, skip_serializing_if = "BillingFile::is_empty")]
     pub billing: BillingFile,
 }
@@ -106,8 +109,15 @@ pub struct PlaneConfig {
 impl PlaneConfig {
     pub fn load(root: &Path) -> Result<Self, PlaneError> {
         let file = PostalFile::load(root)?;
-        let base_url =
-            env_nonempty("P5_PLANE_URL").unwrap_or_else(|| DEFAULT_PLANE_URL.to_string());
+        let base_url = env_nonempty("P5_PLANE_URL")
+            .or_else(|| {
+                file.plane_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| DEFAULT_PLANE_URL.to_string());
         let token = env_nonempty("P5_CONNECT_TOKEN").or_else(|| file.connect_token.clone());
         let addr = env_nonempty("P5_FROM").or_else(|| file.addr.clone());
         let typ = env_nonempty("P5_TYP").or_else(|| file.typ.clone());
@@ -159,6 +169,7 @@ mod tests {
             tunnel_label: Some("acme".into()),
             addr: Some("alice::acme.postal.bot".into()),
             typ: Some("session".into()),
+            plane_url: None,
             billing: BillingFile::default(),
         };
         f.save(dir.path()).unwrap();
