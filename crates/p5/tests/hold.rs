@@ -171,6 +171,10 @@ fn route(rec: &Rec, st: &mut HoldState) -> (u16, String) {
             st.items.push(env);
             (200, format!(r#"{{"ok":true,"id":"{id}"}}"#))
         }
+        ("GET", "/postal/usage") => (
+            200,
+            r#"{"host":"acme.postal.bot","period":"2026-08","sent":0,"limit":1000,"remaining":1000,"plan":"unlimited","subdomains":1,"subdomain_included":1}"#.into(),
+        ),
         ("GET", "/postal/hold") => {
             let items = serde_json::to_string(&st.items).unwrap();
             (200, format!(r#"{{"items":{items}}}"#))

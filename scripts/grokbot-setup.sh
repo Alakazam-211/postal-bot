@@ -94,12 +94,17 @@ PY
 
 write_identity() {
     cwd="${POSTAL_CWD:-$PWD}"
+    session="${GROK_SESSION_ID:-${POSTAL_SESSION:-}}"
     umask 077
     mkdir -p "$P5_HOME"
     chmod 700 "$P5_HOME" 2>/dev/null || true
-    python3 - "$P5_HOME" "$ADDR" "$cwd" "$HOST" "$HARNESS" "$TYP" "$TOKEN" <<'PY'
+    if [ -z "$session" ]; then
+        info "GROK_SESSION_ID unset — From will not resolve until:"
+        info "  p5 handle claim ${HANDLE} --plugin grok --session <Sand UUID> --force"
+    fi
+    python3 - "$P5_HOME" "$ADDR" "$cwd" "$HOST" "$HARNESS" "$TYP" "$TOKEN" "$session" <<'PY'
 import json, os, sys, stat
-home, addr, cwd, host, harness, typ, token = sys.argv[1:8]
+home, addr, cwd, host, harness, typ, token, session = sys.argv[1:9]
 homes_path = os.path.join(home, "homes.json")
 row = {
     "address": addr,
@@ -109,6 +114,8 @@ row = {
     "tools": {"files": False, "live_inject": True, "wake": True},
     "enrolled_host": host,
 }
+if session.strip():
+    row["session_id"] = session.strip()
 homes = []
 if os.path.isfile(homes_path):
     with open(homes_path) as f:

@@ -505,6 +505,11 @@ fn claim_grok(handle: &str, want_session: Option<&str>) -> Result<Claim, LastMil
     let cfg = turn::TurnConfig::from_env();
     let id = turn::resolve_sand_agent(&cfg, want_session, Some(handle))
         .map_err(|e| LastMileError::Plugin(format!("claim_failed: {e}")))?;
+    if id.trim().is_empty() {
+        return Err(LastMileError::Plugin(
+            "claim_failed: grok plugin requires a Sand agent UUID (session_id)".into(),
+        ));
+    }
     if let Some(want) = want_session.map(str::trim).filter(|s| !s.is_empty()) {
         if want != id {
             return Err(LastMileError::Plugin(format!(

@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use p5_core::{
-    default_root, DeliveryMode, DeliveryStatus, Homes, MailItem, Mailbox, MailboxError, PeerType,
-    PostalAddr, ReceiveRequest, Roster, SendRequest, StoreError, Trust, EXIT_GATED, MAX_BODY_BYTES,
+    default_root, DeliveryMode, DeliveryStatus, HomeRow, Homes, MailItem, Mailbox, MailboxError,
+    PeerType, PostalAddr, ReceiveRequest, Roster, SendRequest, StoreError, Trust, EXIT_GATED,
+    MAX_BODY_BYTES,
 };
 use p5_crypto::KeyPair;
 use p5_live::{LiveClient, LiveRequest, LiveResult};
@@ -265,7 +266,7 @@ pub enum SmError {
     Mailbox(MailboxError),
     Store(StoreError),
     BadAddress(String),
-    NoIdentity,
+    NoIdentity(String),
 }
 
 impl SmError {
@@ -284,8 +285,9 @@ impl fmt::Display for SmError {
             Self::Mailbox(err) => write!(f, "{err}"),
             Self::Store(err) => write!(f, "{err}"),
             Self::BadAddress(msg) => write!(f, "{msg}"),
-            Self::NoIdentity => f.write_str(
-                "no handle for this session; run p5 from the claimed cwd (or export K2_SESSION_ID / GROK_SESSION_ID) — From is forced by the homes row, not --from",
+            Self::NoIdentity(dump) => write!(
+                f,
+                "From is this session's claimed handle, not --from\n{dump}"
             ),
         }
     }
@@ -333,13 +335,13 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
 
     let from = match resolve_from(ctx, req) {
         Ok(addr) => addr,
-        Err(SmError::NoIdentity) => {
+        Err(SmError::NoIdentity(dump)) => {
             return Ok(MsgResponse::fail(
                 None,
                 Some(&to),
                 None,
                 REASON_NO_IDENTITY,
-                "From is this session's claimed handle, not --from",
+                format!("From is this session's claimed handle, not --from\n{dump}"),
             ));
         }
         Err(SmError::BadAddress(msg)) => {
@@ -866,7 +868,7 @@ fn session_id_hint(ctx: &SmContext, to: &PostalAddr) -> Option<String> {
         .or_else(|| ctx.homes.get(to).and_then(|h| h.session_id.clone()))
 }
 
-fn caller_session_ids() -> Vec<String> {
+pub(crate) fn caller_session_ids() -> Vec<String> {
     let mut out = Vec::new();
     for name in ["K2_SESSION_ID", "GROK_SESSION_ID", "CLAUDE_SESSION_ID"] {
         if let Ok(raw) = std::env::var(name) {
@@ -885,6 +887,16 @@ fn same_cwd(a: &Path, b: &Path) -> bool {
     ca == cb
 }
 
+/// Grok Bot / turn rows share a cwd (`/workspace`). From is session id only.
+fn grok_style_home(row: &HomeRow) -> bool {
+    let h = row.harness.as_deref().unwrap_or("").trim();
+    let t = row.terminal.as_deref().unwrap_or("").trim();
+    h.eq_ignore_ascii_case("grok")
+        || h.eq_ignore_ascii_case("turn")
+        || t.eq_ignore_ascii_case("grok")
+        || t.eq_ignore_ascii_case("turn")
+}
+
 /// From is the homes row for *this* process. Never a CLI flag (impersonation).
 pub(crate) fn resolve_from_homes(homes: &Homes) -> Result<PostalAddr, SmError> {
     resolve_from_homes_at(homes, &caller_session_ids(), std::env::current_dir().ok().as_deref())
@@ -895,6 +907,10 @@ fn resolve_from_homes_at(
     ids: &[String],
     cwd: Option<&Path>,
 ) -> Result<PostalAddr, SmError> {
+    pick_from(homes, ids, cwd).ok_or_else(|| SmError::NoIdentity(from_identity_report(homes, ids, cwd)))
+}
+
+fn pick_from(homes: &Homes, ids: &[String], cwd: Option<&Path>) -> Option<PostalAddr> {
     let mut by_sid: Vec<PostalAddr> = homes
         .iter()
         .filter(|(_, row)| {
@@ -907,30 +923,109 @@ fn resolve_from_homes_at(
     by_sid.sort();
     by_sid.dedup();
     if by_sid.len() == 1 {
-        return Ok(by_sid.remove(0));
+        return Some(by_sid.remove(0));
     }
     if by_sid.len() > 1 {
-        return Err(SmError::NoIdentity);
+        return None;
     }
+    // Grok Bot turns share /workspace. Cwd is not From for harness=grok.
     if let Some(cwd) = cwd {
         let mut by_cwd: Vec<PostalAddr> = homes
             .iter()
-            .filter(|(_, row)| same_cwd(&row.cwd, cwd))
+            .filter(|(_, row)| !grok_style_home(row) && same_cwd(&row.cwd, cwd))
             .map(|(addr, _)| addr.clone())
             .collect();
         by_cwd.sort();
         by_cwd.dedup();
         if by_cwd.len() == 1 {
-            return Ok(by_cwd.remove(0));
+            return Some(by_cwd.remove(0));
         }
         if by_cwd.len() > 1 {
-            return Err(SmError::NoIdentity);
+            return None;
         }
     }
     if homes.len() == 1 {
-        return Ok(homes.iter().next().unwrap().0.clone());
+        let (addr, row) = homes.iter().next().unwrap();
+        if grok_style_home(row) {
+            return None;
+        }
+        return Some(addr.clone());
     }
-    Err(SmError::NoIdentity)
+    None
+}
+
+/// Diagnose From the way `p5 whoami` / `no_identity` should. Not a spoofable --from.
+pub(crate) fn from_identity_report(
+    homes: &Homes,
+    ids: &[String],
+    cwd: Option<&Path>,
+) -> String {
+    let mut lines = Vec::new();
+    match pick_from(homes, ids, cwd) {
+        Some(addr) => lines.push(format!("From: {addr}")),
+        None => lines.push("From: unresolved".into()),
+    }
+    for name in ["GROK_SESSION_ID", "K2_SESSION_ID", "CLAUDE_SESSION_ID"] {
+        match std::env::var(name) {
+            Ok(v) if !v.trim().is_empty() => lines.push(format!("{name}: {}", v.trim())),
+            _ => lines.push(format!("{name}: unset")),
+        }
+    }
+    match cwd {
+        Some(p) => lines.push(format!("cwd: {}", p.display())),
+        None => lines.push("cwd: unset".into()),
+    }
+    if let Some(cwd) = cwd {
+        let mut hits: Vec<String> = homes
+            .iter()
+            .filter(|(_, row)| same_cwd(&row.cwd, cwd))
+            .map(|(addr, _)| addr.handle().to_string())
+            .collect();
+        hits.sort();
+        hits.dedup();
+        if hits.is_empty() {
+            lines.push("cwd matches: (none)".into());
+        } else {
+            lines.push(format!("cwd matches: {}", hits.join(" ")));
+        }
+    }
+    for (addr, row) in homes.iter() {
+        if grok_style_home(row)
+            && row
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+        {
+            lines.push(format!("{addr} session empty — cannot be From"));
+        }
+    }
+    let grok_empty = homes.iter().any(|(addr, row)| {
+        grok_style_home(row)
+            && addr.handle().eq_ignore_ascii_case("grok")
+            && row
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+    });
+    if grok_empty {
+        lines.push(
+            "next: export GROK_SESSION_ID=<Sand UUID> && p5 handle claim grok --plugin grok --session \"$GROK_SESSION_ID\" --force"
+                .into(),
+        );
+        lines.push("note: Sand does not export GROK_SESSION_ID — export-alone is not enough if grok:: session is empty".into());
+    } else if std::env::var("GROK_SESSION_ID")
+        .ok()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+        && homes.iter().any(|(_, row)| grok_style_home(row))
+    {
+        lines.push("note: Sand does not export GROK_SESSION_ID".into());
+    }
+    lines.join("\n")
 }
 
 fn resolve_from(ctx: &SmContext, req: &MsgRequest) -> Result<PostalAddr, SmError> {
@@ -1829,5 +1924,97 @@ mod tests {
         assert_eq!(resp.status.as_deref(), Some("delivered"));
         assert_eq!(ctx.mailbox.list_inbox(None, None).unwrap().len(), 1);
         assert_eq!(sand.prompts.lock().unwrap().len(), 1);
+    }
+
+    fn grok_home(address: &str, session: Option<&str>, cwd: &str) -> HomeRow {
+        let mut row = home(address, true, true);
+        row.harness = Some("grok".into());
+        row.terminal = Some("grok".into());
+        row.session_id = session.map(|s| s.to_string());
+        row.cwd = PathBuf::from(cwd);
+        row
+    }
+
+    #[test]
+    fn grok_from_is_session_id_not_shared_cwd() {
+        let mut homes = Homes::new();
+        homes
+            .insert(grok_home(
+                "kessel::grokbot.postal.bot",
+                Some("b12f6386-2691-47b3-9981-d778096e6cdf"),
+                "/workspace",
+            ))
+            .unwrap();
+        homes
+            .insert(grok_home(
+                "scheduler::grokbot.postal.bot",
+                Some("9b5a4a9c-688c-4000-ad31-b6ad1b1efa38"),
+                "/workspace",
+            ))
+            .unwrap();
+        homes
+            .insert(grok_home("grok::grokbot.postal.bot", None, "/workspace"))
+            .unwrap();
+        let cwd = PathBuf::from("/workspace");
+        assert!(matches!(
+            resolve_from_homes_at(&homes, &[], Some(&cwd)),
+            Err(SmError::NoIdentity(_))
+        ));
+        let from = resolve_from_homes_at(
+            &homes,
+            &["b12f6386-2691-47b3-9981-d778096e6cdf".into()],
+            Some(&cwd),
+        )
+        .unwrap();
+        assert_eq!(from.to_string(), "kessel::grokbot.postal.bot");
+        let from = resolve_from_homes_at(
+            &homes,
+            &["0e5f5de8-7619-4ba4-9753-32c5470b2346".into()],
+            Some(&cwd),
+        );
+        assert!(matches!(from, Err(SmError::NoIdentity(_))));
+        let dump = from_identity_report(&homes, &[], Some(&cwd));
+        assert!(dump.contains("From: unresolved"));
+        assert!(dump.contains("cwd matches:"));
+        assert!(dump.contains("session empty — cannot be From"));
+        assert!(dump.contains("export-alone is not enough"));
+        homes
+            .insert(grok_home(
+                "grok::grokbot.postal.bot",
+                Some("0e5f5de8-7619-4ba4-9753-32c5470b2346"),
+                "/workspace",
+            ))
+            .unwrap();
+        let from = resolve_from_homes_at(
+            &homes,
+            &["0e5f5de8-7619-4ba4-9753-32c5470b2346".into()],
+            Some(&cwd),
+        )
+        .unwrap();
+        assert_eq!(from.to_string(), "grok::grokbot.postal.bot");
+    }
+
+    #[test]
+    fn k2_from_still_uses_unique_cwd() {
+        let mut homes = Homes::new();
+        let mut row = home("postal-bot::acme.postal.bot", true, true);
+        row.harness = Some("k2".into());
+        row.session_id = None;
+        row.cwd = PathBuf::from("/home/box/ai/Kessel");
+        homes.insert(row).unwrap();
+        homes
+            .insert(grok_home(
+                "kessel::acme.postal.bot",
+                Some("sess-kessel"),
+                "/workspace",
+            ))
+            .unwrap();
+        let from = resolve_from_homes_at(
+            &homes,
+            &[],
+            Some(Path::new("/home/box/ai/Kessel")),
+        )
+        .unwrap();
+        assert_eq!(from.to_string(), "postal-bot::acme.postal.bot");
     }
 }

@@ -52,6 +52,10 @@ enum Commands {
         topic: Option<HelpTopic>,
     },
     /// Send a message (local copy first; auto-wakes)
+    ///
+    /// From = GROK_SESSION_ID / K2_SESSION_ID / CLAUDE_SESSION_ID matching
+    /// homes.session_id, else unique cwd. Ambiguous cwd is no_identity,
+    /// not a guessed handle. Not --from.
     Msg {
         /// Destination `handle::sub.postal.bot`
         addr: String,
@@ -151,7 +155,7 @@ enum HandleAction {
         /// Workspace directory (default: cwd)
         #[arg(long)]
         cwd: Option<String>,
-        /// Platform session id; plugin must validate it
+        /// Sand / platform session UUID (required for --plugin grok)
         #[arg(long)]
         session: Option<String>,
         /// session or turn (default: plugin claim)
@@ -292,10 +296,18 @@ enum HelpTopic {
 }
 
 fn whoami_text() -> String {
-    format!(
+    let mut text = format!(
         "{PRODUCT} ({SITE})\ncommand: {COMMAND}\nversion: {}\n",
         env!("CARGO_PKG_VERSION")
-    )
+    );
+    let homes = p5_core::Homes::load(&default_root()).unwrap_or_else(|_| p5_core::Homes::new());
+    text.push_str(&sm::from_identity_report(
+        &homes,
+        &sm::caller_session_ids(),
+        std::env::current_dir().ok().as_deref(),
+    ));
+    text.push('\n');
+    text
 }
 
 fn help_types_text() -> String {
@@ -355,6 +367,12 @@ Built-in  grok  (Grok Bot / Sand, usually type turn)
         No [p5] tag — Postal is its own product. Do not send unauthenticated (HTTP 401).
   Mail is already in ~/.postal/inbox even if sendPrompt fails.
   One sendPrompt = one billed Grok Bot turn. Rate-limit 12/hour/peer.
+
+  Outbound From is GROK_SESSION_ID matching homes.session_id. claim
+  --session must store the Sand UUID. Sand will not export the env.
+  Shared cwd is ambiguous — do not rely on cwd fallback on a Grok Bot
+  box. `p5 whoami` prints the resolve; empty grok:: session cannot be
+  From even if you export GROK_SESSION_ID.
 
 Built-in  k2  (K2 workspace, type session)
   POST /cli/workspace/msg on the local k2-daemon (same route as k2 msg).
@@ -765,13 +783,16 @@ mod tests {
     #[test]
     fn whoami_is_stub_identity() {
         let text = whoami_text();
-        assert!(text.contains(PRODUCT));
-        assert!(text.contains(SITE));
-        assert!(text.contains(COMMAND));
-        assert!(text.contains(env!("CARGO_PKG_VERSION")));
-        let lower = text.to_ascii_lowercase();
+        let head = text.lines().take(3).collect::<Vec<_>>().join("\n");
+        assert!(head.contains(PRODUCT));
+        assert!(head.contains(SITE));
+        assert!(head.contains(COMMAND));
+        assert!(head.contains(env!("CARGO_PKG_VERSION")));
+        let lower = head.to_ascii_lowercase();
         assert!(!lower.contains("k2"));
         assert!(!lower.contains("kessel"));
+        assert!(text.contains("From:"));
+        assert!(text.contains("GROK_SESSION_ID"));
     }
 
     #[test]
@@ -799,6 +820,8 @@ mod tests {
         assert!(text.contains("401"));
         assert!(text.contains("[p5]"));
         assert!(text.contains("homes.harness"));
+        assert!(text.contains("Outbound From is GROK_SESSION_ID"));
+        assert!(text.contains("Sand will not export"));
         assert!(!text.contains("[k2g]"));
     }
 

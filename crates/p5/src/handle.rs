@@ -70,6 +70,14 @@ pub fn run_claim(
         .parse()
         .map_err(|e: p5_core::TypeParseError| HandleError::BadTyp(e.to_string()))?;
 
+    if (plugin.eq_ignore_ascii_case("grok") || plugin.eq_ignore_ascii_case("turn"))
+        && claim.session_id.trim().is_empty()
+    {
+        return Err(HandleError::Claim(last_mile::LastMileError::Plugin(
+            "grok handle requires a Sand agent UUID; pass --session <uuid>".into(),
+        )));
+    }
+
     let row_cwd = if claim.cwd.trim().is_empty() {
         cwd.clone()
     } else {
@@ -145,10 +153,24 @@ pub fn run_list(json: bool) -> Result<(), HandleError> {
     } else if rows.is_empty() {
         eprintln!("no handles; run: p5 handle claim <handle> --plugin k2|grok|<name>");
     } else {
+        let mut cwd_n: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         for r in &rows {
+            *cwd_n.entry(r.cwd.clone()).or_insert(0) += 1;
+        }
+        for r in &rows {
+            let session = if r.session.trim().is_empty() {
+                "empty"
+            } else {
+                r.session.as_str()
+            };
+            let cwd = if cwd_n.get(&r.cwd).copied().unwrap_or(0) > 1 {
+                format!("{} (shared)", r.cwd)
+            } else {
+                r.cwd.clone()
+            };
             println!(
                 "{}  plugin={} terminal={} session={} cwd={}",
-                r.address, r.plugin, r.terminal, r.session, r.cwd
+                r.address, r.plugin, r.terminal, session, cwd
             );
         }
     }
