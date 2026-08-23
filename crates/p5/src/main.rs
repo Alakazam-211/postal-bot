@@ -127,7 +127,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Account plan (1 free postal.bot subdomain, 1000 msgs, $2.99/mo extra)
+    /// Account plan (1 free postal.bot subdomain, 10000 msgs, $2.99/mo extra)
     Billing {
         #[command(subcommand)]
         action: Option<BillingAction>,
@@ -291,7 +291,7 @@ enum HelpTopic {
     /// Last-mile plugins (`homes.harness`): k2, grok, exec
     #[value(name = "last-mile", alias = "plugins", alias = "grok")]
     LastMile,
-    /// 1 free postal.bot subdomain (1000 msgs/UTC month); extra labels $2.99/mo
+    /// 1 free postal.bot subdomain (10000 msgs/UTC month); extra labels $2.99/mo
     Usage,
 }
 
@@ -364,6 +364,8 @@ Built-in  grok  (Grok Bot / Sand, usually type turn)
         4. ~/sand-data/agents/<uuid>/profile.json
         5. GET /health activeAgentId
   Prompt: [from handle::host] <body>
+        Live inject prefixes a line that would start with `/` as `[mail] /…`
+        so it cannot run as a slash command or raw terminal. Inbox stays verbatim.
         No [p5] tag — Postal is its own product. Do not send unauthenticated (HTTP 401).
   Mail is already in ~/.postal/inbox even if sendPrompt fails.
   One sendPrompt = one billed Grok Bot turn. Rate-limit 12/hour/peer.
@@ -850,7 +852,7 @@ mod tests {
     #[test]
     fn help_usage_names_free_tier_and_price() {
         let text = help_usage_text();
-        assert!(text.contains("1000"));
+        assert!(text.contains("10000"));
         assert!(text.contains("2.99"));
         assert!(text.contains("p5 usage"));
         assert!(text.contains("postal.bot/account"));

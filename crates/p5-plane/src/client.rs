@@ -586,8 +586,8 @@ mod tests {
             "host":"rosson.postal.bot",
             "period":"2026-08",
             "sent":0,
-            "limit":1000,
-            "remaining":1000,
+            "limit":10000,
+            "remaining":10000,
             "plan":"unlimited",
             "subdomains":1,
             "subdomain_included":1,
@@ -601,8 +601,8 @@ mod tests {
         assert_eq!(report.host, "rosson.postal.bot");
         assert_eq!(report.plan, "unlimited");
         assert_eq!(report.sent, 0);
-        assert_eq!(report.limit, 1000);
-        assert_eq!(report.remaining, 1000);
+        assert_eq!(report.limit, 10000);
+        assert_eq!(report.remaining, 10000);
         assert_eq!(report.subdomains, 1);
         let got = rec.lock().unwrap();
         assert_eq!(got[0].method, "GET");
@@ -612,7 +612,7 @@ mod tests {
 
     #[test]
     fn usage_object_subdomains_is_json_error() {
-        let (url, _) = spawn_ok(200, r#"{"host":"x","period":"2026-08","sent":0,"limit":1000,"remaining":1000,"plan":"free","subdomains":{"n":1}}"#);
+        let (url, _) = spawn_ok(200, r#"{"host":"x","period":"2026-08","sent":0,"limit":10000,"remaining":10000,"plan":"free","subdomains":{"n":1}}"#);
         let err = PlaneClient::new(url, "k2c_test").usage().unwrap_err();
         assert!(
             matches!(err, PlaneError::Json(_) | PlaneError::Io(_)),

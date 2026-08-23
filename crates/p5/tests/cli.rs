@@ -167,7 +167,7 @@ fn usage_shows_plane_report() {
     add_home(home.path(), "alice::acme.postal.bot", true);
     let url = spawn_usage(
         200,
-        r#"{"host":"acme.postal.bot","period":"2026-08","sent":0,"limit":1000,"remaining":1000,"plan":"unlimited","subdomains":1,"subdomain_included":1,"current":{"host":"acme.postal.bot","cap":null},"hosts":[]}"#,
+        r#"{"host":"acme.postal.bot","period":"2026-08","sent":0,"limit":10000,"remaining":10000,"plan":"unlimited","subdomains":1,"subdomain_included":1,"current":{"host":"acme.postal.bot","cap":null},"hosts":[]}"#,
     );
     let text = stdout_home_env(
         home.path(),
@@ -179,7 +179,7 @@ fn usage_shows_plane_report() {
     );
     assert!(text.contains("acme.postal.bot"));
     assert!(text.contains("unlimited"));
-    assert!(text.contains("1000"));
+    assert!(text.contains("10000"));
     assert!(text.contains("remaining"));
     assert!(text.contains("subdomains"));
     assert!(text.contains("postal.bot/account"));
@@ -211,7 +211,7 @@ fn msg_quota_reads_plane_not_local_ledger() {
     add_home(home.path(), "scout::acme.postal.bot", true);
     let url = spawn_usage(
         200,
-        r#"{"host":"acme.postal.bot","period":"2026-08","sent":1000,"limit":1000,"remaining":0,"plan":"free","subdomains":1,"subdomain_included":1}"#,
+        r#"{"host":"acme.postal.bot","period":"2026-08","sent":10000,"limit":10000,"remaining":0,"plan":"free","subdomains":1,"subdomain_included":1}"#,
     );
     let out = run_home(
         home.path(),

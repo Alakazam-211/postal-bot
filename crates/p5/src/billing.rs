@@ -1,4 +1,4 @@
-//! Account meter: 1 postal.bot subdomain + 1000 messages/UTC month free.
+//! Account meter: 1 postal.bot subdomain + 10000 messages/UTC month free.
 //! Extra labels $2.99/mo. No free k2.dev subdomain (websockets cost more).
 //!
 //! Same K2X account. Paid checkout is the K2 Connect Stripe portal
@@ -14,7 +14,7 @@
 use p5_core::{Homes, Mailbox, PostalAddr};
 use p5_plane::{PlaneClient, PlaneConfig, PostalFile, UsageReport};
 
-pub const FREE_LIMIT: u32 = 1000;
+pub const FREE_LIMIT: u32 = 10000;
 pub const FREE_SUBDOMAINS: u32 = 1;
 pub const PRICE_USD: &str = "2.99";
 pub const PAY_URL: &str = "https://www.postal.bot/account";
@@ -280,7 +280,7 @@ mod tests {
                 "host":"rosson.postal.bot",
                 "period":"2026-08",
                 "sent":{sent},
-                "limit":1000,
+                "limit":10000,
                 "remaining":{remaining},
                 "plan":"{plan}",
                 "subdomains":1,
@@ -437,7 +437,7 @@ mod tests {
         let text = usage_text(&report);
         assert!(text.contains("rosson.postal.bot"));
         assert!(text.contains("988"));
-        assert!(text.contains("1000"));
+        assert!(text.contains("10000"));
         assert!(text.contains("1 / 1 free"));
         assert!(text.contains("postal.bot/account"));
         assert!(!text.contains("9.99"));

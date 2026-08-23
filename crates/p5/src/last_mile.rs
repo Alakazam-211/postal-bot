@@ -82,7 +82,7 @@ impl Knock {
     pub const V: u32 = 1;
 
     pub fn from_inbox(home: &HomeRow, inbound: &Inbound) -> Self {
-        let title = title_line(&inbound.body);
+        let title = guard_inject(&title_line(&inbound.body));
         Self {
             v: Self::V,
             op: "knock".into(),
@@ -92,12 +92,40 @@ impl Knock {
             handle: inbound.to.handle().to_string(),
             typ: inbound.typ.as_str().to_string(),
             text: pointer_text(&inbound.id, &title),
-            body: inbound.body.clone(),
+            // Live inject only. Inbox cover on disk stays the original body.
+            body: guard_inject(&inbound.body),
             title,
             wake: !inbound.no_wake,
             cwd: home.cwd.to_string_lossy().into_owned(),
             session_id: home.session_id.clone(),
         }
+    }
+}
+
+/// Live inject must not start a line with `/` (slash commands / raw terminal).
+/// Inbox covers keep the original body.
+pub fn guard_inject(body: &str) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(body.len() + 8);
+    for (i, raw) in body.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        out.push_str(&guard_inject_line(line));
+    }
+    out
+}
+
+fn guard_inject_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('/') {
+        let ws_len = line.len() - trimmed.len();
+        format!("{}[mail] {trimmed}", &line[..ws_len])
+    } else {
+        line.to_string()
     }
 }
 
@@ -228,7 +256,7 @@ fn knock_k2(client: &K2MsgClient, knock: &Knock) -> Result<(), LastMileError> {
         // Live inject is the mail body. k2 already stamps [from …].
         // Do not send "Open: p5 inbox read" — Postal is its own tray.
         text: if knock.body.trim().is_empty() {
-            knock.title.clone()
+            guard_inject(&knock.title)
         } else {
             knock.body.clone()
         },
@@ -652,6 +680,19 @@ mod tests {
         let clipped = title_line(&"x".repeat(90));
         assert!(clipped.ends_with('…'), "{clipped}");
         assert_eq!(clipped.chars().count(), 81);
+    }
+
+    #[test]
+    fn guard_inject_breaks_leading_slash_commands() {
+        assert_eq!(guard_inject("hello scout"), "hello scout");
+        assert_eq!(guard_inject("/exit"), "[mail] /exit");
+        assert_eq!(guard_inject("  /quit now"), "  [mail] /quit now");
+        assert_eq!(
+            guard_inject("hi\n/exit\nbye\n"),
+            "hi\n[mail] /exit\nbye\n"
+        );
+        assert!(!guard_inject("/clear").starts_with('/'));
+        assert!(!guard_inject("\n/exit").lines().any(|l| l.trim_start().starts_with('/')));
     }
 
     #[test]

@@ -137,7 +137,7 @@ pub struct HoldList {
 
 /// `GET /postal/usage` — messages this UTC month on one enrolled host.
 ///
-/// Free: 1 postal.bot subdomain, 1000 messages/UTC month. Extra labels $2.99/mo.
+/// Free: 1 postal.bot subdomain, 10000 messages/UTC month. Extra labels $2.99/mo.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct UsageReport {
     pub host: String,

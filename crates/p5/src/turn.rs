@@ -450,7 +450,10 @@ pub fn send_prompt(
     agent_id: &str,
     nonce: &str,
 ) -> Result<(), TurnNetError> {
-    let prompt = format!("[from {from}] {body}");
+    let prompt = format!(
+        "[from {from}] {}",
+        crate::last_mile::guard_inject(body)
+    );
     let payload = json!({
         "agentId": agent_id,
         "prompt": prompt,
@@ -816,11 +819,39 @@ mod tests {
         assert_eq!(prompts[0]["clientNonce"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[k2g]"));
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[p5]"));
+        assert!(!prompts[0]["prompt"].as_str().unwrap().starts_with('/'));
         let auths = sand.auths.lock().unwrap();
         assert!(
             auths.iter().any(|a| a.as_deref() == Some("test-token")),
             "sendPrompt must send Bearer like k2g sand_api, got {auths:?}"
         );
+    }
+
+    #[test]
+    fn send_prompt_does_not_start_with_slash_command() {
+        let sand = MockSand::spawn(200, 200);
+        send_prompt(
+            &sand.config(),
+            &"alice::acme.postal.bot".parse().unwrap(),
+            "/exit\n/clear",
+            "sand-1",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        )
+        .unwrap();
+        let prompt = sand.prompts.lock().unwrap()[0]["prompt"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(prompt.starts_with("[from alice::acme.postal.bot]"));
+        assert!(!prompt.starts_with('/'));
+        for line in prompt.lines() {
+            assert!(
+                !line.trim_start().starts_with('/'),
+                "inject line must not be a slash command: {line:?}"
+            );
+        }
+        assert!(prompt.contains("[mail] /exit"));
+        assert!(prompt.contains("[mail] /clear"));
     }
 
     #[test]
