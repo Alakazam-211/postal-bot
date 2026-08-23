@@ -26,11 +26,10 @@ pub struct PostalFile {
     pub billing: BillingFile,
 }
 
-/// Local paid-plan entitlement + meter start.
+/// Local paid-plan entitlement (redeem cache only).
 ///
-/// Plane `GET /postal/usage` is source of truth when it exists. This file
-/// holds a Stripe Checkout redeem and the local free-tier epoch so mail
-/// from before billing shipped does not eat the 100/month cap.
+/// The meter is `GET /postal/usage`. This file is not the quota — anyone
+/// can edit the box. Plane `plan` / `sent` / `remaining` win.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillingFile {
     /// `free` or `unlimited`.

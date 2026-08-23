@@ -143,7 +143,7 @@ impl PlaneClient {
         Ok(())
     }
 
-    /// `GET /postal/usage` for this Connect label. 404 → plane has not cut the meter.
+    /// `GET /postal/usage` for this Connect label. Parse miss is an error.
     pub fn usage(&self) -> Result<UsageReport, PlaneError> {
         self.send_json("GET", "/postal/usage", None::<&()>)
     }
@@ -578,5 +578,45 @@ mod tests {
             c.ack_hold("../x").unwrap_err(),
             PlaneError::BadHoldId
         ));
+    }
+
+    #[test]
+    fn usage_parses_k2x_report_with_hosts_array() {
+        let body = r#"{
+            "host":"rosson.postal.bot",
+            "period":"2026-08",
+            "sent":0,
+            "limit":1000,
+            "remaining":1000,
+            "plan":"unlimited",
+            "subdomains":1,
+            "subdomain_included":1,
+            "account":"https://www.postal.bot/account",
+            "current":{"host":"rosson.postal.bot","label":"rosson","plan":"unlimited","free":false,"cap":null,"unlimited":true},
+            "hosts":[{"host":"rosson.postal.bot","label":"rosson","plan":"unlimited","sent":0,"cap":null,"unlimited":true}]
+        }"#;
+        let (url, rec) = spawn_ok(200, body);
+        let c = PlaneClient::new(url, "k2c_test");
+        let report = c.usage().unwrap();
+        assert_eq!(report.host, "rosson.postal.bot");
+        assert_eq!(report.plan, "unlimited");
+        assert_eq!(report.sent, 0);
+        assert_eq!(report.limit, 1000);
+        assert_eq!(report.remaining, 1000);
+        assert_eq!(report.subdomains, 1);
+        let got = rec.lock().unwrap();
+        assert_eq!(got[0].method, "GET");
+        assert_eq!(got[0].path, "/postal/usage");
+        assert_eq!(got[0].auth, "Bearer k2c_test");
+    }
+
+    #[test]
+    fn usage_object_subdomains_is_json_error() {
+        let (url, _) = spawn_ok(200, r#"{"host":"x","period":"2026-08","sent":0,"limit":1000,"remaining":1000,"plan":"free","subdomains":{"n":1}}"#);
+        let err = PlaneClient::new(url, "k2c_test").usage().unwrap_err();
+        assert!(
+            matches!(err, PlaneError::Json(_) | PlaneError::Io(_)),
+            "object subdomains must fail parse, got {err}"
+        );
     }
 }

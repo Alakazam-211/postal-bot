@@ -12,6 +12,9 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 DIST="${ROOT}/web/releases/latest"
+SITE_DIST="${ROOT}/site/public/releases/latest"
+VER=$(awk -F '"' '/^version = / { print $2; exit }' "${ROOT}/crates/p5/Cargo.toml")
+[ -n "$VER" ] || { echo "pack-release: no version in crates/p5/Cargo.toml" >&2; exit 1; }
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 COPYFILE_DISABLE=1
@@ -97,6 +100,11 @@ chmod 644 "${ROOT}/web/install.sh"
 }
 cp "${ROOT}/scripts/grokbot-setup.sh" "${ROOT}/web/grokbot-setup.sh"
 chmod 644 "${ROOT}/web/grokbot-setup.sh"
+if [ -d "${ROOT}/site/public" ]; then
+    cp "${ROOT}/web/install.sh" "${ROOT}/site/public/install.sh"
+    cp "${ROOT}/web/grokbot-setup.sh" "${ROOT}/site/public/grokbot-setup.sh"
+    chmod 644 "${ROOT}/site/public/install.sh" "${ROOT}/site/public/grokbot-setup.sh"
+fi
 
 {
     ( CDPATH= cd -- "$DIST" && ls p5-src.tar.gz p5-*.tar.gz frpc-*.tar.gz 2>/dev/null | sort -u | while read -r f; do
@@ -104,5 +112,20 @@ chmod 644 "${ROOT}/web/grokbot-setup.sh"
     done )
 } > "${DIST}/SHA256SUMS"
 
-echo "pack-release: wrote ${DIST}" >&2
+# Next (postal-bot Vercel) serves site/public/releases/*. Also pin a
+# versioned tree so P5_VERSION=X.Y.Z does not depend on latest.
+sync_release_tree() {
+    _dest="$1"
+    mkdir -p "$_dest"
+    ( CDPATH= cd -- "$DIST" && ls p5-src.tar.gz p5-*.tar.gz frpc-*.tar.gz SHA256SUMS 2>/dev/null | while read -r f; do
+        cp "$f" "${_dest}/${f}"
+    done )
+}
+if [ -d "${ROOT}/site/public" ]; then
+    sync_release_tree "$SITE_DIST"
+    sync_release_tree "${ROOT}/site/public/releases/${VER}"
+fi
+sync_release_tree "${ROOT}/web/releases/${VER}"
+
+echo "pack-release: wrote ${DIST} (p5 ${VER})" >&2
 cat "${DIST}/SHA256SUMS" >&2

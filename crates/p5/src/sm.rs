@@ -185,6 +185,8 @@ pub struct SmContext {
     pub live_base: Option<String>,
     /// Harness adapters after inbox fsync. Off in unit tests.
     pub last_mile: LastMile,
+    /// `GET /postal/usage` send gate. Off in `new()` (unit tests); `load()` uses [`crate::billing::enforce`].
+    pub billing: bool,
 }
 
 impl SmContext {
@@ -208,6 +210,7 @@ impl SmContext {
             live: LiveClient::new(),
             live_base: None,
             last_mile: LastMile::default(),
+            billing: false,
         }
     }
 
@@ -221,6 +224,7 @@ impl SmContext {
         ctx.our_typ = load_our_typ(root);
         ctx.turn = TurnConfig::from_env();
         ctx.hold = env_flag("P5_HOLD");
+        ctx.billing = crate::billing::enforce();
         if let Ok(cfg) = p5_plane::PlaneConfig::load(root) {
             ctx.plane_url = cfg.base_url;
             ctx.plane_token = cfg.token;
@@ -350,8 +354,18 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         Err(err) => return Err(err),
     };
 
-    if crate::billing::enforce() {
-        match crate::billing::collect(ctx.mailbox.root()) {
+    if ctx.billing {
+        match crate::billing::collect_with(
+            &ctx.mailbox,
+            &ctx.homes,
+            p5_plane::PlaneConfig {
+                base_url: ctx.plane_url.clone(),
+                token: ctx.plane_token.clone(),
+                addr: None,
+                typ: None,
+                file: p5_plane::PostalFile::default(),
+            },
+        ) {
             Ok(report) if !crate::billing::allow_send(&report) => {
                 return Ok(MsgResponse::fail(
                     None,
@@ -361,7 +375,16 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
                     crate::billing::quota_hint(&report),
                 ));
             }
-            _ => {}
+            Ok(_) => {}
+            Err(err) => {
+                return Ok(MsgResponse::fail(
+                    None,
+                    Some(&to),
+                    None,
+                    REASON_ERROR,
+                    err.to_string(),
+                ));
+            }
         }
     }
 
@@ -1072,6 +1095,61 @@ mod tests {
         assert_eq!(inbox.body, "hello scout");
         assert_eq!(inbox.from, addr("scout::acme.postal.bot"));
         assert!(session_map_not_on_disk(tmp.path()));
+    }
+
+    fn spawn_usage(status: u16, body: &str) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_string();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = ready_tx.send(());
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        ready_rx.recv().unwrap();
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn send_gates_from_plane_not_local_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = spawn_usage(
+            200,
+            r#"{"host":"acme.postal.bot","period":"2026-08","sent":100,"limit":100,"remaining":0,"plan":"free","subdomains":1,"subdomain_included":1}"#,
+        );
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        ctx.billing = true;
+        ctx.plane_url = url;
+        ctx.plane_token = Some("k2c_test".into());
+        let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "hello scout")).unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.reason.as_deref(), Some(REASON_QUOTA));
+    }
+
+    #[test]
+    fn send_fails_closed_on_usage_parse_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = spawn_usage(200, r#"{"subdomains":{"n":1}}"#);
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        ctx.billing = true;
+        ctx.plane_url = url;
+        ctx.plane_token = Some("k2c_test".into());
+        let resp = send_msg(&ctx, &msg("scout::acme.postal.bot", "hello scout")).unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.reason.as_deref(), Some(REASON_ERROR));
+        assert_ne!(resp.reason.as_deref(), Some(REASON_QUOTA));
+        assert!(resp.hint.as_deref().is_some_and(|h| !h.is_empty()));
     }
 
     #[test]

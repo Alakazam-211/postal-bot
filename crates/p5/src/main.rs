@@ -123,7 +123,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Account plan (1 free postal.bot subdomain, 100 msgs, $2.99/mo extra)
+    /// Account plan (1 free postal.bot subdomain, 1000 msgs, $2.99/mo extra)
     Billing {
         #[command(subcommand)]
         action: Option<BillingAction>,
@@ -287,7 +287,7 @@ enum HelpTopic {
     /// Last-mile plugins (`homes.harness`): k2, grok, exec
     #[value(name = "last-mile", alias = "plugins", alias = "grok")]
     LastMile,
-    /// 1 free postal.bot subdomain (100 msgs/mo); extra labels $2.99/mo
+    /// 1 free postal.bot subdomain (1000 msgs/UTC month); extra labels $2.99/mo
     Usage,
 }
 
@@ -401,7 +401,8 @@ portal as K2 Connect. See {pay}
 
 A paid label bought on k2.dev or postal.bot hits the same Stripe
 checkout ({checkout}) and syncs. Create the account at {signup}.
-Mail from before billing first ran on this box does not count.
+The meter is GET /postal/usage on the control plane, not a local
+sent ledger or config.toml.
 
 Over the free message cap, p5 msg exits 3 (quota). P5_BILLING=0
 shows usage but does not block send.
@@ -826,7 +827,7 @@ mod tests {
     #[test]
     fn help_usage_names_free_tier_and_price() {
         let text = help_usage_text();
-        assert!(text.contains("100"));
+        assert!(text.contains("1000"));
         assert!(text.contains("2.99"));
         assert!(text.contains("p5 usage"));
         assert!(text.contains("postal.bot/account"));

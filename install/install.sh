@@ -15,11 +15,25 @@
 set -eu
 ( set -o pipefail ) 2>/dev/null && set -o pipefail || true
 
+die() { echo "install.sh: $*" >&2; exit 1; }
+
 PRODUCT="Postal"
 COMMAND="p5"
 SITE="postal.bot"
-WWW_DIST="https://www.postal.bot/releases/latest"
-APEX_DIST="https://postal.bot/releases/latest"
+# P5_VERSION=0.1.8 or v0.1.8 pins a cut; default is latest.
+P5_REL="${P5_VERSION:-latest}"
+P5_REL=$(printf '%s' "$P5_REL" | tr -d '[:space:]')
+[ -n "$P5_REL" ] || P5_REL=latest
+case "$P5_REL" in
+    latest) ;;
+    v[0-9]*) P5_REL="${P5_REL#v}" ;;
+esac
+case "$P5_REL" in
+    latest|[0-9]*.[0-9]*.[0-9]*) ;;
+    *) die "bad P5_VERSION=${P5_REL} (want latest or X.Y.Z)" ;;
+esac
+WWW_DIST="https://www.postal.bot/releases/${P5_REL}"
+APEX_DIST="https://postal.bot/releases/${P5_REL}"
 KEY_URL="https://www.postal.bot/keys/minisign.pub"
 
 FROM_CARGO="${P5_LOCAL:-0}"
@@ -39,6 +53,7 @@ Env:
   P5_LOCAL=1      same as --from-cargo
   P5_PREFIX       same as --prefix
   P5_REPO         checkout root (default: detect from this script or cwd)
+  P5_VERSION      pin a cut (0.1.8 or v0.1.8). Default: latest
 
 Default prefix: /usr/local if writable, else ~/.local.
 
@@ -46,10 +61,9 @@ Remote pipe (no GitHub):
   1. ${WWW_DIST}/p5-<os>-<arch>.tar.gz + SHA256SUMS
   2. else ${WWW_DIST}/p5-src.tar.gz and cargo build --release --locked
   Apex ${APEX_DIST} is a fallback if www is unreachable.
+  Pin: P5_VERSION=0.1.8 curl -fsSL https://www.postal.bot/install.sh | sh
 EOF
 }
-
-die() { echo "install.sh: $*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
     case "$1" in

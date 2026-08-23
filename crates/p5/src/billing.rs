@@ -1,20 +1,20 @@
-//! Account meter: 1 postal.bot subdomain + 100 messages/month free.
+//! Account meter: 1 postal.bot subdomain + 1000 messages/UTC month free.
 //! Extra labels $2.99/mo. No free k2.dev subdomain (websockets cost more).
 //!
 //! Same K2X account. Paid checkout is the K2 Connect Stripe portal
 //! (k2.dev/pricing) from either site. Stripe lives on K2 Web.
 //!
-//! Message meter key is the enrolled host. Plane `GET /postal/usage`
-//! when `P5_USAGE_PLANE=1`; else the local sent ledger. Mail from
-//! before billing first ran does not count. `P5_BILLING=0` shows
+//! The meter is the plane, not the device. `p5 usage` and the send
+//! gate always `GET /postal/usage`. Display and gate from that
+//! `limit` / `remaining` / `plan`. A local sent ledger / `config.toml`
+//! is not the quota — anyone can edit the box. Parse miss is an error,
+//! not a fallback to a hardcoded free ledger. `P5_BILLING=0` shows
 //! usage but does not block send.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use p5_core::{Homes, Mailbox, PostalAddr};
-use p5_plane::{BillingFile, PlaneClient, PlaneConfig, PostalFile, UsageReport};
+use p5_plane::{PlaneClient, PlaneConfig, PostalFile, UsageReport};
 
-pub const FREE_LIMIT: u32 = 100;
+pub const FREE_LIMIT: u32 = 1000;
 pub const FREE_SUBDOMAINS: u32 = 1;
 pub const PRICE_USD: &str = "2.99";
 pub const PAY_URL: &str = "https://www.postal.bot/account";
@@ -97,15 +97,20 @@ pub fn checkout_url() -> String {
 }
 
 pub fn quota_hint(report: &UsageReport) -> String {
+    let included = if report.limit == 0 {
+        FREE_LIMIT
+    } else {
+        report.limit
+    };
     format!(
-        "1 postal.bot subdomain is free ({FREE_LIMIT} messages/month). Remaining {} on {}. Extra labels ${PRICE_USD}/mo on the same Stripe portal as k2.dev: {}",
+        "1 postal.bot subdomain is free ({included} messages/month). Remaining {} on {}. Extra labels ${PRICE_USD}/mo on the same Stripe portal as k2.dev: {}",
         report.remaining,
         report.host,
         checkout_url()
     )
 }
 
-/// Load (and persist meter epoch if needed), prefer plane, else local sent.
+/// Always `GET /postal/usage`. Never a local sent ledger.
 pub fn collect(root: &std::path::Path) -> Result<UsageReport, p5_plane::PlaneError> {
     let mb = Mailbox::new(root);
     let homes = Homes::load(root).unwrap_or_else(|_| Homes::new());
@@ -116,57 +121,20 @@ pub fn collect(root: &std::path::Path) -> Result<UsageReport, p5_plane::PlaneErr
 pub fn collect_with(
     mailbox: &Mailbox,
     homes: &Homes,
-    mut cfg: PlaneConfig,
+    cfg: PlaneConfig,
 ) -> Result<UsageReport, p5_plane::PlaneError> {
-    let now = now_unix();
-    let host = enrolled_host(homes, cfg.addr.as_deref());
-    ensure_meter_from(&mut cfg.file, mailbox, now)?;
-    cfg.file.save(mailbox.root())?;
-
-    if plane_usage_enabled() {
-        if let Some(token) = cfg.token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            match PlaneClient::new(&cfg.base_url, token).usage() {
-                Ok(mut plane) => {
-                    if cfg.file.billing.is_unlimited_now(now) {
-                        plane.plan = PLAN_UNLIMITED.into();
-                        plane.until_unix = cfg.file.billing.until_unix.or(plane.until_unix);
-                    }
-                    if plane.host.trim().is_empty() {
-                        plane.host = host;
-                    }
-                    if plane.subdomain_included == 0 {
-                        plane.subdomain_included = FREE_SUBDOMAINS;
-                    }
-                    if plane.subdomains == 0 {
-                        plane.subdomains = subdomain_count(homes);
-                    }
-                    return Ok(plane);
-                }
-                Err(p5_plane::PlaneError::NotFound)
-                | Err(p5_plane::PlaneError::Unauthorized)
-                | Err(p5_plane::PlaneError::Http { status: 404, .. })
-                | Err(_) => {}
-            }
-        }
+    let _ = mailbox;
+    let token = cfg.require_token()?;
+    let mut plane = PlaneClient::new(&cfg.base_url, token).usage()?;
+    if plane.host.trim().is_empty() {
+        let host = enrolled_host(homes, cfg.addr.as_deref());
+        plane.host = if host.is_empty() {
+            "(no enrolled host)".into()
+        } else {
+            host
+        };
     }
-    Ok(local_report(
-        mailbox,
-        homes,
-        &cfg.file.billing,
-        &host,
-        now,
-    ))
-}
-
-/// Plane `GET /postal/usage` is not cut yet. Opt in with `P5_USAGE_PLANE=1`.
-fn plane_usage_enabled() -> bool {
-    match std::env::var("P5_USAGE_PLANE") {
-        Ok(v) => {
-            let v = v.trim();
-            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
-        }
-        Err(_) => false,
-    }
+    Ok(plane)
 }
 
 pub fn allow_send(report: &UsageReport) -> bool {
@@ -192,24 +160,6 @@ pub fn redeem(root: &std::path::Path, session_id: &str) -> Result<UsageReport, p
     collect(root)
 }
 
-fn ensure_meter_from(
-    file: &mut PostalFile,
-    mailbox: &Mailbox,
-    now: u64,
-) -> Result<(), p5_plane::PlaneError> {
-    if file.billing.meter_from_unix.is_some() {
-        return Ok(());
-    }
-    let sent_len = mailbox.list_sent().map(|v| v.len()).unwrap_or(0);
-    let epoch = if sent_len == 0 {
-        start_of_utc_month_unix(now)
-    } else {
-        now
-    };
-    file.billing.meter_from_unix = Some(epoch);
-    Ok(())
-}
-
 fn enrolled_host(homes: &Homes, cfg_addr: Option<&str>) -> String {
     if let Some((_, row)) = homes.iter().next() {
         let h = row.enrolled_host.trim();
@@ -223,79 +173,6 @@ fn enrolled_host(homes: &Homes, cfg_addr: Option<&str>) -> String {
         }
     }
     String::new()
-}
-
-fn local_report(
-    mailbox: &Mailbox,
-    homes: &Homes,
-    billing: &BillingFile,
-    host: &str,
-    now: u64,
-) -> UsageReport {
-    let (year, month) = utc_ym(now);
-    let period = format!("{year:04}-{month:02}");
-    let month_start = start_of_utc_month_unix(now);
-    let meter_from = billing.meter_from_unix.unwrap_or(month_start);
-    let start = meter_from.max(month_start);
-    let sent_items = mailbox.list_sent().unwrap_or_default();
-    let sent = sent_items
-        .iter()
-        .filter(|item| {
-            let created = system_unix(item.created);
-            if created < start {
-                return false;
-            }
-            if host.is_empty() {
-                return true;
-            }
-            item.from.host() == host
-        })
-        .count() as u32;
-    let unlimited = billing.is_unlimited_now(now);
-    let plan = if unlimited {
-        PLAN_UNLIMITED
-    } else {
-        PLAN_FREE
-    };
-    let remaining = if unlimited {
-        FREE_LIMIT
-    } else {
-        FREE_LIMIT.saturating_sub(sent)
-    };
-    UsageReport {
-        host: if host.is_empty() {
-            "(no enrolled host)".into()
-        } else {
-            host.to_string()
-        },
-        period,
-        sent,
-        limit: FREE_LIMIT,
-        remaining,
-        plan: plan.into(),
-        until_unix: billing.until_unix,
-        subdomains: subdomain_count(homes),
-        subdomain_included: FREE_SUBDOMAINS,
-    }
-}
-
-fn subdomain_count(homes: &Homes) -> u32 {
-    let mut seen = std::collections::BTreeSet::new();
-    for (_, row) in homes.iter() {
-        let h = row.enrolled_host.trim();
-        if !h.is_empty() {
-            seen.insert(h.to_ascii_lowercase());
-        }
-    }
-    seen.len() as u32
-}
-
-fn now_unix() -> u64 {
-    system_unix(SystemTime::now())
-}
-
-fn system_unix(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 fn rfc3339_utc(unix: u64) -> String {
@@ -353,10 +230,66 @@ fn days_from_civil(y: i32, m: u8, d: u8) -> i64 {
 mod tests {
     use super::*;
     use p5_core::{DeliveryMode, HomeRow, PeerType, SendRequest, ToolFlags};
+    use p5_plane::{BillingFile, PlaneError};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     fn addr(s: &str) -> PostalAddr {
         s.parse().unwrap()
+    }
+
+    fn spawn_usage(status: u16, body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_string();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = ready_tx.send(());
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        ready_rx.recv().unwrap();
+        format!("http://{addr}")
+    }
+
+    fn plane_cfg(url: &str) -> PlaneConfig {
+        PlaneConfig {
+            base_url: url.into(),
+            token: Some("k2c_test".into()),
+            addr: None,
+            typ: None,
+            file: PostalFile::default(),
+        }
+    }
+
+    fn k2x_report(plan: &str, sent: u32, remaining: u32) -> String {
+        format!(
+            r#"{{
+                "host":"rosson.postal.bot",
+                "period":"2026-08",
+                "sent":{sent},
+                "limit":1000,
+                "remaining":{remaining},
+                "plan":"{plan}",
+                "subdomains":1,
+                "subdomain_included":1,
+                "account":"https://www.postal.bot/account",
+                "current":{{"host":"rosson.postal.bot","label":"rosson","plan":"{plan}","free":false,"k2_reserved":true,"k2_active":true,"sent":{sent},"cap":null,"unlimited":true}},
+                "hosts":[{{"host":"rosson.postal.bot","label":"rosson","plan":"{plan}","sent":{sent},"cap":null,"unlimited":true}}]
+            }}"#
+        )
     }
 
     #[test]
@@ -367,21 +300,22 @@ mod tests {
     }
 
     #[test]
-    fn empty_mailbox_has_full_free_remaining() {
+    fn no_token_is_error_not_local_free() {
         let tmp = tempfile::tempdir().unwrap();
         let mb = Mailbox::new(tmp.path());
-        let homes = Homes::new();
-        let cfg = PlaneConfig::load(tmp.path()).unwrap();
-        let report = collect_with(&mb, &homes, cfg).unwrap();
-        assert_eq!(report.sent, 0);
-        assert_eq!(report.remaining, FREE_LIMIT);
-        assert_eq!(report.plan, PLAN_FREE);
-        assert_eq!(report.limit, FREE_LIMIT);
-        assert!(allow_send(&report));
+        let cfg = PlaneConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            token: None,
+            addr: None,
+            typ: None,
+            file: PostalFile::default(),
+        };
+        let err = collect_with(&mb, &Homes::new(), cfg).unwrap_err();
+        assert!(matches!(err, PlaneError::NoToken));
     }
 
     #[test]
-    fn sent_this_month_decrements_remaining() {
+    fn plane_unlimited_is_the_meter_not_local_sent() {
         let tmp = tempfile::tempdir().unwrap();
         let mb = Mailbox::new(tmp.path());
         let mut homes = Homes::new();
@@ -402,50 +336,58 @@ mod tests {
                 enrolled_host: "acme.postal.bot".into(),
             })
             .unwrap();
-        mb.enqueue(SendRequest {
-            to: addr("scout::acme.postal.bot"),
-            from: addr("alice::acme.postal.bot"),
-            body: "one".into(),
-            mode: DeliveryMode::Live,
-            typ: PeerType::Session,
-            files: Vec::new(),
-            files_allowed: false,
-            title: None,
-        })
-        .unwrap();
-        let cfg = PlaneConfig::load(tmp.path()).unwrap();
-        let report = collect_with(&mb, &homes, cfg).unwrap();
-        assert_eq!(report.host, "acme.postal.bot");
-        assert_eq!(report.sent, 1);
-        assert_eq!(report.remaining, FREE_LIMIT - 1);
-        assert_eq!(report.subdomains, 1);
-        assert_eq!(report.subdomain_included, FREE_SUBDOMAINS);
+        for _ in 0..3 {
+            mb.enqueue(SendRequest {
+                to: addr("scout::acme.postal.bot"),
+                from: addr("alice::acme.postal.bot"),
+                body: "one".into(),
+                mode: DeliveryMode::Live,
+                typ: PeerType::Session,
+                files: Vec::new(),
+                files_allowed: false,
+                title: None,
+            })
+            .unwrap();
+        }
+        let url = spawn_usage(200, &k2x_report("unlimited", 0, FREE_LIMIT));
+        let report = collect_with(&mb, &homes, plane_cfg(&url)).unwrap();
+        assert_eq!(report.host, "rosson.postal.bot");
+        assert_eq!(report.plan, PLAN_UNLIMITED);
+        assert_eq!(report.sent, 0);
+        assert_eq!(report.limit, FREE_LIMIT);
+        assert_eq!(report.remaining, FREE_LIMIT);
         assert!(allow_send(&report));
     }
 
     #[test]
-    fn existing_sent_does_not_eat_cap_on_first_touch() {
+    fn local_config_unlimited_does_not_override_plane_free() {
         let tmp = tempfile::tempdir().unwrap();
         let mb = Mailbox::new(tmp.path());
-        mb.enqueue(SendRequest {
-            to: addr("scout::acme.postal.bot"),
-            from: addr("alice::acme.postal.bot"),
-            body: "old".into(),
-            mode: DeliveryMode::Live,
-            typ: PeerType::Session,
-            files: Vec::new(),
-            files_allowed: false,
-            title: None,
-        })
-        .unwrap();
         let mut file = PostalFile::default();
-        file.billing.meter_from_unix = Some(now_unix() + 60);
+        file.billing = BillingFile {
+            plan: Some(PLAN_UNLIMITED.into()),
+            ..Default::default()
+        };
         file.save(tmp.path()).unwrap();
-        let homes = Homes::new();
-        let cfg = PlaneConfig::load(tmp.path()).unwrap();
-        let report = collect_with(&mb, &homes, cfg).unwrap();
-        assert_eq!(report.sent, 0);
-        assert_eq!(report.remaining, FREE_LIMIT);
+        let url = spawn_usage(200, &k2x_report("free", 100, 0));
+        let mut cfg = plane_cfg(&url);
+        cfg.file = PostalFile::load(tmp.path()).unwrap();
+        let report = collect_with(&mb, &Homes::new(), cfg).unwrap();
+        assert_eq!(report.plan, PLAN_FREE);
+        assert_eq!(report.remaining, 0);
+        assert!(!allow_send(&report));
+    }
+
+    #[test]
+    fn parse_miss_is_error_not_local_100() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mb = Mailbox::new(tmp.path());
+        let url = spawn_usage(200, r#"{"subdomains":{"n":1},"ok":true}"#);
+        let err = collect_with(&mb, &Homes::new(), plane_cfg(&url)).unwrap_err();
+        assert!(
+            !matches!(err, PlaneError::NoToken | PlaneError::Unauthorized),
+            "parse miss must not become a local ledger; got {err}"
+        );
     }
 
     #[test]
@@ -468,19 +410,14 @@ mod tests {
 
     #[test]
     fn unlimited_plan_allows_when_remaining_would_be_zero() {
-        let mut billing = BillingFile::default();
-        billing.plan = Some(PLAN_UNLIMITED.into());
-        assert!(billing.is_unlimited_now(now_unix()));
-        let tmp = tempfile::tempdir().unwrap();
-        let mb = Mailbox::new(tmp.path());
-        let file = PostalFile {
-            billing,
+        let report = UsageReport {
+            host: "rosson.postal.bot".into(),
+            remaining: 0,
+            plan: PLAN_UNLIMITED.into(),
+            sent: 0,
+            limit: FREE_LIMIT,
             ..Default::default()
         };
-        file.save(tmp.path()).unwrap();
-        let cfg = PlaneConfig::load(tmp.path()).unwrap();
-        let report = collect_with(&mb, &Homes::new(), cfg).unwrap();
-        assert_eq!(report.plan, PLAN_UNLIMITED);
         assert!(allow_send(&report));
     }
 
@@ -491,7 +428,7 @@ mod tests {
             period: "2026-08".into(),
             sent: 12,
             limit: FREE_LIMIT,
-            remaining: 88,
+            remaining: 988,
             plan: PLAN_FREE.into(),
             subdomains: 1,
             subdomain_included: FREE_SUBDOMAINS,
@@ -499,8 +436,8 @@ mod tests {
         };
         let text = usage_text(&report);
         assert!(text.contains("rosson.postal.bot"));
-        assert!(text.contains("88"));
-        assert!(text.contains("100"));
+        assert!(text.contains("988"));
+        assert!(text.contains("1000"));
         assert!(text.contains("1 / 1 free"));
         assert!(text.contains("postal.bot/account"));
         assert!(!text.contains("9.99"));

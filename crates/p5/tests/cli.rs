@@ -24,7 +24,11 @@ fn stdout(args: &[&str]) -> String {
 }
 
 fn stdout_home(home: &Path, args: &[&str]) -> String {
-    let out = run_home(home, args, &[]);
+    stdout_home_env(home, args, &[])
+}
+
+fn stdout_home_env(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> String {
+    let out = run_home(home, args, extra_env);
     assert!(
         out.status.success(),
         "p5 {args:?} failed: {}",
@@ -36,6 +40,7 @@ fn stdout_home(home: &Path, args: &[&str]) -> String {
 fn run_home(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
     let mut cmd = p5();
     cmd.env("P5_HOME", home)
+        .env("P5_BILLING", "0")
         .env_remove("P5_HOLD")
         .env_remove("P5_PLANE_URL")
         .env_remove("P5_LIVE_URL")
@@ -131,16 +136,103 @@ fn long_help_flag_works() {
     assert!(text.contains("inbox"));
 }
 
+fn spawn_usage(status: u16, body: &str) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = body.to_string();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = ready_tx.send(());
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    ready_rx.recv().unwrap();
+    format!("http://{addr}")
+}
+
 #[test]
-fn usage_shows_free_remaining() {
+fn usage_shows_plane_report() {
     let home = tmp_home();
     add_home(home.path(), "alice::acme.postal.bot", true);
-    let text = stdout_home(home.path(), &["usage"]);
+    let url = spawn_usage(
+        200,
+        r#"{"host":"acme.postal.bot","period":"2026-08","sent":0,"limit":1000,"remaining":1000,"plan":"unlimited","subdomains":1,"subdomain_included":1,"current":{"host":"acme.postal.bot","cap":null},"hosts":[]}"#,
+    );
+    let text = stdout_home_env(
+        home.path(),
+        &["usage"],
+        &[
+            ("P5_PLANE_URL", url.as_str()),
+            ("P5_CONNECT_TOKEN", "k2c_test"),
+        ],
+    );
     assert!(text.contains("acme.postal.bot"));
-    assert!(text.contains("100"));
+    assert!(text.contains("unlimited"));
+    assert!(text.contains("1000"));
     assert!(text.contains("remaining"));
     assert!(text.contains("subdomains"));
     assert!(text.contains("postal.bot/account"));
+}
+
+#[test]
+fn usage_parse_miss_does_not_print_local_100() {
+    let home = tmp_home();
+    add_home(home.path(), "alice::acme.postal.bot", true);
+    let url = spawn_usage(200, r#"{"subdomains":{"n":1}}"#);
+    let out = run_home(
+        home.path(),
+        &["usage"],
+        &[
+            ("P5_PLANE_URL", url.as_str()),
+            ("P5_CONNECT_TOKEN", "k2c_test"),
+        ],
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("json") || err.contains("plane"));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("remaining:  100"));
+}
+
+#[test]
+fn msg_quota_reads_plane_not_local_ledger() {
+    let home = tmp_home();
+    add_home(home.path(), "scout::acme.postal.bot", true);
+    let url = spawn_usage(
+        200,
+        r#"{"host":"acme.postal.bot","period":"2026-08","sent":1000,"limit":1000,"remaining":0,"plan":"free","subdomains":1,"subdomain_included":1}"#,
+    );
+    let out = run_home(
+        home.path(),
+        &["msg", "scout::acme.postal.bot", "hello scout"],
+        &[
+            ("P5_BILLING", "1"),
+            ("P5_PLANE_URL", url.as_str()),
+            ("P5_CONNECT_TOKEN", "k2c_test"),
+        ],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr={err} stdout={text}"
+    );
+    assert!(
+        err.contains("quota") || text.contains("quota"),
+        "stderr={err} stdout={text}"
+    );
 }
 
 #[test]
