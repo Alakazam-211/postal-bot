@@ -370,8 +370,8 @@ mod tests {
         assert_eq!(form_encode("a b"), "a%20b");
         assert_eq!(form_encode("x=y&z"), "x%3Dy%26z");
         assert_eq!(
-            form_encode("/Users/z3thon/DevProjects/Kessel"),
-            "%2FUsers%2Fz3thon%2FDevProjects%2FKessel"
+            form_encode("/home/user/project"),
+            "%2Fhome%2Fuser%2Fproject"
         );
     }
 

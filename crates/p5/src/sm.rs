@@ -1940,7 +1940,7 @@ mod tests {
         let mut homes = Homes::new();
         homes
             .insert(grok_home(
-                "kessel::grokbot.postal.bot",
+                "scout::grokbot.postal.bot",
                 Some("b12f6386-2691-47b3-9981-d778096e6cdf"),
                 "/workspace",
             ))
@@ -1966,7 +1966,7 @@ mod tests {
             Some(&cwd),
         )
         .unwrap();
-        assert_eq!(from.to_string(), "kessel::grokbot.postal.bot");
+        assert_eq!(from.to_string(), "scout::grokbot.postal.bot");
         let from = resolve_from_homes_at(
             &homes,
             &["0e5f5de8-7619-4ba4-9753-32c5470b2346".into()],
@@ -2000,19 +2000,19 @@ mod tests {
         let mut row = home("postal-bot::acme.postal.bot", true, true);
         row.harness = Some("k2".into());
         row.session_id = None;
-        row.cwd = PathBuf::from("/home/box/ai/Kessel");
+        row.cwd = PathBuf::from("/home/user/postal-bot");
         homes.insert(row).unwrap();
         homes
             .insert(grok_home(
-                "kessel::acme.postal.bot",
-                Some("sess-kessel"),
+                "scout::acme.postal.bot",
+                Some("sess-scout"),
                 "/workspace",
             ))
             .unwrap();
         let from = resolve_from_homes_at(
             &homes,
             &[],
-            Some(Path::new("/home/box/ai/Kessel")),
+            Some(Path::new("/home/user/postal-bot")),
         )
         .unwrap();
         assert_eq!(from.to_string(), "postal-bot::acme.postal.bot");
