@@ -802,10 +802,10 @@ mod tests {
                 text: "hi".into(),
                 body: "hi".into(),
                 wake: true,
-                cwd: "/Users/z/claude".into(),
+                cwd: "/home/user/claude".into(),
                 session_id: Some("sess-claude".into()),
             }),
-            "/Users/z/claude"
+            "/home/user/claude"
         );
         assert_eq!(
             k2_workspace(&Knock {
@@ -820,10 +820,10 @@ mod tests {
                 text: "hi".into(),
                 body: "hi".into(),
                 wake: true,
-                cwd: "/Users/z/kessel".into(),
+                cwd: "/home/user/postal-bot".into(),
                 session_id: Some("sess-p5".into()),
             }),
-            "/Users/z/kessel"
+            "/home/user/postal-bot"
         );
     }
 
@@ -845,7 +845,7 @@ mod tests {
             .insert(HomeRow {
                 address: addr("grok::acme.postal.bot"),
                 session_id: None,
-                cwd: PathBuf::from("/home/box/ai/Grokbot"),
+                cwd: PathBuf::from("/home/user/grokbot"),
                 inbox_root: None,
                 launch: Vec::new(),
                 harness: Some("grok".into()),

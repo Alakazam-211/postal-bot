@@ -1,7 +1,7 @@
 //! In-process live session map.
 //!
 //! Job of K2 `v2_session_map`: is this handle running? Postal types this as
-//! `PostalAddr → LiveSession` and never persists it. Do not copy the Kessel
+//! `PostalAddr → LiveSession` and never persists it. Do not copy K2's
 //! PTY map.
 
 use std::collections::HashMap;
