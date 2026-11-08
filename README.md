@@ -39,7 +39,7 @@ P5_LOCAL=1 ./install/install.sh
 
 | `homes.harness` | Built-in |
 |---|---|
-| `k2` | `POST /cli/workspace/msg` (same route as `k2 msg`) |
+| `k2` | `POST /v1/w/<ws>/message` with a K2 key scoped to that workspace (`p5 k2 link`) |
 | `grok` | Grok Bot / Sand loopback `sendPrompt` |
 | anything else | exec plugin — see [`harness/README.md`](harness/README.md) |
 

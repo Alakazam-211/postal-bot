@@ -14,7 +14,7 @@ This is the OSS contribution surface. PRs: see [`CONTRIBUTING.md`](../CONTRIBUTI
 
 | `homes.harness` | Knock |
 |---|---|
-| `k2` | `POST /cli/workspace/msg` (same route as `k2 msg`). Injects the **full** `body`. |
+| `k2` | `POST /v1/w/<ws>/message` with a K2 key scoped to that workspace (`p5 k2 link <ws> --key-stdin`). K2 applies its remote-instruction opt-in and busy check. Text is `[postal <from>]` plus the body with every line quoted `> `. |
 | `grok` | loopback Grok Bot gateway (type `turn`): Bearer from `~/sand-data/gateway.json`, `POST /api/listAgents` for UUID, then `POST /api/sendPrompt` with **`body`**. |
 | `iterm2` (exec) | macOS iTerm2 + Claude Code. Live: k2-style paste+CR (`write text`, no focus). Dormant: `open -g`, no `activate`, restore frontmost, `claude --resume <id>`. `harness/iterm2`. |
 | `terminal` (exec) | macOS Terminal.app. Live: `do script in tab` (no `activate`). Dormant: `open -g` + `do script`, restore frontmost. `harness/terminal`. |
