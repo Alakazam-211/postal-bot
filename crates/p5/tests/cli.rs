@@ -589,6 +589,24 @@ fn agent_run_refuses_unspecified_bind() {
 }
 
 #[test]
+fn agent_run_refuses_dev_secret_with_tunnel() {
+    let home = tmp_home();
+    let out = run_home(
+        home.path(),
+        &["agent", "run"],
+        &[
+            ("P5_DEV_SECRET", "s3cret"),
+            ("P5_TUNNEL", "1"),
+            ("P5_HTTP_BIND", "127.0.0.1:0"),
+        ],
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("P5_DEV_SECRET"), "{err}");
+    assert!(err.contains("tunnel"), "{err}");
+}
+
+#[test]
 fn inbox_respond_is_msg_to_from() {
     let home = tmp_home();
     add_home(home.path(), "alice::acme.postal.bot", true);

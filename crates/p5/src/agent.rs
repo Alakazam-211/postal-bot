@@ -26,6 +26,9 @@ pub enum AgentError {
     Tls(String),
     Service(ServiceError),
     AlreadyRunning(String),
+    /// `P5_DEV_SECRET` is set while the tunnel is on. The secret skips the
+    /// pairing proof, so it must never face the public listener.
+    DevSecretWithTunnel,
 }
 
 impl fmt::Display for AgentError {
@@ -35,6 +38,10 @@ impl fmt::Display for AgentError {
             Self::Io(err) => write!(f, "{err}"),
             Self::Http(msg) | Self::Tls(msg) | Self::AlreadyRunning(msg) => write!(f, "{msg}"),
             Self::Service(err) => write!(f, "{err}"),
+            Self::DevSecretWithTunnel => f.write_str(
+                "P5_DEV_SECRET skips pairing checks; refusing to start the tunnel with it set. \
+                 Unset it, or run loopback-only (P5_TUNNEL=0).",
+            ),
         }
     }
 }
@@ -59,11 +66,19 @@ impl From<ServiceError> for AgentError {
     }
 }
 
+/// Loopback test secret. Dev builds only: a release `p5` ignores it, so a
+/// stray env var can't open the pairing bypass on a real box.
 pub fn env_secret() -> Option<String> {
-    std::env::var("P5_DEV_SECRET")
+    let secret = std::env::var("P5_DEV_SECRET")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty())?;
+    if cfg!(debug_assertions) {
+        Some(secret)
+    } else {
+        eprintln!("postal: P5_DEV_SECRET is ignored in release builds");
+        None
+    }
 }
 
 /// Login already wrote the Connect token and hostname. Don't make the user export env.
@@ -106,6 +121,10 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
     }
     let bind = bind_from_env()?;
     arm_tunnel_env(root);
+    let secret = env_secret();
+    if secret.is_some() && p5_tunnel::enabled() {
+        return Err(AgentError::DevSecretWithTunnel);
+    }
     // Issue the leaf before bind so loopback can speak TLS for passthrough.
     let mut tunnel = p5_tunnel::start_from_env(root, bind.port());
     let ssl = load_ssl(root).map_err(AgentError::Tls)?;
@@ -116,7 +135,7 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
             return Err(AgentError::Http(err));
         }
     };
-    let state = Arc::new(AgentState::new(root, local, env_secret()));
+    let state = Arc::new(AgentState::new(root, local, secret));
     let listener = match control::bind_uds(&sock_path(root)) {
         Ok(l) => l,
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
