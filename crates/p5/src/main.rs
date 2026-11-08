@@ -520,8 +520,18 @@ fn format_sent_line(item: &MailItem) -> String {
     )
 }
 
+/// Held mail (HoldSeal-v1) has no sender signature yet: the plane asserts
+/// `from`. Say so until wire v2 signs it inside the seal.
+const HELD_UNVERIFIED: &str = "held: sender not verified";
+
 fn format_inbox_line(item: &MailItem) -> String {
-    format!("{}  {}  {}", item.id, item.from, item.to)
+    let mut line = format!("{}  {}  {}", item.id, item.from, item.to);
+    if item.hold_id.is_some() {
+        line.push_str("  (");
+        line.push_str(HELD_UNVERIFIED);
+        line.push(')');
+    }
+    line
 }
 
 fn print_lines(lines: impl IntoIterator<Item = String>) {
@@ -552,6 +562,13 @@ fn inbox_cmd(action: Option<InboxAction>) -> Result<(), MailboxError> {
             Ok(())
         }
         Some(InboxAction::Read { id }) => {
+            let held = mb
+                .list_inbox(None, None)?
+                .iter()
+                .any(|i| i.id == id && i.hold_id.is_some());
+            if held {
+                println!("[{HELD_UNVERIFIED}]");
+            }
             // The cover on disk is the original; the terminal gets no escapes.
             print!("{}", last_mile::strip_controls(&mb.read_inbox_cover(&id)?));
             Ok(())

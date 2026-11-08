@@ -298,6 +298,11 @@ fn recv_pulls_decrypts_and_acks() {
     let mb = Mailbox::new(home.path());
     assert_eq!(mb.read_inbox(id).unwrap().body, "held body");
     assert!(plane.state.lock().unwrap().items.is_empty());
+    // HoldSeal-v1 carries no sender signature: say so wherever it's shown.
+    let list = run_home(home.path(), &plane.url, &["inbox"], &[]);
+    assert!(String::from_utf8_lossy(&list.stdout).contains("sender not verified"));
+    let read = run_home(home.path(), &plane.url, &["inbox", "read", id], &[]);
+    assert!(String::from_utf8_lossy(&read.stdout).starts_with("[held: sender not verified]"));
 }
 
 #[test]
