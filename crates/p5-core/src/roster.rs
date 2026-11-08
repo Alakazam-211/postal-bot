@@ -72,7 +72,8 @@ pub struct RosterEntry {
     #[serde(default)]
     pub tools: ToolFlags,
     /// A different key the plane reported for an already-pinned friend. Never
-    /// used to verify. The owner promotes it (`p5 pair set-key --pending`).
+    /// used to verify. Only an owner-accepted pairing for this friend
+    /// (`p5 pair accept`) moves the pin to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_key: Option<PendingKey>,
 }
@@ -93,6 +94,8 @@ pub enum KeyMerge {
     Kept,
     /// Plane sent a different key. Pinned key stays; the new one waits.
     Changed,
+    /// Same different key as last time. Still waiting; nothing new to say.
+    StillPending,
 }
 
 /// Address → peer record. JSON object on disk.
@@ -165,11 +168,19 @@ impl Roster {
                 }
             }
             Some(pem) if !same_key(&entry.public_key_pem, &pem) => {
-                entry.pending_key = Some(PendingKey {
-                    fingerprint: fp.unwrap_or_default(),
-                    public_key_pem: pem,
-                });
-                outcome = KeyMerge::Changed;
+                let already = entry
+                    .pending_key
+                    .as_ref()
+                    .is_some_and(|k| same_key(&k.public_key_pem, &pem));
+                if already {
+                    outcome = KeyMerge::StillPending;
+                } else {
+                    entry.pending_key = Some(PendingKey {
+                        fingerprint: fp.unwrap_or_default(),
+                        public_key_pem: pem,
+                    });
+                    outcome = KeyMerge::Changed;
+                }
             }
             Some(_) => entry.pending_key = None,
             None => {
@@ -185,7 +196,7 @@ impl Roster {
         outcome
     }
 
-    /// Owner-chosen key (`p5 pair set-key`). Replaces the pin, clears pending.
+    /// Move the pin (owner-accepted pairing, or filling a blank). Clears pending.
     pub fn replace_key(&mut self, addr: &PostalAddr, fingerprint: String, public_key_pem: String) -> bool {
         let Some(entry) = self.entries.get_mut(addr) else {
             return false;

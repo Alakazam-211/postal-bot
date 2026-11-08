@@ -130,11 +130,14 @@ pub fn run_me(typ: Option<String>, print_pem: bool) -> Result<(), PairError> {
     Ok(())
 }
 
-/// Fill a peer's SPKI on the local roster. Plane `GET /postal/pairs` omits keys.
+/// Fill a peer's blank SPKI on the local roster (the plane's pair list can
+/// omit keys). Owner-gated: whoever sets it decides who can sign as them.
 ///
-/// Filling a blank key is open. Replacing a pinned key, or promoting the
-/// plane's `--pending` one, is owner-gated: it changes who can send as them.
-pub fn run_set_key(addr: String, pem_path: Option<String>, pending: bool) -> Result<(), PairError> {
+/// Never replaces a pinned key. A friend's key changes only through an
+/// owner-accepted pairing (`p5 pair accept`), never through a one-line command
+/// a message could talk an agent into.
+pub fn run_set_key(addr: String, pem_path: Option<String>) -> Result<(), PairError> {
+    require_owner_pair()?;
     let ctx = PairCtx::load()?;
     let peer = parse_addr(&addr, ctx.default_host())?;
     let mut roster = Roster::load(&ctx.root)?;
@@ -142,15 +145,8 @@ pub fn run_set_key(addr: String, pem_path: Option<String>, pending: bool) -> Res
         .get(&peer)
         .cloned()
         .ok_or_else(|| PairError::NotFound(peer.to_string()))?;
-    if pending {
-        require_owner_pair()?;
-        let next = existing.pending_key.ok_or(PairError::NoPendingKey)?;
-        let fp = fingerprint_spki_pem(&next.public_key_pem)?;
-        roster.replace_key(&peer, fp.clone(), next.public_key_pem);
-        roster.save(&ctx.root)?;
-        println!("{peer}");
-        println!("fingerprint  {fp}");
-        return Ok(());
+    if !existing.public_key_pem.trim().is_empty() {
+        return Err(PairError::PinnedKey(peer.to_string()));
     }
     let pem_raw = match pem_path.as_deref() {
         None | Some("-") => {
@@ -171,9 +167,6 @@ pub fn run_set_key(addr: String, pem_path: Option<String>, pending: bool) -> Res
         return Err(PairError::MissingPem);
     }
     let fp = fingerprint_spki_pem(&pem)?;
-    if !existing.public_key_pem.trim().is_empty() {
-        require_owner_pair()?;
-    }
     roster.replace_key(&peer, fp.clone(), pem);
     roster.save(&ctx.root)?;
     println!("{peer}");
@@ -232,6 +225,7 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
     };
     client.accept(&id, &sas)?;
     refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
+    adopt_pending_key(&ctx, view)?;
     println!("ok");
     if let Some(view) = client.list_pairs(false).ok().as_ref().and_then(|l| l.find(&id)) {
         if let Some(peer) = peer_of(&ctx, view) {
@@ -247,6 +241,23 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
             }
         }
     }
+    Ok(())
+}
+
+/// An owner-accepted pairing (SAS checked against the plane's key for that
+/// peer) is the one thing that moves a pin to the key that was waiting.
+fn adopt_pending_key(ctx: &PairCtx, view: Option<&PairView>) -> Result<(), PairError> {
+    let Some(peer) = view.and_then(|v| peer_of(ctx, v)) else {
+        return Ok(());
+    };
+    let mut roster = Roster::load(&ctx.root)?;
+    let Some(next) = roster.get(&peer).and_then(|e| e.pending_key.clone()) else {
+        return Ok(());
+    };
+    let fp = fingerprint_spki_pem(&next.public_key_pem)?;
+    roster.replace_key(&peer, fp, next.public_key_pem);
+    roster.save(&ctx.root)?;
+    eprintln!("postal: {peer}'s key changed with this pairing");
     Ok(())
 }
 
@@ -418,11 +429,12 @@ fn apply_view(roster: &mut Roster, selves: &BTreeSet<PostalAddr>, view: &PairVie
         (None, None)
     };
     if roster.merge_peer(peer.clone(), typ, fp, pem, trust, view.id.clone()) == KeyMerge::Changed {
-        // Never swap a pinned key on our own. Mail signed with the new key is
-        // refused until the owner looks at it.
+        // Never swap a pinned key on our own, and never print a command for
+        // it: a message could talk an agent into running that. Once per change.
         eprintln!(
-            "postal: {peer} has a new key on the plane. Kept the old one. \
-             If {peer}'s owner confirms the change: P5_OWNER_PAIR=1 p5 pair set-key {peer} --pending"
+            "postal: {peer} has a new key on the plane. Kept the old one; mail signed \
+             with the new key is refused. A person should confirm the change with \
+             {peer}'s owner and pair again."
         );
     }
 }
@@ -579,7 +591,7 @@ pub enum PairError {
     BadTyp(TypeParseError),
     NoIdentity,
     NoSas,
-    NoPendingKey,
+    PinnedKey(String),
     MissingPem,
     NotFound(String),
     Gated,
@@ -609,7 +621,10 @@ impl fmt::Display for PairError {
                 "no handle for this session; run p5 from a claimed cwd (From is not a flag)",
             ),
             Self::NoSas => f.write_str("no SAS; pass --sas after p5 pair show"),
-            Self::NoPendingKey => f.write_str("no pending key for this friend"),
+            Self::PinnedKey(peer) => write!(
+                f,
+                "{peer} already has a pinned key. A friend's key only changes by pairing again"
+            ),
             Self::MissingPem => f.write_str("empty public key PEM"),
             Self::NotFound(id) => write!(f, "pair not found: {id}"),
             Self::Gated => write!(f, "{REASON_GATED}"),

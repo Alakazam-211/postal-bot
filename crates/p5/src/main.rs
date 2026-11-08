@@ -222,16 +222,13 @@ enum PairAction {
         /// Pair id
         id: String,
     },
-    /// Store a peer's public SPKI on the local roster (plane list omits keys)
+    /// Fill a friend's missing public key (owner-gated; never replaces a pinned key)
     SetKey {
         /// Peer `handle::sub.postal.bot`
         addr: String,
         /// PEM file (`-` = stdin)
         #[arg(long = "pem-file")]
         pem_file: Option<String>,
-        /// Promote the new key the plane reported (owner-gated)
-        #[arg(long, conflicts_with = "pem_file")]
-        pending: bool,
     },
 }
 
@@ -768,8 +765,8 @@ fn main() {
             action: PairAction::Revoke { id },
         } => finish_pair(run_revoke(id)),
         Commands::Pair {
-            action: PairAction::SetKey { addr, pem_file, pending },
-        } => finish_pair(run_set_key(addr, pem_file, pending)),
+            action: PairAction::SetKey { addr, pem_file },
+        } => finish_pair(run_set_key(addr, pem_file)),
         Commands::Me { typ, pem } => finish_pair(run_me(typ, pem)),
         Commands::Recv => match hold::run_recv() {
             Ok(report) => println!("pulled {}", report.pulled),
