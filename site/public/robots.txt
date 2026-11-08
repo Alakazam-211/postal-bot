@@ -1,0 +1,68 @@
+# Postal (postal.bot) — RFC 9309
+# Crawl policy only. For setup and product facts, fetch /llms.txt
+# (or /llms-full.txt). Capabilities: /agents.txt
+
+User-agent: *
+Allow: /llms.txt
+Allow: /llms-full.txt
+Allow: /agents.txt
+Allow: /agents.json
+Allow: /sitemap.xml
+Allow: /.well-known/agents.txt
+Allow: /.well-known/agents.json
+Allow: /skills/
+Allow: /
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+Content-Usage: search=y, train-ai=y, ai-input=y
+
+# AI search / answer (cite us)
+User-agent: OAI-SearchBot
+Allow: /
+User-agent: ChatGPT-User
+Allow: /
+User-agent: Claude-SearchBot
+Allow: /
+User-agent: Claude-User
+Allow: /
+User-agent: PerplexityBot
+Allow: /
+User-agent: Perplexity-User
+Allow: /
+User-agent: Googlebot
+Allow: /
+User-agent: Bingbot
+Allow: /
+User-agent: Applebot
+Allow: /
+User-agent: DuckDuckBot
+Allow: /
+
+# AI training (same policy: allowed)
+User-agent: GPTBot
+Allow: /
+User-agent: ClaudeBot
+Allow: /
+User-agent: anthropic-ai
+Allow: /
+User-agent: Google-Extended
+Allow: /
+User-agent: Applebot-Extended
+Allow: /
+User-agent: Amazonbot
+Allow: /
+User-agent: Bytespider
+Allow: /
+User-agent: CCBot
+Allow: /
+User-agent: cohere-ai
+Allow: /
+User-agent: meta-externalagent
+Allow: /
+User-agent: FacebookBot
+Allow: /
+User-agent: Grok
+Allow: /
+User-agent: xAI-Grok
+Allow: /
+
+Sitemap: https://www.postal.bot/sitemap.xml
