@@ -18,6 +18,7 @@ fn p5() -> Command {
 
 fn isolate_pair_env(cmd: &mut Command) {
     cmd.env_remove("P5_OWNER_PAIR")
+        .env_remove("P5_DEV_SECRET")
         .env_remove("P5_TYP")
         .env_remove("P5_CONNECT_TOKEN")
         .env_remove("P5_PLANE_URL");
@@ -722,27 +723,89 @@ fn plane_key_change_waits_for_owner() {
     let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
     assert_eq!(row.public_key_pem, pinned.public_key_pem());
 
-    // A new pairing with scout, accepted by the owner, moves the pin.
+    // A new pairing with scout moves the pin only with a typed SAS that
+    // matches the key in that pairing.
+    let ours = KeyPair::load_or_create(home.path()).unwrap();
+    let real_sas = sas_code(&ours.fingerprint(), &swapped.fingerprint());
     mock.set_inbox(vec![view(
         "pair-k2",
         "scout::acme.postal.bot",
         "alice::acme.postal.bot",
         "pending",
-        "111111",
+        &real_sas,
         PeerType::Session,
         &swapped.public_key_pem(),
     )]);
+    let owner = [("P5_OWNER_PAIR", "1")];
+    let out = run_home(home.path(), &mock.url, &["pair", "accept", "pair-k2"], &owner);
+    assert!(!out.status.success(), "no typed SAS must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--sas"));
+    let wrong = if real_sas == "000000" { "111111" } else { "000000" };
+    let out = run_home(home.path(), &mock.url, &["pair", "accept", "pair-k2", "--sas", wrong], &owner);
+    assert!(!out.status.success(), "wrong SAS must refuse");
+    let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
+    assert_eq!(row.public_key_pem, pinned.public_key_pem(), "pin unchanged after refusals");
+    assert!(
+        !mock.requests().iter().any(|r| r.path.ends_with("/accept")),
+        "refused accepts must not reach the plane"
+    );
     let out = run_home(
         home.path(),
         &mock.url,
-        &["pair", "accept", "pair-k2", "--sas", "111111"],
-        &[("P5_OWNER_PAIR", "1")],
+        &["pair", "accept", "pair-k2", "--sas", &real_sas],
+        &owner,
     );
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
     assert_eq!(row.public_key_pem, swapped.public_key_pem());
     assert_eq!(row.fingerprint, swapped.fingerprint());
     assert!(row.pending_key.is_none());
+}
+
+#[test]
+fn accept_without_key_in_view_does_not_adopt_stale_pending() {
+    let home = tmp_home();
+    let mock = MockPlane::start();
+    let pinned = KeyPair::generate();
+    let stale = KeyPair::generate();
+    let scout: PostalAddr = "scout::acme.postal.bot".parse().unwrap();
+    let mut roster = Roster::new();
+    roster.insert(
+        scout.clone(),
+        RosterEntry {
+            typ: PeerType::Session,
+            fingerprint: pinned.fingerprint(),
+            public_key_pem: pinned.public_key_pem(),
+            trust: Trust::Trusted,
+            pair_id: "pair-a".into(),
+            sand_uuid: None,
+            tools: ToolFlags::default(),
+            pending_key: Some(p5_core::PendingKey {
+                fingerprint: stale.fingerprint(),
+                public_key_pem: stale.public_key_pem(),
+            }),
+        },
+    );
+    roster.save(home.path()).unwrap();
+    // The plane's view of the new pairing carries no key.
+    mock.set_inbox(vec![view_opt(
+        "pair-n",
+        "scout::acme.postal.bot",
+        "alice::acme.postal.bot",
+        "pending",
+        Some("123456"),
+        Some(PeerType::Session),
+        None,
+    )]);
+    let out = run_home(
+        home.path(),
+        &mock.url,
+        &["pair", "accept", "pair-n", "--sas", "123456"],
+        &[("P5_OWNER_PAIR", "1")],
+    );
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
+    assert_eq!(row.public_key_pem, pinned.public_key_pem(), "SAS never covered the stale key");
 }
 
 #[test]

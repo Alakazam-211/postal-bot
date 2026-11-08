@@ -219,13 +219,26 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
     let client = ctx.client()?;
     let lists = client.list_pairs(false)?;
     let view = lists.find(&id);
-    let sas = match sas.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    let typed = sas.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    // Accepting a pairing that would move a friend's pinned key needs a SAS a
+    // person typed, checked here against the key in *this* pairing. p5 never
+    // fills it in on its own for a pin move.
+    let moves_pin = view.and_then(|v| pin_move(&ctx, v));
+    if let Some(next) = moves_pin.as_ref() {
+        let typed = typed.as_deref().ok_or(PairError::SasRequired)?;
+        if typed != next.sas {
+            return Err(PairError::SasMismatch);
+        }
+    }
+    let sas = match typed {
         Some(s) => s,
         None => resolve_sas(&ctx, view)?,
     };
     client.accept(&id, &sas)?;
     refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
-    adopt_pending_key(&ctx, view)?;
+    if let Some(next) = moves_pin {
+        adopt_key(&ctx, next)?;
+    }
     println!("ok");
     if let Some(view) = client.list_pairs(false).ok().as_ref().and_then(|l| l.find(&id)) {
         if let Some(peer) = peer_of(&ctx, view) {
@@ -244,20 +257,48 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
     Ok(())
 }
 
-/// An owner-accepted pairing (SAS checked against the plane's key for that
-/// peer) is the one thing that moves a pin to the key that was waiting.
-fn adopt_pending_key(ctx: &PairCtx, view: Option<&PairView>) -> Result<(), PairError> {
-    let Some(peer) = view.and_then(|v| peer_of(ctx, v)) else {
-        return Ok(());
-    };
+/// The key this pairing carries for an already-pinned friend, when it differs
+/// from the pin, plus the SAS computed over that exact key.
+struct PinMove {
+    peer: PostalAddr,
+    fingerprint: String,
+    public_key_pem: String,
+    sas: String,
+}
+
+fn pin_move(ctx: &PairCtx, view: &PairView) -> Option<PinMove> {
+    let peer = peer_of(ctx, view)?;
+    if parse_view_addr(&view.from).as_ref() != Some(&peer) {
+        return None;
+    }
+    let pem = view.public_pem()?.to_string();
+    let roster = Roster::load(&ctx.root).ok()?;
+    let pinned = roster.get(&peer)?.public_key_pem.clone();
+    if pinned.trim().is_empty() || pem_eq(&pinned, &pem) {
+        return None;
+    }
+    let fp = fingerprint_spki_pem(&pem).ok()?;
+    let ours = ctx.keys().ok()?.fingerprint();
+    Some(PinMove {
+        peer,
+        sas: sas_code(&ours, &fp),
+        fingerprint: fp,
+        public_key_pem: pem,
+    })
+}
+
+fn pem_eq(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().collect::<String>();
+    norm(a) == norm(b)
+}
+
+/// Move the pin to the key the person just confirmed with a typed SAS: the
+/// key in this pairing, never just whatever was waiting.
+fn adopt_key(ctx: &PairCtx, next: PinMove) -> Result<(), PairError> {
     let mut roster = Roster::load(&ctx.root)?;
-    let Some(next) = roster.get(&peer).and_then(|e| e.pending_key.clone()) else {
-        return Ok(());
-    };
-    let fp = fingerprint_spki_pem(&next.public_key_pem)?;
-    roster.replace_key(&peer, fp, next.public_key_pem);
+    roster.replace_key(&next.peer, next.fingerprint, next.public_key_pem);
     roster.save(&ctx.root)?;
-    eprintln!("postal: {peer}'s key changed with this pairing");
+    eprintln!("postal: {}'s key changed with this pairing", next.peer);
     Ok(())
 }
 
@@ -504,6 +545,14 @@ fn parse_view_addr(raw: &str) -> Option<PostalAddr> {
     PostalAddr::parse(raw, None).ok()
 }
 
+/// Plane strings go to a terminal: no controls, one line.
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 fn print_add(id: &str, from: &PostalAddr, to: &PostalAddr, sas: Option<&str>, created: bool) {
     let state = if created { "created" } else { "exists" };
     match sas {
@@ -520,17 +569,30 @@ fn print_section(name: &str, views: &[PairView]) {
 fn print_views(views: &[PairView]) {
     for v in views {
         match v.sas.as_deref().filter(|s| !s.is_empty()) {
-            Some(sas) => println!("{}  {}  {}  {}  sas={sas}", v.id, v.status, v.from, v.to),
-            None => println!("{}  {}  {}  {}", v.id, v.status, v.from, v.to),
+            Some(sas) => println!(
+                "{}  {}  {}  {}  sas={}",
+                clean(&v.id),
+                clean(&v.status),
+                clean(&v.from),
+                clean(&v.to),
+                clean(sas)
+            ),
+            None => println!(
+                "{}  {}  {}  {}",
+                clean(&v.id),
+                clean(&v.status),
+                clean(&v.from),
+                clean(&v.to)
+            ),
         }
     }
 }
 
 fn print_show(ctx: &PairCtx, view: &PairView) -> Result<(), PairError> {
-    println!("id      {}", view.id);
-    println!("from    {}", view.from);
-    println!("to      {}", view.to);
-    println!("status  {}", view.status);
+    println!("id      {}", clean(&view.id));
+    println!("from    {}", clean(&view.from));
+    println!("to      {}", clean(&view.to));
+    println!("status  {}", clean(&view.status));
     if let Some(typ) = view.from_typ {
         println!("typ     {typ}");
     }
@@ -544,11 +606,11 @@ fn print_show(ctx: &PairCtx, view: &PairView) -> Result<(), PairError> {
             println!("sas     {}", local.sas);
             if let Some(p) = plane {
                 if p != local.sas {
-                    println!("sas_plane {p}");
+                    println!("sas_plane {}", clean(p));
                 }
             }
         }
-        (None, Some(p)) => println!("sas     {p}"),
+        (None, Some(p)) => println!("sas     {}", clean(p)),
         (None, None) => println!("sas     —"),
     }
     if let Some(peer) = peer_of(ctx, view) {
@@ -592,6 +654,8 @@ pub enum PairError {
     NoIdentity,
     NoSas,
     PinnedKey(String),
+    SasRequired,
+    SasMismatch,
     MissingPem,
     NotFound(String),
     Gated,
@@ -621,6 +685,13 @@ impl fmt::Display for PairError {
                 "no handle for this session; run p5 from a claimed cwd (From is not a flag)",
             ),
             Self::NoSas => f.write_str("no SAS; pass --sas after p5 pair show"),
+            Self::SasRequired => f.write_str(
+                "this pairing changes a friend's key: compare the 6 digits with their owner \
+                 (p5 pair show <id>) and pass them with --sas",
+            ),
+            Self::SasMismatch => f.write_str(
+                "SAS does not match the key in this pairing; nothing accepted",
+            ),
             Self::PinnedKey(peer) => write!(
                 f,
                 "{peer} already has a pinned key. A friend's key only changes by pairing again"
