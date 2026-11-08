@@ -41,6 +41,8 @@ fn run_home(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::proc
     let mut cmd = p5();
     cmd.env("P5_HOME", home)
         .env("P5_BILLING", "0")
+        .env_remove("P5_DEV_SECRET")
+        .env_remove("P5_OWNER_PAIR")
         .env_remove("P5_HOLD")
         .env_remove("P5_PLANE_URL")
         .env_remove("P5_LIVE_URL")
@@ -588,6 +590,8 @@ fn agent_run_refuses_unspecified_bind() {
     );
 }
 
+// Release builds ignore the secret, so the agent would start and run.
+#[cfg(debug_assertions)]
 #[test]
 fn agent_run_refuses_dev_secret_with_tunnel() {
     let home = tmp_home();
