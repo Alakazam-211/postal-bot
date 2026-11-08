@@ -552,7 +552,8 @@ fn inbox_cmd(action: Option<InboxAction>) -> Result<(), MailboxError> {
             Ok(())
         }
         Some(InboxAction::Read { id }) => {
-            print!("{}", mb.read_inbox_cover(&id)?);
+            // The cover on disk is the original; the terminal gets no escapes.
+            print!("{}", last_mile::strip_controls(&mb.read_inbox_cover(&id)?));
             Ok(())
         }
         Some(InboxAction::Respond { .. }) => {
@@ -818,7 +819,7 @@ const EXIT_USAGE_K2: i32 = 2;
 
 fn run_k2(action: K2Action) -> Result<(), String> {
     let root = default_root();
-    let mut links = k2::load_links(&root);
+    let mut links = k2::try_load_links(&root)?;
     match action {
         K2Action::Link { workspace, path, .. } => {
             let workspace = workspace.trim().to_string();

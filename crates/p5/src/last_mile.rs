@@ -72,6 +72,10 @@ pub struct Knock {
     pub title: String,
     pub text: String,
     pub body: String,
+    /// Ready-to-type text: `[postal <from>]` then every body line quoted
+    /// `> `, controls and invisible characters stripped. Plugins that type
+    /// into an agent use this, not `body` (v1 additive).
+    pub inject: String,
     pub wake: bool,
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +98,7 @@ impl Knock {
             text: pointer_text(&inbound.id, &title),
             // Live inject only. Inbox cover on disk stays the original body.
             body: guard_inject(&inbound.body),
+            inject: quote_for_inject(&inbound.from.to_string(), &guard_inject(&inbound.body)),
             title,
             wake: !inbound.no_wake,
             cwd: home.cwd.to_string_lossy().into_owned(),
@@ -130,19 +135,37 @@ fn guard_inject_line(line: &str) -> String {
     }
 }
 
-/// Drop every C0 control and DEL except `\n` and `\t`, C1 controls, and the
-/// Unicode line/paragraph separators, before any plugin sees the text. `\r\n`
-/// becomes `\n`. A peer's body must not move a cursor, clear a screen, send
-/// a key, or start a line some other way.
+/// Drop every C0 control and DEL except `\n` and `\t`, C1 controls, the
+/// Unicode line/paragraph separators, and invisible format characters (bidi
+/// overrides and isolates, zero-width marks, tag characters, BOM) before any
+/// plugin sees the text. `\r\n` becomes `\n`. A peer's body must not move a
+/// cursor, clear a screen, send a key, start a line some other way, or hide
+/// text from the person watching.
 pub fn strip_controls(body: &str) -> String {
     body.replace("\r\n", "\n")
         .chars()
         .filter(|&c| match c {
             '\n' | '\t' => true,
-            '\u{2028}' | '\u{2029}' => false,
-            c => !c.is_control(),
+            c if c.is_control() => false,
+            c => !is_invisible(c),
         })
         .collect()
+}
+
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'                    // soft hyphen
+        | '\u{061C}'                  // Arabic letter mark
+        | '\u{180E}'                  // Mongolian vowel separator
+        | '\u{200B}'..='\u{200F}'     // zero-width space/joiners, LRM, RLM
+        | '\u{2028}' | '\u{2029}'     // line / paragraph separator
+        | '\u{202A}'..='\u{202E}'     // bidi embeddings and overrides
+        | '\u{2060}'..='\u{2064}'     // word joiner, invisible operators
+        | '\u{2066}'..='\u{2069}'     // bidi isolates
+        | '\u{FEFF}'                  // BOM / zero-width no-break space
+        | '\u{FFF9}'..='\u{FFFB}'     // interlinear annotation
+        | '\u{E0000}'..='\u{E007F}'   // tag characters
+    )
 }
 
 /// Text for a host that shows it to an agent as-is (K2). One label line, then
@@ -720,6 +743,9 @@ mod tests {
         assert_eq!(strip_controls("a\x1b[2Jb\x07c\x7f\u{9b}d"), "a[2Jbcd");
         assert_eq!(strip_controls("one\r\ntwo\tx\u{2028}y"), "one\ntwo\txy");
         assert_eq!(guard_inject("\x1b]0;evil\x07hi"), "]0;evilhi");
+        // Bidi override, zero-width, tag characters: nothing hidden survives.
+        assert_eq!(strip_controls("a\u{202E}b\u{200B}c\u{2066}d\u{E0041}e\u{FEFF}"), "abcde");
+        assert_eq!(strip_controls("café 日本"), "café 日本");
     }
 
     #[test]
@@ -858,6 +884,7 @@ mod tests {
                 title: "hi".into(),
                 text: "hi".into(),
                 body: "hi".into(),
+                inject: "[postal a::acme.postal.bot]\n> hi".into(),
                 wake: true,
                 cwd: "/home/user/claude".into(),
                 session_id: Some("sess-claude".into()),
@@ -876,6 +903,7 @@ mod tests {
                 title: "hi".into(),
                 text: "hi".into(),
                 body: "hi".into(),
+                inject: "[postal a::acme.postal.bot]\n> hi".into(),
                 wake: true,
                 cwd: "/home/user/postal-bot".into(),
                 session_id: Some("sess-p5".into()),
@@ -931,7 +959,7 @@ mod tests {
         assert_eq!(prompts[0]["agentId"], uuid);
         assert_eq!(
             prompts[0]["prompt"],
-            "[from postal-bot::acme.postal.bot] hello grok"
+            "[postal postal-bot::acme.postal.bot]\n> hello grok"
         );
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[k2g]"));
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[p5]"));

@@ -60,14 +60,21 @@ stdin, `argv[1]=knock`:
   "typ": "session",
   "title": "first line, max 80 chars, ellipsis if clipped",
   "text": "[p5:<id>] title\nOpen: p5 inbox read <id>",
-  "body": "full cover body — inject this",
+  "body": "full cover body",
+  "inject": "[postal peer::sub.postal.bot]\n> first line\n> second line",
   "wake": true,
   "cwd": "/path",
   "session_id": "optional"
 }
 ```
 
-**Use `body`.** `title` is a preview of the first non-empty line (clipped
+**Type `inject`.** It is the text to put in front of an agent: one
+`[postal <from>]` label line, then every body line quoted with `> `, with
+control and invisible characters already stripped. A body can't fake a
+`[from <person>]` stamp or a prompt that way. Don't build your own stamp from
+`from` + `body`. If you flatten to one line, keep the `> ` markers.
+
+`title` is a preview of the first non-empty line (clipped
 at 80, then `…`). An agent that only reads `title` will miss instructions
 in the tail. The full mail is always in `~/.postal/inbox` (`p5 inbox read <id>`).
 

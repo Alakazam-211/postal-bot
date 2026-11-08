@@ -117,11 +117,19 @@ impl fmt::Debug for K2Link {
     }
 }
 
+/// Missing file is no links. A file that doesn't parse is an error, so a
+/// later `link` can't silently wipe the others.
+pub fn try_load_links(root: &Path) -> Result<Vec<K2Link>, String> {
+    match std::fs::read_to_string(root.join(LINKS_FILE)) {
+        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("{LINKS_FILE}: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("{LINKS_FILE}: {e}")),
+    }
+}
+
+/// Knock path: anything unreadable means no links (fail closed, tray only).
 pub fn load_links(root: &Path) -> Vec<K2Link> {
-    std::fs::read_to_string(root.join(LINKS_FILE))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    try_load_links(root).unwrap_or_default()
 }
 
 /// Write `k2-links.json` created 0600 (never world-readable, even briefly).
@@ -606,6 +614,9 @@ mod tests {
         let mode = std::fs::metadata(tmp.path().join(LINKS_FILE)).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(load_links(tmp.path()), vec![link()]);
+        std::fs::write(tmp.path().join(LINKS_FILE), "{not json").unwrap();
+        assert!(try_load_links(tmp.path()).is_err());
+        assert!(load_links(tmp.path()).is_empty());
         assert!(!format!("{:?}", link()).contains("k2ak_scoped"));
     }
 }

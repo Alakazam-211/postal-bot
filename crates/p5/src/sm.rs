@@ -1787,7 +1787,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert_eq!(
             prompts[0]["prompt"],
-            "[from alice::acme.postal.bot] hi"
+            "[postal alice::acme.postal.bot]\n> hi"
         );
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("k2g"));
         assert_eq!(prompts[0]["agentId"], "sand-1");

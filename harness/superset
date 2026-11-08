@@ -348,10 +348,16 @@ def cmd_knock(d: dict) -> None:
     require_current_cli(bin_path)
     ws, term, _claude = unpack((d.get("session_id") or "").strip())
     frm = (d.get("from") or "").strip()
-    body = (d.get("body") or d.get("title") or "").strip()
-    clean = "".join(c for c in body if c != "\x1b")
-    line = " ".join(clean.split())
-    payload = ("[from %s] %s" % (frm, line)) if frm else line
+    inject = (d.get("inject") or "").strip()
+    if inject:
+        # p5 stripped controls and quoted every body line ("[postal <from>] > ...").
+        payload = " ".join(inject.split())
+    else:
+        # Older p5 (no "inject"): best effort, one line.
+        body = (d.get("body") or d.get("title") or "").strip()
+        clean = "".join(c for c in body if c.isprintable() or c in "\n\t")
+        line = " ".join(clean.split())
+        payload = ("[from %s] %s" % (frm, line)) if frm else line
     if not ws:
         row = load_workspace(bin_path, cwd, "")
         ws = id_of(row or {}, "id", "workspaceId")
