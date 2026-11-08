@@ -167,7 +167,8 @@ pub struct SmContext {
     pub sessions: Arc<Mutex<SessionMap>>,
     /// `P5_LOCAL_RECV=1` — treat dest as this box even without a HomeRow.
     pub local_recv: bool,
-    /// Non-empty `P5_DEV_SECRET` — loopback inbound pairing skip.
+    /// This one request carried the loopback dev secret header (set by
+    /// `http.rs` per request, never from env). Skips the pairing check.
     pub dev_secret: bool,
     /// Advertised type for **this** agent (`P5_TYP` / config.toml). K22.
     pub our_typ: Option<PeerType>,
@@ -221,7 +222,6 @@ impl SmContext {
         ctx.homes = Homes::load(root)?;
         ctx.roster = Roster::load(root)?;
         ctx.local_recv = env_flag("P5_LOCAL_RECV");
-        ctx.dev_secret = env_is_set("P5_DEV_SECRET");
         ctx.our_typ = load_our_typ(root);
         ctx.turn = TurnConfig::from_env();
         ctx.hold = env_flag("P5_HOLD");
