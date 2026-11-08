@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use p5_core::{
-    default_root, Homes, PeerType, PostalAddr, Roster, StoreError, Trust, TypeParseError,
+    default_root, Homes, KeyMerge, PeerType, PostalAddr, Roster, StoreError, Trust, TypeParseError,
     EXIT_GATED,
 };
 use p5_crypto::{fingerprint_spki_pem, sas_code, KeyPair};
@@ -131,9 +131,27 @@ pub fn run_me(typ: Option<String>, print_pem: bool) -> Result<(), PairError> {
 }
 
 /// Fill a peer's SPKI on the local roster. Plane `GET /postal/pairs` omits keys.
-pub fn run_set_key(addr: String, pem_path: Option<String>) -> Result<(), PairError> {
+///
+/// Filling a blank key is open. Replacing a pinned key, or promoting the
+/// plane's `--pending` one, is owner-gated: it changes who can send as them.
+pub fn run_set_key(addr: String, pem_path: Option<String>, pending: bool) -> Result<(), PairError> {
     let ctx = PairCtx::load()?;
     let peer = parse_addr(&addr, ctx.default_host())?;
+    let mut roster = Roster::load(&ctx.root)?;
+    let existing = roster
+        .get(&peer)
+        .cloned()
+        .ok_or_else(|| PairError::NotFound(peer.to_string()))?;
+    if pending {
+        require_owner_pair()?;
+        let next = existing.pending_key.ok_or(PairError::NoPendingKey)?;
+        let fp = fingerprint_spki_pem(&next.public_key_pem)?;
+        roster.replace_key(&peer, fp.clone(), next.public_key_pem);
+        roster.save(&ctx.root)?;
+        println!("{peer}");
+        println!("fingerprint  {fp}");
+        return Ok(());
+    }
     let pem_raw = match pem_path.as_deref() {
         None | Some("-") => {
             use std::io::Read;
@@ -153,19 +171,10 @@ pub fn run_set_key(addr: String, pem_path: Option<String>) -> Result<(), PairErr
         return Err(PairError::MissingPem);
     }
     let fp = fingerprint_spki_pem(&pem)?;
-    let mut roster = Roster::load(&ctx.root)?;
-    let existing = roster
-        .get(&peer)
-        .cloned()
-        .ok_or_else(|| PairError::NotFound(peer.to_string()))?;
-    roster.merge_peer(
-        peer.clone(),
-        Some(existing.typ),
-        Some(fp.clone()),
-        Some(pem),
-        existing.trust,
-        existing.pair_id,
-    );
+    if !existing.public_key_pem.trim().is_empty() {
+        require_owner_pair()?;
+    }
+    roster.replace_key(&peer, fp.clone(), pem);
     roster.save(&ctx.root)?;
     println!("{peer}");
     println!("fingerprint  {fp}");
@@ -408,7 +417,14 @@ fn apply_view(roster: &mut Roster, selves: &BTreeSet<PostalAddr>, view: &PairVie
     } else {
         (None, None)
     };
-    let _ = roster.merge_peer(peer, typ, fp, pem, trust, view.id.clone());
+    if roster.merge_peer(peer.clone(), typ, fp, pem, trust, view.id.clone()) == KeyMerge::Changed {
+        // Never swap a pinned key on our own. Mail signed with the new key is
+        // refused until the owner looks at it.
+        eprintln!(
+            "postal: {peer} has a new key on the plane. Kept the old one. \
+             If {peer}'s owner confirms the change: P5_OWNER_PAIR=1 p5 pair set-key {peer} --pending"
+        );
+    }
 }
 
 fn resolve_sas(ctx: &PairCtx, view: Option<&PairView>) -> Result<String, PairError> {
@@ -563,6 +579,7 @@ pub enum PairError {
     BadTyp(TypeParseError),
     NoIdentity,
     NoSas,
+    NoPendingKey,
     MissingPem,
     NotFound(String),
     Gated,
@@ -592,6 +609,7 @@ impl fmt::Display for PairError {
                 "no handle for this session; run p5 from a claimed cwd (From is not a flag)",
             ),
             Self::NoSas => f.write_str("no SAS; pass --sas after p5 pair show"),
+            Self::NoPendingKey => f.write_str("no pending key for this friend"),
             Self::MissingPem => f.write_str("empty public key PEM"),
             Self::NotFound(id) => write!(f, "pair not found: {id}"),
             Self::Gated => write!(f, "{REASON_GATED}"),

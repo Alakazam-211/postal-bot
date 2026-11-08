@@ -71,6 +71,28 @@ pub struct RosterEntry {
     pub sand_uuid: Option<String>,
     #[serde(default)]
     pub tools: ToolFlags,
+    /// A different key the plane reported for an already-pinned friend. Never
+    /// used to verify. The owner promotes it (`p5 pair set-key --pending`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_key: Option<PendingKey>,
+}
+
+/// Key the plane offered in place of the pinned one. Waits for the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingKey {
+    pub fingerprint: String,
+    pub public_key_pem: String,
+}
+
+/// What [`Roster::merge_peer`] did with the plane's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyMerge {
+    /// No row (unknown typ).
+    Skipped,
+    /// Pinned key unchanged, or first key pinned.
+    Kept,
+    /// Plane sent a different key. Pinned key stays; the new one waits.
+    Changed,
 }
 
 /// Address → peer record. JSON object on disk.
@@ -103,6 +125,8 @@ impl Roster {
     /// Merge a plane-observed peer. Empty pem/fp leave whatever was already stored.
     ///
     /// New rows need a declared `typ` (K22 — do not guess session/turn).
+    /// A key is pinned the first time it is seen. A *different* key later is
+    /// never copied over it: it goes to `pending_key` for the owner.
     pub fn merge_peer(
         &mut self,
         addr: PostalAddr,
@@ -111,11 +135,11 @@ impl Roster {
         public_key_pem: Option<String>,
         trust: Trust,
         pair_id: String,
-    ) -> bool {
+    ) -> KeyMerge {
         let existing = self.entries.get(&addr).cloned();
         let typ = match typ.or_else(|| existing.as_ref().map(|e| e.typ)) {
             Some(t) => t,
-            None => return false,
+            None => return KeyMerge::Skipped,
         };
         let mut entry = existing.unwrap_or(RosterEntry {
             typ,
@@ -125,17 +149,50 @@ impl Roster {
             pair_id: pair_id.clone(),
             sand_uuid: None,
             tools: ToolFlags::default(),
+            pending_key: None,
         });
         entry.typ = typ;
         entry.trust = trust;
         entry.pair_id = pair_id;
-        if let Some(fp) = fingerprint.filter(|s| !s.is_empty()) {
-            entry.fingerprint = fp;
-        }
-        if let Some(pem) = public_key_pem.filter(|s| !s.is_empty()) {
-            entry.public_key_pem = pem;
+        let pem = public_key_pem.filter(|s| !s.trim().is_empty());
+        let fp = fingerprint.filter(|s| !s.trim().is_empty());
+        let mut outcome = KeyMerge::Kept;
+        match pem {
+            Some(pem) if entry.public_key_pem.trim().is_empty() => {
+                entry.public_key_pem = pem;
+                if let Some(fp) = fp {
+                    entry.fingerprint = fp;
+                }
+            }
+            Some(pem) if !same_key(&entry.public_key_pem, &pem) => {
+                entry.pending_key = Some(PendingKey {
+                    fingerprint: fp.unwrap_or_default(),
+                    public_key_pem: pem,
+                });
+                outcome = KeyMerge::Changed;
+            }
+            Some(_) => entry.pending_key = None,
+            None => {
+                // Fingerprint-only views can fill a blank, never replace.
+                if entry.fingerprint.trim().is_empty() {
+                    if let Some(fp) = fp {
+                        entry.fingerprint = fp;
+                    }
+                }
+            }
         }
         self.entries.insert(addr, entry);
+        outcome
+    }
+
+    /// Owner-chosen key (`p5 pair set-key`). Replaces the pin, clears pending.
+    pub fn replace_key(&mut self, addr: &PostalAddr, fingerprint: String, public_key_pem: String) -> bool {
+        let Some(entry) = self.entries.get_mut(addr) else {
+            return false;
+        };
+        entry.fingerprint = fingerprint;
+        entry.public_key_pem = public_key_pem;
+        entry.pending_key = None;
         true
     }
 
@@ -167,6 +224,12 @@ impl Roster {
     }
 }
 
+/// PEM text compare that ignores line endings and outer whitespace.
+fn same_key(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().collect::<String>();
+    norm(a) == norm(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +252,7 @@ mod tests {
                 live_inject: true,
                 wake: true,
             },
+            pending_key: None,
         }
     }
 
@@ -332,7 +396,7 @@ mod tests {
     fn merge_peer_does_not_guess_typ() {
         let mut roster = Roster::new();
         let key = addr("scout::acme.postal.bot");
-        assert!(!roster.merge_peer(
+        assert_eq!(KeyMerge::Skipped, roster.merge_peer(
             key.clone(),
             None,
             Some("fp".into()),
@@ -341,7 +405,7 @@ mod tests {
             "p1".into(),
         ));
         assert!(roster.is_empty());
-        assert!(roster.merge_peer(
+        assert_eq!(KeyMerge::Kept, roster.merge_peer(
             key.clone(),
             Some(PeerType::Turn),
             Some("fp".into()),
@@ -349,7 +413,10 @@ mod tests {
             Trust::Pending,
             "p1".into(),
         ));
-        assert!(roster.merge_peer(key.clone(), None, None, None, Trust::Trusted, "p1".into(),));
+        assert_eq!(
+            KeyMerge::Kept,
+            roster.merge_peer(key.clone(), None, None, None, Trust::Trusted, "p1".into())
+        );
         let e = roster.get(&key).unwrap();
         assert_eq!(e.typ, PeerType::Turn);
         assert_eq!(e.trust, Trust::Trusted);

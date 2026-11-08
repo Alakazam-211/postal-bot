@@ -226,6 +226,7 @@ fn add_peer(root: &Path, address: &str, kp: &KeyPair) {
             pair_id: "p1".into(),
             sand_uuid: None,
             tools: ToolFlags::default(),
+            pending_key: None,
         },
     );
     roster.save(root).unwrap();

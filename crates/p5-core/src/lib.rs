@@ -20,7 +20,7 @@ pub use mailbox::{
     DeliveryStatus, MailItem, Mailbox, MailboxError, ReceiveRequest, SendRequest, EXIT_GATED,
     MAX_AUTO_ATTEMPTS, MAX_BODY_BYTES,
 };
-pub use roster::{Roster, RosterEntry, Trust};
+pub use roster::{KeyMerge, PendingKey, Roster, RosterEntry, Trust};
 pub use store::{ensure_dir, postal_dir, StoreError, HOMES_FILE, ROSTER_FILE};
 pub use tools::ToolFlags;
 pub use types::{DeliveryMode, PeerType, TypeParseError};
