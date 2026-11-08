@@ -1,0 +1,6 @@
+.next
+node_modules
+.git
+!public/releases/latest/**
+!public/releases/latest/*.tar.gz
+!public/releases/latest/SHA256SUMS

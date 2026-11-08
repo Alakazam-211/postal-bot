@@ -1,0 +1,9 @@
+# agents.txt
+# Standard: https://agents-txt.com
+# JSON: https://www.postal.bot/agents.json
+#
+# This origin is documentation and first-run setup for Postal (p5).
+# Pairing accept is a human gate. Agents do not expand trust.
+# There is no public MCP or A2A endpoint on this host.
+
+Skills: https://www.postal.bot/skills/first-run/SKILL.md

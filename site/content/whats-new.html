@@ -33,15 +33,34 @@
     }
     a { color: var(--link); }
     a:hover { color: #fff; }
+    .mast-dock {
+      --claim-r: 8px;
+      --claim-inset: 4px;
+      position: sticky;
+      top: 0.7rem;
+      z-index: 50;
+      width: calc(100% - 2.8rem);
+      max-width: 57.2rem;
+      margin: 0.7rem auto 0;
+    }
     header.mast {
-      border-bottom: 1px solid var(--line);
-      padding: 1.25rem 1.5rem 1.1rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 1rem;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+      min-height: 3.5rem;
+      margin: 0;
+      padding: var(--claim-inset) 1.15rem var(--claim-inset) 0.7rem;
+      border: 1px solid var(--line);
+      border-radius: var(--claim-r);
       background: #0e0d0b;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+    }
+    header.mast.is-open {
+      border-radius: 8px 8px 0 0;
+      border-bottom-color: transparent;
+      box-shadow: none;
     }
     header.mast .brand {
       display: flex;
@@ -73,7 +92,24 @@
       user-select: none;
     }
     header.mast strong { letter-spacing: 0.08em; font-size: 0.78rem; text-transform: uppercase; }
-    header.mast nav { display: flex; gap: 1.1rem; color: var(--muted); font-size: 0.95rem; }
+    header.mast nav {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+    }
+    header.mast nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.94rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      line-height: 1;
+    }
+    header.mast nav a:hover { color: var(--ink); }
+    header.mast nav a[data-auth="in"] { display: none; }
+    html.is-signed-in header.mast nav a[data-auth="in"] { display: inline; }
+    html.is-signed-in header.mast nav a[data-auth="out"] { display: none; }
     .mast-burger {
       display: none;
       flex: none;
@@ -119,34 +155,25 @@
       border-left: 1px solid var(--line);
       border-right: 1px solid var(--line);
       border-bottom: 1px solid var(--line);
+      border-radius: 0 0 var(--claim-r) var(--claim-r);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
     }
     .mast-tray a {
       display: block;
       padding: 0.75rem 1.25rem;
       color: var(--muted);
       text-decoration: none;
-      font-size: 0.95rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
     }
     .mast-tray a:hover { color: var(--ink); }
+    .mast-tray a[data-auth="in"] { display: none; }
+    html.is-signed-in .mast-tray a[data-auth="in"] { display: block; }
+    html.is-signed-in .mast-tray a[data-auth="out"] { display: none; }
     @media (max-width: 640px) {
-      header.mast {
-        --claim-r: 8px;
-        --claim-inset: 4px;
-        flex-wrap: nowrap;
-        align-items: center;
-        min-height: 3.5rem;
-        margin: 0.7rem 0.75rem 0;
-        padding-top: var(--claim-inset);
-        padding-bottom: var(--claim-inset);
-        padding-left: 0.7rem;
-        padding-right: 0.85rem;
-        border: 1px solid var(--line);
-        border-radius: var(--claim-r);
-      }
-      header.mast.is-open {
-        border-radius: 8px 8px 0 0;
-        border-bottom-color: transparent;
-      }
+      .mast-dock { width: calc(100% - 1.5rem); max-width: none; }
       header.mast nav { display: none; }
       .mast-burger {
         display: flex;
@@ -156,8 +183,8 @@
       }
       .mast-tray {
         display: block;
-        margin: 0 0.75rem;
-        border-radius: 0 0 8px 8px;
+        margin: 0;
+        border-radius: 0 0 var(--claim-r) var(--claim-r);
       }
       .wrap { padding: 1.6rem 1rem 4rem; }
       h1 { font-size: 1.7rem; }
@@ -198,6 +225,7 @@
   </style>
 </head>
 <body>
+  <div class="mast-dock">
   <header class="mast">
     <div class="brand">
       <a href="https://alakazamlabs.com" target="_blank" rel="noopener noreferrer">
@@ -211,8 +239,8 @@
     </div>
     <nav>
       <a href="/docs">Docs</a>
-      <a href="/account">Account</a>
-      <a href="/login">Log in</a>
+      <a href="/account" data-auth="in">Account</a>
+      <a href="/login" data-auth="out">Sign In</a>
       <a href="/whats-new">What’s new</a>
     </nav>
     <button class="mast-burger" type="button" aria-label="Toggle menu" aria-expanded="false">
@@ -221,9 +249,10 @@
   </header>
   <div class="mast-tray">
     <a href="/docs">Docs</a>
-    <a href="/account">Account</a>
-    <a href="/login">Log in</a>
+    <a href="/account" data-auth="in">Account</a>
+    <a href="/login" data-auth="out">Sign In</a>
     <a href="/whats-new">What’s new</a>
+  </div>
   </div>
   <main class="wrap">
     <h1>What’s new</h1>
@@ -286,7 +315,7 @@
       <p>First public CLI: install, login, local mailbox, live send.</p>
     </article>
 
-    <footer>Alakazam Labs · postal.bot · public alpha</footer>
+    <footer>Alakazam Labs · postal.bot · public alpha · <a href="/privacy">Privacy</a></footer>
   </main>
 </body>
 </html>
