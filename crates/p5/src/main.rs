@@ -562,11 +562,8 @@ fn inbox_cmd(action: Option<InboxAction>) -> Result<(), MailboxError> {
             Ok(())
         }
         Some(InboxAction::Read { id }) => {
-            let held = mb
-                .list_inbox(None, None)?
-                .iter()
-                .any(|i| i.id == id && i.hold_id.is_some());
-            if held {
+            // Any folder: done/archived held mail is still unverified.
+            if mb.read_inbox(&id)?.hold_id.is_some() {
                 println!("[{HELD_UNVERIFIED}]");
             }
             // The cover on disk is the original; the terminal gets no escapes.

@@ -155,8 +155,16 @@ pub fn strip_controls(body: &str) -> String {
 fn is_invisible(c: char) -> bool {
     matches!(c,
         '\u{00AD}'                    // soft hyphen
+        | '\u{034F}'                  // combining grapheme joiner
         | '\u{061C}'                  // Arabic letter mark
-        | '\u{180E}'                  // Mongolian vowel separator
+        | '\u{115F}' | '\u{1160}'     // Hangul choseong/jungseong fillers
+        | '\u{17B4}' | '\u{17B5}'     // Khmer inherent vowels
+        | '\u{180B}'..='\u{180F}'     // Mongolian variation selectors, vowel separator
+        | '\u{3164}' | '\u{FFA0}'     // Hangul fillers
+        | '\u{FE00}'..='\u{FE0F}'     // variation selectors
+        | '\u{206A}'..='\u{206F}'     // deprecated format controls
+        | '\u{1D173}'..='\u{1D17A}'   // musical format controls
+        | '\u{E0100}'..='\u{E01EF}'   // variation selectors supplement
         | '\u{200B}'..='\u{200F}'     // zero-width space/joiners, LRM, RLM
         | '\u{2028}' | '\u{2029}'     // line / paragraph separator
         | '\u{202A}'..='\u{202E}'     // bidi embeddings and overrides
@@ -746,6 +754,10 @@ mod tests {
         // Bidi override, zero-width, tag characters: nothing hidden survives.
         assert_eq!(strip_controls("a\u{202E}b\u{200B}c\u{2066}d\u{E0041}e\u{FEFF}"), "abcde");
         assert_eq!(strip_controls("café 日本"), "café 日本");
+        assert_eq!(
+            strip_controls("a\u{FE0F}b\u{3164}c\u{034F}d\u{E0101}e\u{115F}f"),
+            "abcdef"
+        );
     }
 
     #[test]

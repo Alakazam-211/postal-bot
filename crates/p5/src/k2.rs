@@ -506,9 +506,8 @@ mod tests {
                     Ok((mut stream, _)) => {
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let mut buf = vec![0; 8192];
-                        let n = stream.read(&mut buf).unwrap_or(0);
-                        *captured.lock().unwrap() = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+                        let raw = read_request(&mut stream);
+                        *captured.lock().unwrap() = Some(raw);
                         let resp = format!(
                             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
@@ -524,6 +523,34 @@ mod tests {
             }
         });
         (port, got, handle, stop)
+    }
+
+    /// Read headers, then exactly Content-Length body bytes. The client writes
+    /// headers and body separately, so one read() can stop short.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&buf);
+            if let Some(end) = text.find("\r\n\r\n") {
+                let want = text[..end]
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if buf.len() >= end + 4 + want {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
     }
 
     fn link() -> K2Link {

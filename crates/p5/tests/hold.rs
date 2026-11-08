@@ -19,6 +19,7 @@ fn p5() -> Command {
 }
 
 fn isolate(cmd: &mut Command) {
+    cmd.env_remove("P5_DEV_SECRET").env_remove("P5_OWNER_PAIR");
     cmd.env_remove("P5_HOLD")
         .env_remove("P5_TYP")
         .env_remove("P5_CONNECT_TOKEN")
