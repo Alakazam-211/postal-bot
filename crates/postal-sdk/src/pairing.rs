@@ -393,6 +393,42 @@ mod tests {
         assert!(!a.matches("12345"), "a different length never matches");
     }
 
+    /// Domain separation from K2 is a condition of the Kessel Steward's
+    /// ruling on this port: the same inputs must never give the same
+    /// commitment or code under K2's public tags.
+    #[test]
+    fn our_tags_are_not_k2s() {
+        const K2_COMMIT: &[u8] = b"k2-sas-commit-v2";
+        const K2_SAS: &[u8] = b"k2-sas-v2";
+        assert_ne!(COMMIT_PREFIX, K2_COMMIT);
+        assert_ne!(SAS_PREFIX, K2_SAS);
+        for ours in [COMMIT_PREFIX, SAS_PREFIX] {
+            for theirs in [K2_COMMIT, K2_SAS] {
+                assert!(!ours.starts_with(theirs) && !theirs.starts_with(ours));
+            }
+        }
+        // Same inputs, K2's derivation (its tags, no context, hex-string
+        // fingerprints): neither the commitment nor the code may match ours.
+        let (fa, fb) = ("aa".repeat(32), "bb".repeat(32));
+        let mut h = Sha256::new();
+        h.update(K2_COMMIT);
+        h.update(fa.as_bytes());
+        h.update(NA);
+        let k2_commit: [u8; 32] = h.finalize().into();
+        let (_a, ours) = Initiator::start_with(ctx(), fp('a'), NA, T0).unwrap();
+        assert_ne!(ours.0, k2_commit);
+        let mut h = Sha256::new();
+        h.update(K2_SAS);
+        h.update(fa.as_bytes());
+        h.update(fb.as_bytes());
+        h.update(NA);
+        h.update(NB);
+        let d = h.finalize();
+        let k2_code = format!("{:06}", u32::from_be_bytes([d[0], d[1], d[2], d[3]]) % 1_000_000);
+        assert_eq!(k2_code, "632758", "K2's own published vector for these inputs");
+        assert_ne!(code(&ctx(), &fp('a'), &fp('b'), &NA, &NB).unwrap().as_str(), k2_code);
+    }
+
     #[test]
     fn real_nonces_agree_too() {
         let (a, c) = Initiator::start(ctx(), fp('a'), T0).unwrap();
