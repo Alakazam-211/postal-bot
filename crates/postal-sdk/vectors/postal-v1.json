@@ -1,0 +1,41 @@
+{
+  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib. Every host's CI checks them.",
+  "pairing": [
+    {
+      "fp_a": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fp_b": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "na_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "nb_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "commitment_hex": "8f042aff0ef7331276212f3f99f6f03878da7c8372ba82adcb33530c20227efe",
+      "sas": "944396"
+    },
+    {
+      "fp_a": "0000000000000000000000000000000000000000000000000000000000000000",
+      "fp_b": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "na_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nb_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "commitment_hex": "de9bdc3a6b4de56be942f124c66111f3f8ba5e5d1ed436076aecf8c0f32a2cbd",
+      "sas": "258455"
+    }
+  ],
+  "badge": [
+    {
+      "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "sender_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "body": "hello scout",
+      "badge": "p_31f8f4c95d94"
+    },
+    {
+      "id": "ab",
+      "sender_fingerprint": "c",
+      "body": "",
+      "badge": "p_7b8d6d1dc2cc"
+    },
+    {
+      "id": "a",
+      "sender_fingerprint": "bc",
+      "body": "",
+      "badge": "p_ebc2a7a09d8c"
+    }
+  ]
+}
