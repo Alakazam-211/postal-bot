@@ -759,8 +759,8 @@ fn main() {
             sm::flush_outbox(&ctx, std::time::SystemTime::now())
         }) {
             Ok(r) => println!(
-                "tried {}  delivered {}  failed {}  queued {}",
-                r.tried, r.delivered, r.failed, r.queued
+                "tried {}  delivered {}  held {}  failed {}  queued {}",
+                r.tried, r.delivered, r.held, r.failed, r.queued
             ),
             Err(err) => {
                 eprintln!("{err}");

@@ -10,6 +10,9 @@
 //! Both back off with [`p5_core::backoff_secs`] and give up after
 //! [`p5_core::MAX_AUTO_ATTEMPTS`]. Giving up on a knock never loses mail: the
 //! cover stays in `~/.postal/inbox`.
+//!
+//! Knocks are at-least-once. A turn gateway that ran the prompt but still
+//! answered 500 gets prompted again on retry.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -49,11 +52,26 @@ fn unix(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
+/// A file that doesn't parse is moved aside to `knock-retry.json.bad` and
+/// reported, so the next save can't silently erase the pending knocks.
 pub fn load_knocks(root: &Path) -> BTreeMap<String, PendingKnock> {
-    std::fs::read_to_string(root.join(KNOCKS_FILE))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let path = root.join(KNOCKS_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return BTreeMap::new();
+    };
+    match serde_json::from_str(&text) {
+        Ok(knocks) => knocks,
+        Err(err) => {
+            let bad = root.join(format!("{KNOCKS_FILE}.bad"));
+            let kept = std::fs::rename(&path, &bad).is_ok();
+            eprintln!(
+                "p5: {KNOCKS_FILE} is unreadable ({err}); {}. Pending knocks in it won't be \
+                 retried; the mail itself is still in the inbox.",
+                if kept { format!("kept it as {}", bad.display()) } else { "could not move it aside".into() }
+            );
+            BTreeMap::new()
+        }
+    }
 }
 
 fn save_knocks(root: &Path, knocks: &BTreeMap<String, PendingKnock>) -> std::io::Result<()> {
@@ -183,8 +201,8 @@ where
                 let now = SystemTime::now();
                 match crate::sm::flush_outbox(&ctx, now) {
                     Ok(r) if r.tried > 0 => eprintln!(
-                        "p5: outbox retry: {} tried, {} delivered, {} failed, {} still queued",
-                        r.tried, r.delivered, r.failed, r.queued
+                        "p5: outbox retry: {} tried, {} delivered, {} held, {} failed, {} still queued",
+                        r.tried, r.delivered, r.held, r.failed, r.queued
                     ),
                     Ok(_) => {}
                     Err(err) => eprintln!("p5: outbox retry: {err}"),
@@ -203,4 +221,19 @@ where
             }
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_knock_file_is_kept_aside_not_erased() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(KNOCKS_FILE), "{not json").unwrap();
+        assert!(load_knocks(tmp.path()).is_empty());
+        let bad = tmp.path().join(format!("{KNOCKS_FILE}.bad"));
+        assert_eq!(std::fs::read_to_string(bad).unwrap(), "{not json");
+        assert!(!tmp.path().join(KNOCKS_FILE).exists());
+    }
 }

@@ -458,6 +458,7 @@ pub struct FlushReport {
     pub delivered: usize,
     pub failed: usize,
     pub queued: usize,
+    pub held: usize,
 }
 
 /// Retry every queued row that is due (F11). Same delivery as `p5 msg`.
@@ -468,19 +469,28 @@ pub fn flush_outbox(ctx: &SmContext, now: std::time::SystemTime) -> Result<Flush
     let mut report = FlushReport::default();
     for item in ctx.mailbox.due_outbox(now)? {
         report.tried += 1;
-        let resp = deliver_item(ctx, &item, &item.to, &item.from, &item.body, false)?;
-        match resp.status.as_deref() {
+        // One bad row must not stall the rest: an error counts as an attempt
+        // (so its backoff grows and it reaches the cap) and we move on.
+        let status = match deliver_item(ctx, &item, &item.to, &item.from, &item.body, false) {
+            Ok(resp) => resp.status,
+            Err(err) => {
+                eprintln!("p5: outbox retry {}: {err}", item.id);
+                let _ = ctx.mailbox.record_last_error(&item.id, err.to_string());
+                None
+            }
+        };
+        match status.as_deref() {
             Some("delivered") | Some("acked") => report.delivered += 1,
             Some("failed") => report.failed += 1,
-            Some("held") => report.queued += 1,
-            _ => {
-                let after = ctx.mailbox.record_attempt(&item.id, now)?;
-                if after.status == DeliveryStatus::Failed {
-                    report.failed += 1;
-                } else {
+            Some("held") => report.held += 1,
+            _ => match ctx.mailbox.record_attempt(&item.id, now) {
+                Ok(after) if after.status == DeliveryStatus::Failed => report.failed += 1,
+                Ok(_) => report.queued += 1,
+                Err(err) => {
+                    eprintln!("p5: outbox retry {}: attempt not recorded: {err}", item.id);
                     report.queued += 1;
                 }
-            }
+            },
         }
     }
     Ok(report)
@@ -1501,6 +1511,47 @@ mod tests {
         let r = flush_outbox(&ctx, later).unwrap();
         assert_eq!((r.tried, r.delivered), (1, 1));
         assert_eq!(ctx.mailbox.read_sent(&id).unwrap().status, DeliveryStatus::Delivered);
+        assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flush_outbox_one_bad_row_does_not_stall_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path(), true);
+        let queue = |body: &str| {
+            ctx.mailbox
+                .enqueue(SendRequest {
+                    to: addr("scout::acme.postal.bot"),
+                    from: addr("scout::acme.postal.bot"),
+                    body: body.into(),
+                    mode: DeliveryMode::Live,
+                    typ: PeerType::Session,
+                    files: Vec::new(),
+                    files_allowed: false,
+                    title: None,
+                })
+                .unwrap()
+        };
+        let good = queue("good");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let bad = queue("bad");
+        // A directory where the bad row's inbox cover goes: every receive of
+        // it fails with a mailbox error.
+        std::fs::create_dir_all(tmp.path().join(format!("inbox/scout/{}.md", bad.id))).unwrap();
+
+        let mut t = std::time::SystemTime::now();
+        let r = flush_outbox(&ctx, t).unwrap();
+        assert_eq!((r.tried, r.delivered, r.queued), (2, 1, 1), "{r:?}");
+        assert_eq!(ctx.mailbox.read_sent(&good.id).unwrap().status, DeliveryStatus::Delivered);
+        let row = ctx.mailbox.read_sent(&bad.id).unwrap();
+        assert_eq!(row.attempts, 1);
+        assert!(row.last_error.is_some());
+        // Its backoff grows, and it reaches the cap like any other row.
+        for _ in 1..p5_core::MAX_AUTO_ATTEMPTS {
+            t += std::time::Duration::from_secs(3600);
+            flush_outbox(&ctx, t).unwrap();
+        }
+        assert_eq!(ctx.mailbox.read_sent(&bad.id).unwrap().status, DeliveryStatus::Failed);
         assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
     }
 
