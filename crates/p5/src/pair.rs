@@ -547,10 +547,7 @@ fn parse_view_addr(raw: &str) -> Option<PostalAddr> {
 
 /// Plane strings go to a terminal: no controls, one line.
 fn clean(s: &str) -> String {
-    s.chars()
-        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
-        .filter(|c| !c.is_control())
-        .collect()
+    crate::last_mile::strip_controls(s).replace(['\n', '\t'], " ")
 }
 
 fn print_add(id: &str, from: &PostalAddr, to: &PostalAddr, sas: Option<&str>, created: bool) {

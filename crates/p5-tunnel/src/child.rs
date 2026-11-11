@@ -232,7 +232,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn auto_resolve_finds_beside_p5_dir_via_postal_bin() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
