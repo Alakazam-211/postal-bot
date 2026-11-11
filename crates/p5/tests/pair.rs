@@ -18,6 +18,7 @@ fn p5() -> Command {
 
 fn isolate_pair_env(cmd: &mut Command) {
     cmd.env_remove("P5_OWNER_PAIR")
+        .env_remove("P5_DEV_SECRET")
         .env_remove("P5_TYP")
         .env_remove("P5_CONNECT_TOKEN")
         .env_remove("P5_PLANE_URL");
@@ -628,6 +629,7 @@ fn friends_from_us_updates_peer_trust_not_keys() {
             pair_id: "old".into(),
             sand_uuid: None,
             tools: ToolFlags::default(),
+            pending_key: None,
         },
     );
     roster.save(home.path()).unwrap();
@@ -654,6 +656,193 @@ fn friends_from_us_updates_peer_trust_not_keys() {
     assert_eq!(row.pair_id, "pair-f");
     assert_eq!(row.public_key_pem, peer.public_key_pem());
     assert_eq!(row.fingerprint, peer.fingerprint());
+}
+
+#[test]
+fn plane_key_change_waits_for_owner() {
+    let home = tmp_home();
+    let mock = MockPlane::start();
+    let pinned = KeyPair::generate();
+    let swapped = KeyPair::generate();
+    let scout: PostalAddr = "scout::acme.postal.bot".parse().unwrap();
+    let mut roster = Roster::new();
+    roster.insert(
+        scout.clone(),
+        RosterEntry {
+            typ: PeerType::Session,
+            fingerprint: pinned.fingerprint(),
+            public_key_pem: pinned.public_key_pem(),
+            trust: Trust::Trusted,
+            pair_id: "pair-k".into(),
+            sand_uuid: None,
+            tools: ToolFlags::default(),
+            pending_key: None,
+        },
+    );
+    roster.save(home.path()).unwrap();
+
+    // Plane now reports a different key for the same friend.
+    mock.set_friends(vec![view(
+        "pair-k",
+        "scout::acme.postal.bot",
+        "alice::acme.postal.bot",
+        "trusted",
+        "000000",
+        PeerType::Session,
+        &swapped.public_key_pem(),
+    )]);
+    let out = run_home(home.path(), &mock.url, &["pair", "list"], &[]);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("new key"));
+    let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
+    assert_eq!(row.public_key_pem, pinned.public_key_pem(), "pin must not move");
+    assert_eq!(
+        row.pending_key.as_ref().map(|k| k.public_key_pem.as_str()),
+        Some(swapped.public_key_pem().as_str())
+    );
+
+    // The warning names no command an agent could be talked into running.
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("P5_OWNER_PAIR"));
+    // Seen again: still pending, no repeat warning.
+    let again = run_home(home.path(), &mock.url, &["pair", "list"], &[]);
+    assert!(!String::from_utf8_lossy(&again.stderr).contains("new key"));
+
+    // set-key never replaces a pin, even with the owner flag.
+    let scout_s = scout.to_string();
+    let pem_path = home.path().join("other.pem");
+    std::fs::write(&pem_path, swapped.public_key_pem()).unwrap();
+    let pem_s = pem_path.to_string_lossy().into_owned();
+    let out = run_home(
+        home.path(),
+        &mock.url,
+        &["pair", "set-key", &scout_s, "--pem-file", &pem_s],
+        &[("P5_OWNER_PAIR", "1")],
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("pairing again"));
+    let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
+    assert_eq!(row.public_key_pem, pinned.public_key_pem());
+
+    // A new pairing with scout moves the pin only with a typed SAS that
+    // matches the key in that pairing.
+    let ours = KeyPair::load_or_create(home.path()).unwrap();
+    let real_sas = sas_code(&ours.fingerprint(), &swapped.fingerprint());
+    mock.set_inbox(vec![view(
+        "pair-k2",
+        "scout::acme.postal.bot",
+        "alice::acme.postal.bot",
+        "pending",
+        &real_sas,
+        PeerType::Session,
+        &swapped.public_key_pem(),
+    )]);
+    let owner = [("P5_OWNER_PAIR", "1")];
+    let out = run_home(home.path(), &mock.url, &["pair", "accept", "pair-k2"], &owner);
+    assert!(!out.status.success(), "no typed SAS must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--sas"));
+    let wrong = if real_sas == "000000" { "111111" } else { "000000" };
+    let out = run_home(home.path(), &mock.url, &["pair", "accept", "pair-k2", "--sas", wrong], &owner);
+    assert!(!out.status.success(), "wrong SAS must refuse");
+    let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
+    assert_eq!(row.public_key_pem, pinned.public_key_pem(), "pin unchanged after refusals");
+    assert!(
+        !mock.requests().iter().any(|r| r.path.ends_with("/accept")),
+        "refused accepts must not reach the plane"
+    );
+    let out = run_home(
+        home.path(),
+        &mock.url,
+        &["pair", "accept", "pair-k2", "--sas", &real_sas],
+        &owner,
+    );
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
+    assert_eq!(row.public_key_pem, swapped.public_key_pem());
+    assert_eq!(row.fingerprint, swapped.fingerprint());
+    assert!(row.pending_key.is_none());
+}
+
+#[test]
+fn accept_without_key_in_view_does_not_adopt_stale_pending() {
+    let home = tmp_home();
+    let mock = MockPlane::start();
+    let pinned = KeyPair::generate();
+    let stale = KeyPair::generate();
+    let scout: PostalAddr = "scout::acme.postal.bot".parse().unwrap();
+    let mut roster = Roster::new();
+    roster.insert(
+        scout.clone(),
+        RosterEntry {
+            typ: PeerType::Session,
+            fingerprint: pinned.fingerprint(),
+            public_key_pem: pinned.public_key_pem(),
+            trust: Trust::Trusted,
+            pair_id: "pair-a".into(),
+            sand_uuid: None,
+            tools: ToolFlags::default(),
+            pending_key: Some(p5_core::PendingKey {
+                fingerprint: stale.fingerprint(),
+                public_key_pem: stale.public_key_pem(),
+            }),
+        },
+    );
+    roster.save(home.path()).unwrap();
+    // The plane's view of the new pairing carries no key.
+    mock.set_inbox(vec![view_opt(
+        "pair-n",
+        "scout::acme.postal.bot",
+        "alice::acme.postal.bot",
+        "pending",
+        Some("123456"),
+        Some(PeerType::Session),
+        None,
+    )]);
+    let out = run_home(
+        home.path(),
+        &mock.url,
+        &["pair", "accept", "pair-n", "--sas", "123456"],
+        &[("P5_OWNER_PAIR", "1")],
+    );
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let row = Roster::load(home.path()).unwrap().get(&scout).cloned().unwrap();
+    assert_eq!(row.public_key_pem, pinned.public_key_pem(), "SAS never covered the stale key");
+}
+
+#[test]
+fn set_key_blank_fill_is_owner_gated() {
+    let home = tmp_home();
+    let mock = MockPlane::start();
+    let peer = KeyPair::generate();
+    let scout: PostalAddr = "scout::acme.postal.bot".parse().unwrap();
+    let mut roster = Roster::new();
+    roster.insert(
+        scout.clone(),
+        RosterEntry {
+            typ: PeerType::Session,
+            fingerprint: String::new(),
+            public_key_pem: String::new(),
+            trust: Trust::Trusted,
+            pair_id: "pair-b".into(),
+            sand_uuid: None,
+            tools: ToolFlags::default(),
+            pending_key: None,
+        },
+    );
+    roster.save(home.path()).unwrap();
+    let pem_path = home.path().join("peer.pem");
+    std::fs::write(&pem_path, peer.public_key_pem()).unwrap();
+    let pem_s = pem_path.to_string_lossy().into_owned();
+    let scout_s = scout.to_string();
+    let args = ["pair", "set-key", scout_s.as_str(), "--pem-file", pem_s.as_str()];
+    let out = run_home(home.path(), &mock.url, &args, &[("P5_OWNER_PAIR", "0")]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(Roster::load(home.path()).unwrap().get(&scout).unwrap().public_key_pem.is_empty());
+    let out = run_home(home.path(), &mock.url, &args, &[("P5_OWNER_PAIR", "1")]);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        Roster::load(home.path()).unwrap().get(&scout).unwrap().public_key_pem,
+        peer.public_key_pem().trim()
+    );
 }
 
 #[test]

@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use p5_core::{
-    default_root, Homes, PeerType, PostalAddr, Roster, StoreError, Trust, TypeParseError,
+    default_root, Homes, KeyMerge, PeerType, PostalAddr, Roster, StoreError, Trust, TypeParseError,
     EXIT_GATED,
 };
 use p5_crypto::{fingerprint_spki_pem, sas_code, KeyPair};
@@ -130,10 +130,24 @@ pub fn run_me(typ: Option<String>, print_pem: bool) -> Result<(), PairError> {
     Ok(())
 }
 
-/// Fill a peer's SPKI on the local roster. Plane `GET /postal/pairs` omits keys.
+/// Fill a peer's blank SPKI on the local roster (the plane's pair list can
+/// omit keys). Owner-gated: whoever sets it decides who can sign as them.
+///
+/// Never replaces a pinned key. A friend's key changes only through an
+/// owner-accepted pairing (`p5 pair accept`), never through a one-line command
+/// a message could talk an agent into.
 pub fn run_set_key(addr: String, pem_path: Option<String>) -> Result<(), PairError> {
+    require_owner_pair()?;
     let ctx = PairCtx::load()?;
     let peer = parse_addr(&addr, ctx.default_host())?;
+    let mut roster = Roster::load(&ctx.root)?;
+    let existing = roster
+        .get(&peer)
+        .cloned()
+        .ok_or_else(|| PairError::NotFound(peer.to_string()))?;
+    if !existing.public_key_pem.trim().is_empty() {
+        return Err(PairError::PinnedKey(peer.to_string()));
+    }
     let pem_raw = match pem_path.as_deref() {
         None | Some("-") => {
             use std::io::Read;
@@ -153,19 +167,7 @@ pub fn run_set_key(addr: String, pem_path: Option<String>) -> Result<(), PairErr
         return Err(PairError::MissingPem);
     }
     let fp = fingerprint_spki_pem(&pem)?;
-    let mut roster = Roster::load(&ctx.root)?;
-    let existing = roster
-        .get(&peer)
-        .cloned()
-        .ok_or_else(|| PairError::NotFound(peer.to_string()))?;
-    roster.merge_peer(
-        peer.clone(),
-        Some(existing.typ),
-        Some(fp.clone()),
-        Some(pem),
-        existing.trust,
-        existing.pair_id,
-    );
+    roster.replace_key(&peer, fp.clone(), pem);
     roster.save(&ctx.root)?;
     println!("{peer}");
     println!("fingerprint  {fp}");
@@ -217,12 +219,26 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
     let client = ctx.client()?;
     let lists = client.list_pairs(false)?;
     let view = lists.find(&id);
-    let sas = match sas.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    let typed = sas.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    // Accepting a pairing that would move a friend's pinned key needs a SAS a
+    // person typed, checked here against the key in *this* pairing. p5 never
+    // fills it in on its own for a pin move.
+    let moves_pin = view.and_then(|v| pin_move(&ctx, v));
+    if let Some(next) = moves_pin.as_ref() {
+        let typed = typed.as_deref().ok_or(PairError::SasRequired)?;
+        if typed != next.sas {
+            return Err(PairError::SasMismatch);
+        }
+    }
+    let sas = match typed {
         Some(s) => s,
         None => resolve_sas(&ctx, view)?,
     };
     client.accept(&id, &sas)?;
     refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
+    if let Some(next) = moves_pin {
+        adopt_key(&ctx, next)?;
+    }
     println!("ok");
     if let Some(view) = client.list_pairs(false).ok().as_ref().and_then(|l| l.find(&id)) {
         if let Some(peer) = peer_of(&ctx, view) {
@@ -238,6 +254,51 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
             }
         }
     }
+    Ok(())
+}
+
+/// The key this pairing carries for an already-pinned friend, when it differs
+/// from the pin, plus the SAS computed over that exact key.
+struct PinMove {
+    peer: PostalAddr,
+    fingerprint: String,
+    public_key_pem: String,
+    sas: String,
+}
+
+fn pin_move(ctx: &PairCtx, view: &PairView) -> Option<PinMove> {
+    let peer = peer_of(ctx, view)?;
+    if parse_view_addr(&view.from).as_ref() != Some(&peer) {
+        return None;
+    }
+    let pem = view.public_pem()?.to_string();
+    let roster = Roster::load(&ctx.root).ok()?;
+    let pinned = roster.get(&peer)?.public_key_pem.clone();
+    if pinned.trim().is_empty() || pem_eq(&pinned, &pem) {
+        return None;
+    }
+    let fp = fingerprint_spki_pem(&pem).ok()?;
+    let ours = ctx.keys().ok()?.fingerprint();
+    Some(PinMove {
+        peer,
+        sas: sas_code(&ours, &fp),
+        fingerprint: fp,
+        public_key_pem: pem,
+    })
+}
+
+fn pem_eq(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().collect::<String>();
+    norm(a) == norm(b)
+}
+
+/// Move the pin to the key the person just confirmed with a typed SAS: the
+/// key in this pairing, never just whatever was waiting.
+fn adopt_key(ctx: &PairCtx, next: PinMove) -> Result<(), PairError> {
+    let mut roster = Roster::load(&ctx.root)?;
+    roster.replace_key(&next.peer, next.fingerprint, next.public_key_pem);
+    roster.save(&ctx.root)?;
+    eprintln!("postal: {}'s key changed with this pairing", next.peer);
     Ok(())
 }
 
@@ -408,7 +469,15 @@ fn apply_view(roster: &mut Roster, selves: &BTreeSet<PostalAddr>, view: &PairVie
     } else {
         (None, None)
     };
-    let _ = roster.merge_peer(peer, typ, fp, pem, trust, view.id.clone());
+    if roster.merge_peer(peer.clone(), typ, fp, pem, trust, view.id.clone()) == KeyMerge::Changed {
+        // Never swap a pinned key on our own, and never print a command for
+        // it: a message could talk an agent into running that. Once per change.
+        eprintln!(
+            "postal: {peer} has a new key on the plane. Kept the old one; mail signed \
+             with the new key is refused. A person should confirm the change with \
+             {peer}'s owner and pair again."
+        );
+    }
 }
 
 fn resolve_sas(ctx: &PairCtx, view: Option<&PairView>) -> Result<String, PairError> {
@@ -476,6 +545,14 @@ fn parse_view_addr(raw: &str) -> Option<PostalAddr> {
     PostalAddr::parse(raw, None).ok()
 }
 
+/// Plane strings go to a terminal: no controls, one line.
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 fn print_add(id: &str, from: &PostalAddr, to: &PostalAddr, sas: Option<&str>, created: bool) {
     let state = if created { "created" } else { "exists" };
     match sas {
@@ -492,17 +569,30 @@ fn print_section(name: &str, views: &[PairView]) {
 fn print_views(views: &[PairView]) {
     for v in views {
         match v.sas.as_deref().filter(|s| !s.is_empty()) {
-            Some(sas) => println!("{}  {}  {}  {}  sas={sas}", v.id, v.status, v.from, v.to),
-            None => println!("{}  {}  {}  {}", v.id, v.status, v.from, v.to),
+            Some(sas) => println!(
+                "{}  {}  {}  {}  sas={}",
+                clean(&v.id),
+                clean(&v.status),
+                clean(&v.from),
+                clean(&v.to),
+                clean(sas)
+            ),
+            None => println!(
+                "{}  {}  {}  {}",
+                clean(&v.id),
+                clean(&v.status),
+                clean(&v.from),
+                clean(&v.to)
+            ),
         }
     }
 }
 
 fn print_show(ctx: &PairCtx, view: &PairView) -> Result<(), PairError> {
-    println!("id      {}", view.id);
-    println!("from    {}", view.from);
-    println!("to      {}", view.to);
-    println!("status  {}", view.status);
+    println!("id      {}", clean(&view.id));
+    println!("from    {}", clean(&view.from));
+    println!("to      {}", clean(&view.to));
+    println!("status  {}", clean(&view.status));
     if let Some(typ) = view.from_typ {
         println!("typ     {typ}");
     }
@@ -516,11 +606,11 @@ fn print_show(ctx: &PairCtx, view: &PairView) -> Result<(), PairError> {
             println!("sas     {}", local.sas);
             if let Some(p) = plane {
                 if p != local.sas {
-                    println!("sas_plane {p}");
+                    println!("sas_plane {}", clean(p));
                 }
             }
         }
-        (None, Some(p)) => println!("sas     {p}"),
+        (None, Some(p)) => println!("sas     {}", clean(p)),
         (None, None) => println!("sas     —"),
     }
     if let Some(peer) = peer_of(ctx, view) {
@@ -563,6 +653,9 @@ pub enum PairError {
     BadTyp(TypeParseError),
     NoIdentity,
     NoSas,
+    PinnedKey(String),
+    SasRequired,
+    SasMismatch,
     MissingPem,
     NotFound(String),
     Gated,
@@ -592,6 +685,17 @@ impl fmt::Display for PairError {
                 "no handle for this session; run p5 from a claimed cwd (From is not a flag)",
             ),
             Self::NoSas => f.write_str("no SAS; pass --sas after p5 pair show"),
+            Self::SasRequired => f.write_str(
+                "this pairing changes a friend's key: compare the 6 digits with their owner \
+                 (p5 pair show <id>) and pass them with --sas",
+            ),
+            Self::SasMismatch => f.write_str(
+                "SAS does not match the key in this pairing; nothing accepted",
+            ),
+            Self::PinnedKey(peer) => write!(
+                f,
+                "{peer} already has a pinned key. A friend's key only changes by pairing again"
+            ),
             Self::MissingPem => f.write_str("empty public key PEM"),
             Self::NotFound(id) => write!(f, "pair not found: {id}"),
             Self::Gated => write!(f, "{REASON_GATED}"),

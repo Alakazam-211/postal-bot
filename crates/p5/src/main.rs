@@ -229,7 +229,7 @@ enum PairAction {
         /// Pair id
         id: String,
     },
-    /// Store a peer's public SPKI on the local roster (plane list omits keys)
+    /// Fill a friend's missing public key (owner-gated; never replaces a pinned key)
     SetKey {
         /// Peer `handle::sub.postal.bot`
         addr: String,
