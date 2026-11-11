@@ -3,8 +3,11 @@
 //! **Skeleton (0.0.x).** It holds the parts both ends must agree on
 //! byte for byte, plus the host contract:
 //!
-//! - [`pairing`]: commit-then-reveal 6-digit pairing code (SAS v2).
-//! - [`badge`]: provenance badge from signed fields.
+//! - [`pairing`]: commit-then-reveal 6-digit pairing code (SAS v2) as
+//!   typed Initiator / Responder state machines.
+//! - [`badge`]: the envelope digest wire v2 signs, and a display-only
+//!   provenance badge derived from it.
+//! - [`filename`]: attachment name sanitizer.
 //! - [`host`]: [`host::DeliverySink`] (deliver, then notify), friend store,
 //!   human gates.
 //! - Golden vectors in `vectors/`, checked by this crate's tests and meant
@@ -15,6 +18,7 @@
 //! land. No network or disk code lives here; hosts bring their own.
 
 pub mod badge;
+pub mod filename;
 pub mod hex;
 pub mod host;
 pub mod pairing;

@@ -3,7 +3,8 @@ Copyright (c) 2026 Alakazam Labs. MIT License (see the repository LICENSE).
 
 src/pairing.rs is ported from K2, k2-core/src/federation/sas.rs at commit
 434c822c38 (https://github.com/Alakazam-211/K2), with Postal's own domain
-tags. That code carries this notice:
+tags. That file has no header of its own; it is covered by K2's repository
+license (LICENSE.md at that commit), reproduced here:
 
 MIT License
 

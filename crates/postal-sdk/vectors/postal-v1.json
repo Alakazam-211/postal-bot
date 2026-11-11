@@ -1,41 +1,114 @@
 {
-  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib. Every host's CI checks them.",
+  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib. A change here is a wire change. Every host's CI checks them (cargo test -p postal-sdk).",
   "pairing": [
     {
+      "pair_id": "pair-1",
+      "initiator": "alice::acme.postal.bot",
+      "responder": "scout::acme.postal.bot",
       "fp_a": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fp_b": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "na_hex": "1111111111111111111111111111111111111111111111111111111111111111",
       "nb_hex": "2222222222222222222222222222222222222222222222222222222222222222",
-      "commitment_hex": "8f042aff0ef7331276212f3f99f6f03878da7c8372ba82adcb33530c20227efe",
-      "sas": "944396"
+      "commitment_hex": "7c53769400add960ebf018c61697b34c70e90545f23e5c2e81e0f585cddb1c37",
+      "sas": "029732"
     },
     {
+      "pair_id": "01JPAIR",
+      "initiator": "grok::grokbot.postal.bot",
+      "responder": "claude::rosson.postal.bot",
       "fp_a": "0000000000000000000000000000000000000000000000000000000000000000",
       "fp_b": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "na_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
       "nb_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
-      "commitment_hex": "de9bdc3a6b4de56be942f124c66111f3f8ba5e5d1ed436076aecf8c0f32a2cbd",
-      "sas": "258455"
+      "commitment_hex": "f1f0904cf3376c43f4ef58164ca8a845c96771aacc97fb4b7889e75734a69902",
+      "sas": "411397"
     }
   ],
-  "badge": [
+  "pairing_refused": [
     {
+      "case": "bad_fingerprint",
+      "fp": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "case": "bad_fingerprint",
+      "fp": "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "case": "bad_fingerprint",
+      "fp": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "case": "wrong_reveal",
+      "pair_id": "pair-1",
+      "initiator": "alice::acme.postal.bot",
+      "responder": "scout::acme.postal.bot",
+      "fp_a": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fp_b": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "commitment_hex": "7c53769400add960ebf018c61697b34c70e90545f23e5c2e81e0f585cddb1c37",
+      "reveal_hex": "1111111111111111111111111111111111111111111111111111111111111110"
+    }
+  ],
+  "envelope": [
+    {
+      "version": 2,
       "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-      "sender_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "from": "alice::acme.postal.bot",
+      "to": "scout::acme.postal.bot",
+      "sent_at": 1800000000,
+      "mode": "live",
+      "content_type": "text/plain; charset=utf-8",
+      "files": [],
       "body": "hello scout",
-      "badge": "p_31f8f4c95d94"
+      "digest_hex": "9e6c4b5bc7aaa76bb030649bc5a59ff3d0c23dd3879da635a610073aa44027ac",
+      "badge": "p_9e6c4b5bc7aaa76bb030"
     },
     {
+      "version": 2,
+      "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "from": "alice::acme.postal.bot",
+      "to": "scout::acme.postal.bot",
+      "sent_at": 1800000000,
+      "mode": "tray",
+      "content_type": "text/markdown",
+      "files": [
+        {
+          "name": "a.txt",
+          "content": "x"
+        },
+        {
+          "name": "b.md",
+          "content": ""
+        }
+      ],
+      "body": "hello scout",
+      "digest_hex": "8124a44b98af10c19c5f06f029859092e122f0873ee57496f6fb40921301f227",
+      "badge": "p_8124a44b98af10c19c5f"
+    },
+    {
+      "version": 2,
       "id": "ab",
-      "sender_fingerprint": "c",
+      "from": "c",
+      "to": "d",
+      "sent_at": 0,
+      "mode": "live",
+      "content_type": "",
+      "files": [],
       "body": "",
-      "badge": "p_7b8d6d1dc2cc"
+      "digest_hex": "695a1226c029a1f447893a18fcfb53eb5bed40e211b05e1503f7ea67e8c4e945",
+      "badge": "p_695a1226c029a1f44789"
     },
     {
+      "version": 2,
       "id": "a",
-      "sender_fingerprint": "bc",
+      "from": "bc",
+      "to": "d",
+      "sent_at": 0,
+      "mode": "live",
+      "content_type": "",
+      "files": [],
       "body": "",
-      "badge": "p_ebc2a7a09d8c"
+      "digest_hex": "8ac1d50561a4da39b23fb2771e85cba8362fbfebd79681bff3f2b219e2366549",
+      "badge": "p_8ac1d50561a4da39b23f"
     }
   ]
 }

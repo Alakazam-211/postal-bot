@@ -27,38 +27,174 @@ pub enum Mode {
     Tray,
 }
 
-/// A file that came with the message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attachment {
-    /// Already sanitized: no path parts, no `..`.
-    pub name: String,
-    pub bytes: Vec<u8>,
+impl Mode {
+    /// Wire spelling, as covered by the envelope digest.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Tray => "tray",
+        }
+    }
 }
 
-/// One message the SDK has verified (signature, sender key pinned for this
-/// local handle, not a replay) and decrypted. The SDK calls the host once
-/// per message id.
+/// A file that came with the message. The name is sanitized on the way in
+/// ([`crate::filename::sanitize`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+impl Attachment {
+    #[must_use]
+    pub fn new(name: &str, bytes: Vec<u8>) -> Self {
+        Self { name: crate::filename::sanitize(name), bytes }
+    }
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// One message the SDK has verified (signature over the envelope digest,
+/// sender key pinned for this local handle, not a replay) and decrypted. The
+/// SDK calls the host once per message id. Only the SDK builds these, and it
+/// computes the body hash and badge itself, so they always match the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedMessage {
-    /// ULID, covered by the signature.
+    id: String,
+    from: String,
+    to: String,
+    sender_fingerprint: String,
+    body: Vec<u8>,
+    content_type: String,
+    body_sha256: [u8; 32],
+    sent_at: i64,
+    arrival: Arrival,
+    mode: Mode,
+    wake: bool,
+    files: Vec<Attachment>,
+    badge: String,
+}
+
+/// Inputs for [`VerifiedMessage`]; the SDK fills them after verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedParts {
     pub id: String,
     pub from: String,
-    /// The local handle it's for. Trust is per local handle.
     pub to: String,
     pub sender_fingerprint: String,
     pub body: Vec<u8>,
-    /// Declared by the sender, e.g. `text/plain; charset=utf-8`.
     pub content_type: String,
-    pub body_sha256: [u8; 32],
-    /// Sender's clock, unix seconds. Already checked against skew.
     pub sent_at: i64,
     pub arrival: Arrival,
     pub mode: Mode,
-    /// False when the sender passed `--no-wake`.
     pub wake: bool,
     pub files: Vec<Attachment>,
-    /// [`crate::badge::badge`] of `(id, sender_fingerprint, body_sha256)`.
-    pub badge: String,
+}
+
+impl VerifiedMessage {
+    #[allow(dead_code)] // first caller is wire v2 verification
+    pub(crate) fn new(p: VerifiedParts) -> Result<Self, crate::badge::TooLong> {
+        use crate::badge::{badge, envelope_digest, sha256, Envelope, FileDigest};
+        let body_sha256 = sha256(&p.body);
+        let files: Vec<FileDigest> = p
+            .files
+            .iter()
+            .map(|f| FileDigest { name: f.name.clone(), sha256: sha256(&f.bytes) })
+            .collect();
+        let digest = envelope_digest(&Envelope {
+            version: crate::WIRE_VERSION,
+            id: &p.id,
+            from: &p.from,
+            to: &p.to,
+            sent_at: p.sent_at,
+            mode: p.mode.as_str(),
+            content_type: &p.content_type,
+            files: &files,
+            body_sha256,
+        })?;
+        Ok(Self {
+            badge: badge(&digest),
+            body_sha256,
+            id: p.id,
+            from: p.from,
+            to: p.to,
+            sender_fingerprint: p.sender_fingerprint,
+            body: p.body,
+            content_type: p.content_type,
+            sent_at: p.sent_at,
+            arrival: p.arrival,
+            mode: p.mode,
+            wake: p.wake,
+            files: p.files,
+        })
+    }
+
+    /// ULID, covered by the signature.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    #[must_use]
+    pub fn from(&self) -> &str {
+        &self.from
+    }
+    /// The local handle it's for. Trust is per local handle.
+    #[must_use]
+    pub fn to(&self) -> &str {
+        &self.to
+    }
+    #[must_use]
+    pub fn sender_fingerprint(&self) -> &str {
+        &self.sender_fingerprint
+    }
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+    /// Declared by the sender, e.g. `text/plain; charset=utf-8`.
+    #[must_use]
+    pub fn content_type(&self) -> &str {
+        &self.content_type
+    }
+    #[must_use]
+    pub fn body_sha256(&self) -> &[u8; 32] {
+        &self.body_sha256
+    }
+    /// Sender's clock, unix seconds. Already checked against skew.
+    #[must_use]
+    pub fn sent_at(&self) -> i64 {
+        self.sent_at
+    }
+    #[must_use]
+    pub fn arrival(&self) -> Arrival {
+        self.arrival
+    }
+    #[must_use]
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+    /// False when the sender passed `--no-wake`.
+    #[must_use]
+    pub fn wake(&self) -> bool {
+        self.wake
+    }
+    #[must_use]
+    pub fn files(&self) -> &[Attachment] {
+        &self.files
+    }
+    /// Display-only provenance badge ([`crate::badge`]). Show it out of band,
+    /// never in the same text stream as the body.
+    #[must_use]
+    pub fn badge(&self) -> &str {
+        &self.badge
+    }
 }
 
 /// Proof the host has kept a message durably. The SDK ACKs the plane only
@@ -82,6 +218,7 @@ pub enum RefuseCode {
 }
 
 impl RefuseCode {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoAgent => "no_agent",
@@ -112,7 +249,17 @@ pub struct NotifyError {
 /// best-effort nudge (type into a terminal, post a Thread line, …). The SDK
 /// owns retries for both, so a host never re-implements them.
 pub trait DeliverySink {
+    /// Keep the message durably.
+    ///
+    /// # Errors
+    /// [`DeliverError::Retry`] to be called again later (held mail stays
+    /// held), or [`DeliverError::Refuse`] to dead-letter it.
     fn deliver(&self, msg: &VerifiedMessage) -> Result<Stored, DeliverError>;
+
+    /// Nudge the agent about a stored message.
+    ///
+    /// # Errors
+    /// [`NotifyError`]; the SDK retries with backoff, and the message stays stored.
     fn notify(&self, stored: &Stored) -> Result<(), NotifyError>;
 }
 
@@ -132,7 +279,13 @@ pub struct Friend {
 /// not a friend of another handle on the same box.
 pub trait FriendStore {
     fn get(&self, local_handle: &str, peer: &str) -> Option<Friend>;
+
+    /// # Errors
+    /// [`StoreError`] when the host's storage fails.
     fn put(&self, friend: Friend) -> Result<(), StoreError>;
+
+    /// # Errors
+    /// [`StoreError`] when the host's storage fails.
     fn remove(&self, local_handle: &str, peer: &str) -> Result<(), StoreError>;
 }
 
@@ -165,4 +318,32 @@ pub struct RekeyPending {
 pub trait HumanGate {
     fn friend_request(&self, req: &FriendRequest);
     fn rekey(&self, pending: &RekeyPending);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_message_derives_hash_and_badge_from_the_body() {
+        let parts = VerifiedParts {
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            from: "alice::acme.postal.bot".into(),
+            to: "scout::acme.postal.bot".into(),
+            sender_fingerprint: "aa".repeat(32),
+            body: b"hello scout".to_vec(),
+            content_type: "text/plain; charset=utf-8".into(),
+            sent_at: 1_800_000_000,
+            arrival: Arrival::Live,
+            mode: Mode::Live,
+            wake: true,
+            files: vec![Attachment::new("../../x y.txt", b"x".to_vec())],
+        };
+        let m = VerifiedMessage::new(parts.clone()).unwrap();
+        assert_eq!(m.body_sha256(), &crate::badge::sha256(b"hello scout"));
+        assert_eq!(m.files()[0].name(), "x_y.txt");
+        let mut changed = parts;
+        changed.files = vec![Attachment::new("x y.txt", b"y".to_vec())];
+        assert_ne!(VerifiedMessage::new(changed).unwrap().badge(), m.badge());
+    }
 }

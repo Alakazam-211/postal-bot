@@ -1,15 +1,20 @@
 //! Lowercase hex for nonces, commitments and digests on the wire.
 
 /// Lowercase hex.
+#[must_use]
 pub fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
 
 /// Parse exactly 32 bytes of hex.
+///
+/// # Errors
+/// [`HexError`] unless the input is exactly 64 hex characters.
 pub fn from_hex32(s: &str) -> Result<[u8; 32], HexError> {
     let s = s.trim();
     if s.len() != 64 || !s.is_ascii() {
