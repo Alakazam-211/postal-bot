@@ -109,6 +109,120 @@
       "body": "",
       "digest_hex": "8ac1d50561a4da39b23fb2771e85cba8362fbfebd79681bff3f2b219e2366549",
       "badge": "p_8ac1d50561a4da39b23f"
+    },
+    {
+      "version": 2,
+      "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "from": "alice::acme.postal.bot",
+      "to": "scout::acme.postal.bot",
+      "sent_at": 1800000000,
+      "mode": "live",
+      "content_type": "text/plain; charset=utf-8",
+      "files": [
+        {
+          "name": "my report.pdf",
+          "content": "x"
+        }
+      ],
+      "body": "see attached",
+      "digest_hex": "8929ed44a9a8cbcd2fa0f84625a32e83825f5aec0593f6d391e7422fb4d794f8",
+      "badge": "p_8929ed44a9a8cbcd2fa0"
+    },
+    {
+      "version": 2,
+      "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "from": "alice::acme.postal.bot",
+      "to": "scout::acme.postal.bot",
+      "sent_at": 1800000000,
+      "mode": "live",
+      "content_type": "text/plain; charset=utf-8",
+      "files": [
+        {
+          "name": "my_report.pdf",
+          "content": "x"
+        }
+      ],
+      "body": "see attached",
+      "digest_hex": "739f6e4ffba93d7bd9483bcb08d7895cc75e0617eb47c2774ffe787af463299f",
+      "badge": "p_739f6e4ffba93d7bd948"
+    }
+  ],
+  "filename": [
+    {
+      "wire": "../../etc/passwd",
+      "storage": "passwd"
+    },
+    {
+      "wire": "..\\..\\evil.exe",
+      "storage": "evil.exe"
+    },
+    {
+      "wire": "a\\b.txt",
+      "storage": "b.txt"
+    },
+    {
+      "wire": "..",
+      "storage": "attachment"
+    },
+    {
+      "wire": "",
+      "storage": "attachment"
+    },
+    {
+      "wire": "_.bashrc",
+      "storage": "bashrc"
+    },
+    {
+      "wire": ".bashrc",
+      "storage": "bashrc"
+    },
+    {
+      "wire": " .git",
+      "storage": "git"
+    },
+    {
+      "wire": "-rf",
+      "storage": "rf"
+    },
+    {
+      "wire": "my report.pdf",
+      "storage": "my_report.pdf"
+    },
+    {
+      "wire": "re port‮.txt",
+      "storage": "re_port_.txt"
+    },
+    {
+      "wire": "CON",
+      "storage": "file-CON"
+    },
+    {
+      "wire": "nul.txt",
+      "storage": "file-nul.txt"
+    },
+    {
+      "wire": "COM1.log",
+      "storage": "file-COM1.log"
+    },
+    {
+      "wire": "lpt9",
+      "storage": "file-lpt9"
+    },
+    {
+      "wire": "CONSOLE.txt",
+      "storage": "CONSOLE.txt"
+    },
+    {
+      "wire": "ok-file_1.md",
+      "storage": "ok-file_1.md"
+    },
+    {
+      "wire": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.pdf",
+      "storage": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.pdf"
+    },
+    {
+      "wire": "a.yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "storage": "a.yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
     }
   ]
 }

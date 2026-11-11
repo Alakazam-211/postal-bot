@@ -38,22 +38,33 @@ impl Mode {
     }
 }
 
-/// A file that came with the message. The name is sanitized on the way in
-/// ([`crate::filename::sanitize`]).
+/// A file that came with the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
-    name: String,
+    wire_name: String,
+    storage_name: String,
     bytes: Vec<u8>,
 }
 
 impl Attachment {
     #[must_use]
-    pub fn new(name: &str, bytes: Vec<u8>) -> Self {
-        Self { name: crate::filename::sanitize(name), bytes }
+    pub fn new(wire_name: &str, bytes: Vec<u8>) -> Self {
+        Self {
+            wire_name: wire_name.to_string(),
+            storage_name: crate::filename::sanitize(wire_name),
+            bytes,
+        }
     }
+    /// The name exactly as the sender sent it. This is what the envelope
+    /// digest and the signature cover. Never use it as a path.
     #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn wire_name(&self) -> &str {
+        &self.wire_name
+    }
+    /// A safe name to write to disk ([`crate::filename::sanitize`]).
+    #[must_use]
+    pub fn storage_name(&self) -> &str {
+        &self.storage_name
     }
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
@@ -70,7 +81,7 @@ pub struct VerifiedMessage {
     id: String,
     from: String,
     to: String,
-    sender_fingerprint: String,
+    sender_fingerprint: crate::pairing::Fingerprint,
     body: Vec<u8>,
     content_type: String,
     body_sha256: [u8; 32],
@@ -88,7 +99,7 @@ pub(crate) struct VerifiedParts {
     pub id: String,
     pub from: String,
     pub to: String,
-    pub sender_fingerprint: String,
+    pub sender_fingerprint: crate::pairing::Fingerprint,
     pub body: Vec<u8>,
     pub content_type: String,
     pub sent_at: i64,
@@ -106,7 +117,7 @@ impl VerifiedMessage {
         let files: Vec<FileDigest> = p
             .files
             .iter()
-            .map(|f| FileDigest { name: f.name.clone(), sha256: sha256(&f.bytes) })
+            .map(|f| FileDigest { name: f.wire_name.clone(), sha256: sha256(&f.bytes) })
             .collect();
         let digest = envelope_digest(&Envelope {
             version: crate::WIRE_VERSION,
@@ -114,7 +125,7 @@ impl VerifiedMessage {
             from: &p.from,
             to: &p.to,
             sent_at: p.sent_at,
-            mode: p.mode.as_str(),
+            mode: p.mode,
             content_type: &p.content_type,
             files: &files,
             body_sha256,
@@ -151,7 +162,7 @@ impl VerifiedMessage {
         &self.to
     }
     #[must_use]
-    pub fn sender_fingerprint(&self) -> &str {
+    pub fn sender_fingerprint(&self) -> &crate::pairing::Fingerprint {
         &self.sender_fingerprint
     }
     #[must_use]
@@ -330,7 +341,7 @@ mod tests {
             id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
             from: "alice::acme.postal.bot".into(),
             to: "scout::acme.postal.bot".into(),
-            sender_fingerprint: "aa".repeat(32),
+            sender_fingerprint: crate::pairing::Fingerprint::parse(&"aa".repeat(32)).unwrap(),
             body: b"hello scout".to_vec(),
             content_type: "text/plain; charset=utf-8".into(),
             sent_at: 1_800_000_000,
@@ -341,9 +352,14 @@ mod tests {
         };
         let m = VerifiedMessage::new(parts.clone()).unwrap();
         assert_eq!(m.body_sha256(), &crate::badge::sha256(b"hello scout"));
-        assert_eq!(m.files()[0].name(), "x_y.txt");
-        let mut changed = parts;
-        changed.files = vec![Attachment::new("x y.txt", b"y".to_vec())];
+        assert_eq!(m.files()[0].storage_name(), "x_y.txt");
+        assert_eq!(m.files()[0].wire_name(), "../../x y.txt");
+        let mut changed = parts.clone();
+        changed.files = vec![Attachment::new("../../x y.txt", b"y".to_vec())];
         assert_ne!(VerifiedMessage::new(changed).unwrap().badge(), m.badge());
+        // The digest covers the raw wire name: names that sanitize alike differ.
+        let mut renamed = parts;
+        renamed.files = vec![Attachment::new("x_y.txt", b"x".to_vec())];
+        assert_ne!(VerifiedMessage::new(renamed).unwrap().badge(), m.badge());
     }
 }

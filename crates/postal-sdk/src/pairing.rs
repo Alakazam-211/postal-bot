@@ -27,7 +27,12 @@
 //!
 //! Each step consumes the previous state, so the order can't be changed and
 //! a nonce can't be used twice. Each state expires [`NONCE_TTL_SECS`] after
-//! it was made. A party in the middle must fix its key and nonce before it
+//! it was made.
+//!
+//! **Host rules the types can't enforce:** answer at most one
+//! [`Response`] per commitment and per pair id, and limit how many pairing
+//! attempts a peer may start (say, a few per hour). Every extra response is
+//! another 1-in-10^6 guess for a party in the middle. A party in the middle must fix its key and nonce before it
 //! can learn the other side's nonce, so it gets one guess per pairing
 //! attempt (1 in 10^6). Nonces are secrets until revealed; never log them.
 
@@ -199,8 +204,7 @@ impl Code {
     }
 }
 
-/// A's side, after step 1.
-#[derive(Debug)]
+/// A's side, after step 1. No `Clone`, and `Debug` never prints `Na`.
 pub struct Initiator {
     ctx: PairContext,
     fp_a: Fingerprint,
@@ -235,8 +239,7 @@ impl Initiator {
     }
 }
 
-/// B's side, after step 2.
-#[derive(Debug)]
+/// B's side, after step 2. No `Clone`, and `Debug` never prints `Nb`.
 pub struct Responder {
     ctx: PairContext,
     fp_a: Fingerprint,
@@ -288,11 +291,37 @@ impl Responder {
     }
 }
 
-fn fresh(made_at: i64, now: i64) -> Result<(), PairError> {
-    if now < made_at || now - made_at > NONCE_TTL_SECS {
-        return Err(PairError::Expired);
+impl std::fmt::Debug for Initiator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Initiator")
+            .field("ctx", &self.ctx)
+            .field("fp_a", &self.fp_a)
+            .field("na", &"<secret>")
+            .field("made_at", &self.made_at)
+            .finish()
     }
-    Ok(())
+}
+
+impl std::fmt::Debug for Responder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Responder")
+            .field("ctx", &self.ctx)
+            .field("fp_a", &self.fp_a)
+            .field("fp_b", &self.fp_b)
+            .field("c", &self.c)
+            .field("nb", &"<secret>")
+            .field("made_at", &self.made_at)
+            .finish()
+    }
+}
+
+/// A state is good for strictly less than [`NONCE_TTL_SECS`]. A clock that
+/// went backwards, or values that overflow, count as expired.
+fn fresh(made_at: i64, now: i64) -> Result<(), PairError> {
+    match now.checked_sub(made_at) {
+        Some(age) if (0..NONCE_TTL_SECS).contains(&age) => Ok(()),
+        _ => Err(PairError::Expired),
+    }
 }
 
 fn new_nonce() -> Result<Nonce, PairError> {
@@ -403,8 +432,22 @@ mod tests {
     fn states_expire() {
         let (a, c) = Initiator::start_with(ctx(), fp('a'), NA, T0).unwrap();
         let (b, resp) = Responder::respond_with(ctx(), fp('a'), c, fp('b'), NB, T0);
-        assert_eq!(a.finish(resp, T0 + NONCE_TTL_SECS + 1).unwrap_err(), PairError::Expired);
+        assert_eq!(a.finish(resp, T0 + NONCE_TTL_SECS).unwrap_err(), PairError::Expired, "exactly the TTL is too old");
         assert_eq!(b.finish(Reveal(NA), T0 - 1), Err(PairError::Expired), "clock went backwards");
+        assert_eq!(fresh(i64::MIN, i64::MAX), Err(PairError::Expired), "overflow is expired, not a panic");
+        assert_eq!(fresh(i64::MAX, i64::MIN), Err(PairError::Expired));
+        assert_eq!(fresh(T0, T0 + NONCE_TTL_SECS - 1), Ok(()));
+    }
+
+    #[test]
+    fn debug_never_prints_nonces() {
+        let (a, c) = Initiator::start_with(ctx(), fp('a'), NA, T0).unwrap();
+        let (b, _) = Responder::respond_with(ctx(), fp('a'), c, fp('b'), NB, T0);
+        for s in [format!("{a:?}"), format!("{b:?}")] {
+            assert!(!s.contains("17, 17"), "{s}");
+            assert!(!s.contains("34, 34"), "{s}");
+            assert!(s.contains("<secret>"));
+        }
     }
 
     #[test]

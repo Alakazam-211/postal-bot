@@ -38,6 +38,7 @@ impl std::error::Error for TooLong {}
 /// One attachment as the envelope digest sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDigest {
+    /// The raw name as sent on the wire, never the sanitized storage name.
     pub name: String,
     pub sha256: [u8; 32],
 }
@@ -51,8 +52,7 @@ pub struct Envelope<'a> {
     pub to: &'a str,
     /// Unix seconds, sender's clock.
     pub sent_at: i64,
-    /// `live` or `tray`.
-    pub mode: &'a str,
+    pub mode: crate::host::Mode,
     pub content_type: &'a str,
     pub files: &'a [FileDigest],
     pub body_sha256: [u8; 32],
@@ -77,7 +77,7 @@ pub fn envelope_digest(e: &Envelope<'_>) -> Result<[u8; 32], TooLong> {
         frame(&mut h, field.as_bytes())?;
     }
     h.update(e.sent_at.to_be_bytes());
-    for field in [e.mode, e.content_type] {
+    for field in [e.mode.as_str(), e.content_type] {
         frame(&mut h, field.as_bytes())?;
     }
     let count = u32::try_from(e.files.len()).map_err(|_| TooLong)?;
@@ -113,7 +113,7 @@ mod tests {
             from: "alice::acme.postal.bot",
             to: "scout::acme.postal.bot",
             sent_at: 1_800_000_000,
-            mode: "live",
+            mode: crate::host::Mode::Live,
             content_type: "text/plain; charset=utf-8",
             files,
             body_sha256: sha256(b"hello scout"),
@@ -143,7 +143,7 @@ mod tests {
         e.sent_at += 1;
         variants.push(e);
         let mut e = env(&none);
-        e.mode = "tray";
+        e.mode = crate::host::Mode::Tray;
         variants.push(e);
         let mut e = env(&none);
         e.content_type = "text/markdown";
@@ -197,14 +197,19 @@ mod tests {
                     sha256: sha256(f["content"].as_str().unwrap().as_bytes()),
                 })
                 .collect();
-            let (id, from, to, mode, ct) = (s("id"), s("from"), s("to"), s("mode"), s("content_type"));
+            let (id, from, to, ct) = (s("id"), s("from"), s("to"), s("content_type"));
+            let mode = match s("mode").as_str() {
+                "live" => crate::host::Mode::Live,
+                "tray" => crate::host::Mode::Tray,
+                other => panic!("mode {other}"),
+            };
             let e = Envelope {
                 version: u32::try_from(v["version"].as_u64().unwrap()).unwrap(),
                 id: &id,
                 from: &from,
                 to: &to,
                 sent_at: v["sent_at"].as_i64().unwrap(),
-                mode: &mode,
+                mode,
                 content_type: &ct,
                 files: &files,
                 body_sha256: sha256(s("body").as_bytes()),
