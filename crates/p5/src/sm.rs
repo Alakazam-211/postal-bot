@@ -448,17 +448,68 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         Err(err) => return Err(err.into()),
     };
 
+    deliver_item(ctx, &item, &to, &from, &req.body, req.no_wake)
+}
+
+/// What one outbox flush did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FlushReport {
+    pub tried: usize,
+    pub delivered: usize,
+    pub failed: usize,
+    pub queued: usize,
+}
+
+/// Retry every queued row that is due (F11). Same delivery as `p5 msg`.
+/// A row that is still queued counts one attempt: backoff grows, and at
+/// [`p5_core::MAX_AUTO_ATTEMPTS`] it becomes `failed` and leaves the outbox.
+/// The sender's `--no-wake` isn't stored, so a retry may wake (the default).
+pub fn flush_outbox(ctx: &SmContext, now: std::time::SystemTime) -> Result<FlushReport, SmError> {
+    let mut report = FlushReport::default();
+    for item in ctx.mailbox.due_outbox(now)? {
+        report.tried += 1;
+        let resp = deliver_item(ctx, &item, &item.to, &item.from, &item.body, false)?;
+        match resp.status.as_deref() {
+            Some("delivered") | Some("acked") => report.delivered += 1,
+            Some("failed") => report.failed += 1,
+            Some("held") => report.queued += 1,
+            _ => {
+                let after = ctx.mailbox.record_attempt(&item.id, now)?;
+                if after.status == DeliveryStatus::Failed {
+                    report.failed += 1;
+                } else {
+                    report.queued += 1;
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Deliver a row that is already durable in sent/outbox: remote (live, or
+/// hold), or a local handle on this box.
+fn deliver_item(
+    ctx: &SmContext,
+    item: &MailItem,
+    to: &PostalAddr,
+    from: &PostalAddr,
+    body: &str,
+    no_wake: bool,
+) -> Result<MsgResponse, SmError> {
+    let to = to.clone();
+    let from = from.clone();
     if !ctx.dest_is_local(&to) {
         if ctx.hold {
-            return crate::hold::finish_remote(ctx, &item, &to, &from, &req.body);
+            return crate::hold::finish_remote(ctx, item, &to, &from, body);
         }
-        return send_live(ctx, &item, &from, req, &to);
+        return send_live(ctx, item, &from, body, no_wake, &to);
     }
 
+    let typ = declared_typ(ctx, &to);
     if typ != Some(PeerType::Session) && typ != Some(PeerType::Turn) {
         // Unknown is not session (K22).
         return Ok(MsgResponse::ok_status(
-            item.id,
+            item.id.clone(),
             &to,
             DeliveryStatus::Queued,
             item.attempts,
@@ -471,11 +522,11 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         id: item.id.clone(),
         to: to.clone(),
         from,
-        body: req.body.clone(),
+        body: body.to_string(),
         mode: DeliveryMode::Live,
         typ: typ.expect("session or turn"),
         files: Vec::new(),
-        no_wake: req.no_wake,
+        no_wake,
     };
 
     match receive_msg(ctx, &inbound) {
@@ -495,7 +546,7 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         Err(ReceiveError::Permanent { reason, .. }) if is_retryable_receive(reason) => {
             // 503 host_down → later HOLD; 429 → retry live. Stay queued.
             Ok(MsgResponse::ok_status(
-                item.id,
+                item.id.clone(),
                 &to,
                 DeliveryStatus::Queued,
                 item.attempts,
@@ -534,7 +585,8 @@ fn send_live(
     ctx: &SmContext,
     item: &MailItem,
     from: &PostalAddr,
-    req: &MsgRequest,
+    body: &str,
+    no_wake: bool,
     to: &PostalAddr,
 ) -> Result<MsgResponse, SmError> {
     let Some(key) = load_identity(ctx.mailbox.root()) else {
@@ -555,9 +607,9 @@ fn send_live(
             to: to.to_string(),
             from: from.to_string(),
             id: item.id.clone(),
-            wake: !req.no_wake,
+            wake: !no_wake,
             mode: item.mode.as_str().to_string(),
-            body: req.body.clone(),
+            body: body.to_string(),
         },
     );
     match result {
@@ -730,7 +782,15 @@ pub fn receive_session(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutc
     })?;
 
     if let Err(err) = last_mile::after_inbox_fsync(ctx, home, inbound) {
-        eprintln!("p5: last-mile: {err}");
+        // The mail is safe in the inbox; only the nudge failed. Retry it.
+        eprintln!("p5: last-mile: {err} (will retry)");
+        crate::retry::queue_knock(
+            ctx.mailbox.root(),
+            &inbound.id,
+            inbound.no_wake,
+            &err.to_string(),
+            std::time::SystemTime::now(),
+        );
     }
 
     Ok(ReceiveOutcome {
@@ -810,11 +870,17 @@ pub fn receive_turn(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome
     }
 
     if let Err(err) = last_mile::after_inbox_fsync(ctx, home, inbound) {
-        release_turn_slot(ctx, &inbound.from, reserved_at);
-        return Err(permanent(
-            REASON_HOST_DOWN,
-            format!("grok last-mile failed; sender should HOLD ({err})"),
-        ));
+        // Inbox is durable, so this is delivered. Telling the sender to HOLD
+        // here meant its retry hit `already` and the bot was never prompted.
+        // Retry the prompt ourselves instead.
+        eprintln!("p5: turn last-mile: {err} (will retry)");
+        crate::retry::queue_knock(
+            ctx.mailbox.root(),
+            &inbound.id,
+            inbound.no_wake,
+            &err.to_string(),
+            std::time::SystemTime::now(),
+        );
     }
 
     Ok(ReceiveOutcome {
@@ -1051,6 +1117,14 @@ fn permanent(reason: &'static str, hint: impl Into<String>) -> ReceiveError {
     }
 }
 
+/// `NAME=0` / `false` / `off` / `no` turns a default-on feature off.
+pub(crate) fn env_flag_off(name: &str) -> bool {
+    matches!(
+        std::env::var(name).map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Ok("0" | "false" | "off" | "no")
+    )
+}
+
 pub(crate) fn env_flag(name: &str) -> bool {
     match std::env::var(name) {
         Ok(v) => {
@@ -1061,9 +1135,6 @@ pub(crate) fn env_flag(name: &str) -> bool {
     }
 }
 
-fn env_is_set(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|v| !v.is_empty())
-}
 
 fn load_our_typ(root: &Path) -> Option<PeerType> {
     if let Some(t) = parse_typ_env("P5_TYP") {
@@ -1397,6 +1468,55 @@ mod tests {
         assert_eq!(sent.last_error.as_deref(), Some("host_down"));
         assert!(sent.hold_id.is_none());
         assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn flush_outbox_retries_queued_and_delivers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let down = p5_live::mock::HttpsPeer::spawn(503, r#"{"error":"host_down"}"#);
+        let mut ctx = live_ctx_https(tmp.path(), &down);
+        let resp = send_msg(&ctx, &remote_peer_msg()).unwrap();
+        assert_eq!(resp.status.as_deref(), Some("queued"));
+        let id = resp.id.unwrap();
+
+        // Still down: one attempt counted, backoff set, still queued.
+        let now = std::time::SystemTime::now();
+        let r = flush_outbox(&ctx, now).unwrap();
+        assert_eq!((r.tried, r.queued), (1, 1));
+        let sent = ctx.mailbox.read_sent(&id).unwrap();
+        assert_eq!(sent.attempts, 1);
+        assert!(sent.next_attempt_at.is_some_and(|t| t > now));
+        // Not due yet: nothing tried.
+        assert_eq!(flush_outbox(&ctx, now).unwrap().tried, 0);
+
+        // Peer back up: the next due flush delivers and the outbox empties.
+        let up = p5_live::mock::HttpsPeer::spawn(
+            200,
+            r#"{"already":false,"status":"delivered","typ":"session"}"#,
+        );
+        ctx.live_base = Some(up.base_url.clone());
+        ctx.live =
+            LiveClient::with_root_der(std::time::Duration::from_secs(2), &up.cert_der).unwrap();
+        let later = now + std::time::Duration::from_secs(3600);
+        let r = flush_outbox(&ctx, later).unwrap();
+        assert_eq!((r.tried, r.delivered), (1, 1));
+        assert_eq!(ctx.mailbox.read_sent(&id).unwrap().status, DeliveryStatus::Delivered);
+        assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flush_outbox_gives_up_after_max_attempts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let down = p5_live::mock::HttpsPeer::spawn(503, r#"{"error":"host_down"}"#);
+        let ctx = live_ctx_https(tmp.path(), &down);
+        let id = send_msg(&ctx, &remote_peer_msg()).unwrap().id.unwrap();
+        let mut t = std::time::SystemTime::now();
+        for _ in 0..p5_core::MAX_AUTO_ATTEMPTS {
+            t += std::time::Duration::from_secs(3600);
+            flush_outbox(&ctx, t).unwrap();
+        }
+        assert_eq!(ctx.mailbox.read_sent(&id).unwrap().status, DeliveryStatus::Failed);
+        assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
     }
 
     fn roster_entry(typ: PeerType) -> RosterEntry {
@@ -1872,20 +1992,60 @@ mod tests {
     }
 
     #[test]
-    fn turn_prompt_fail_after_inbox_does_not_reprompt() {
+    fn turn_prompt_fail_after_inbox_is_retried_not_lost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 500);
+        let mut ctx = ctx_turn(tmp.path(), &sand);
+        let inbound = turn_inbound("01ARZ3NDEKTSV4RRFFQ69G5FAV", "alice::acme.postal.bot", "hi");
+        // Inbox is durable, so the sender is told "delivered"; the prompt is queued.
+        let rx = receive_msg(&ctx, &inbound).unwrap();
+        assert!(!rx.already);
+        assert_eq!(ctx.mailbox.read_inbox(&inbound.id).unwrap().body, "hi");
+        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
+        assert!(crate::retry::load_knocks(tmp.path()).contains_key(&inbound.id));
+        // A sender retry is `already` and doesn't double-prompt.
+        let retry = receive_msg(&ctx, &inbound).unwrap();
+        assert!(retry.already);
+        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
+        // Gateway back: the retry loop prompts once and clears the queue.
+        let up = crate::turn::MockSand::spawn(200, 200);
+        ctx.turn = up.config();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let r = crate::retry::flush_knocks(&ctx, later);
+        assert_eq!((r.tried, r.knocked), (1, 1));
+        assert_eq!(up.prompts.lock().unwrap().len(), 1);
+        assert!(crate::retry::load_knocks(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn knock_retry_gives_up_but_keeps_the_mail() {
         let tmp = tempfile::tempdir().unwrap();
         let sand = crate::turn::MockSand::spawn(200, 500);
         let ctx = ctx_turn(tmp.path(), &sand);
         let inbound = turn_inbound("01ARZ3NDEKTSV4RRFFQ69G5FAV", "alice::acme.postal.bot", "hi");
-        match receive_msg(&ctx, &inbound) {
-            Err(ReceiveError::Permanent { reason, .. }) => assert_eq!(reason, REASON_HOST_DOWN),
-            other => panic!("expected host_down, got {other:?}"),
+        receive_msg(&ctx, &inbound).unwrap();
+        let mut t = std::time::SystemTime::now();
+        let mut gave_up = 0;
+        for _ in 0..p5_core::MAX_AUTO_ATTEMPTS + 1 {
+            t += std::time::Duration::from_secs(3600);
+            gave_up += crate::retry::flush_knocks(&ctx, t).gave_up;
         }
+        assert_eq!(gave_up, 1);
+        assert!(crate::retry::load_knocks(tmp.path()).is_empty());
         assert_eq!(ctx.mailbox.read_inbox(&inbound.id).unwrap().body, "hi");
-        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
-        let retry = receive_msg(&ctx, &inbound).unwrap();
-        assert!(retry.already);
-        assert_eq!(sand.prompts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn knock_retry_drops_mail_that_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sand = crate::turn::MockSand::spawn(200, 200);
+        let ctx = ctx_turn(tmp.path(), &sand);
+        let now = std::time::SystemTime::now();
+        crate::retry::queue_knock(tmp.path(), "01ARZ3NDEKTSV4RRFFQ69G5FAV", false, "x", now);
+        let r = crate::retry::flush_knocks(&ctx, now + std::time::Duration::from_secs(3600));
+        assert_eq!((r.tried, r.knocked), (1, 0));
+        assert!(crate::retry::load_knocks(tmp.path()).is_empty());
+        assert!(sand.prompts.lock().unwrap().is_empty());
     }
 
     #[test]
