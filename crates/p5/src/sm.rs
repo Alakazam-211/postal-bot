@@ -232,7 +232,7 @@ impl SmContext {
         }
         ctx.live_url = env_nonempty("P5_LIVE_URL");
         ctx.live_base = ctx.live_url.clone();
-        ctx.last_mile.k2 = crate::k2::K2MsgClient::from_k2_home();
+        ctx.last_mile.k2 = crate::k2::K2MsgClient::from_k2_home(root);
         Ok(ctx)
     }
 
@@ -1619,7 +1619,7 @@ mod tests {
         assert_eq!(knocks[0].workspace, "/srv/scout");
         assert_eq!(knocks[0].from, "alice::acme.postal.bot");
         assert!(knocks[0].wake);
-        assert_eq!(knocks[0].text, "hello scout");
+        assert_eq!(knocks[0].text, "[postal alice::acme.postal.bot]\n> hello scout");
         assert!(!knocks[0].text.contains("p5 inbox"));
         assert!(!knocks[0].text.contains("[p5:"));
         assert_eq!(knocks[0].project, "/srv/scout");
@@ -1641,7 +1641,7 @@ mod tests {
         let inbound = k2_inbound(body);
         receive_session(&ctx, &inbound).unwrap();
         let knocks = ctx.last_mile.k2.recorded();
-        assert_eq!(knocks[0].text, body);
+        assert_eq!(knocks[0].text, format!("[postal alice::acme.postal.bot]\n> {body}"));
         assert!(knocks[0].text.contains("Keep bot.postal.frpc"));
         assert!(!knocks[0].text.ends_with("Round trip pro"));
     }
@@ -1787,7 +1787,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert_eq!(
             prompts[0]["prompt"],
-            "[from alice::acme.postal.bot] hi"
+            "[postal alice::acme.postal.bot]\n> hi"
         );
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("k2g"));
         assert_eq!(prompts[0]["agentId"], "sand-1");

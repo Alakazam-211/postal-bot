@@ -450,9 +450,10 @@ pub fn send_prompt(
     agent_id: &str,
     nonce: &str,
 ) -> Result<(), TurnNetError> {
-    let prompt = format!(
-        "[from {from}] {}",
-        crate::last_mile::guard_inject(body)
+    // Label line, then every body line quoted: a body can't fake a stamp.
+    let prompt = crate::last_mile::quote_for_inject(
+        &from.to_string(),
+        &crate::last_mile::guard_inject(body),
     );
     let payload = json!({
         "agentId": agent_id,
@@ -814,7 +815,7 @@ mod tests {
         assert_eq!(prompts[0]["agentId"], "sand-1");
         assert_eq!(
             prompts[0]["prompt"],
-            "[from alice::acme.postal.bot] ship it"
+            "[postal alice::acme.postal.bot]\n> ship it"
         );
         assert_eq!(prompts[0]["clientNonce"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert!(!prompts[0]["prompt"].as_str().unwrap().contains("[k2g]"));
@@ -842,7 +843,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        assert!(prompt.starts_with("[from alice::acme.postal.bot]"));
+        assert!(prompt.starts_with("[postal alice::acme.postal.bot]\n> "));
         assert!(!prompt.starts_with('/'));
         for line in prompt.lines() {
             assert!(
@@ -947,7 +948,7 @@ mod tests {
         assert_eq!(prompts[0]["agentId"], uuid);
         assert_eq!(
             prompts[0]["prompt"],
-            "[from postal-bot::acme.postal.bot] hello grok"
+            "[postal postal-bot::acme.postal.bot]\n> hello grok"
         );
     }
 

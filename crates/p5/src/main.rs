@@ -119,6 +119,13 @@ enum Commands {
         #[command(subcommand)]
         action: PairAction,
     },
+    /// Workspaces a host may let p5 deliver into (scoped key per workspace).
+    /// Run by the host after a person approves, so hidden from help.
+    #[command(hide = true)]
+    K2 {
+        #[command(subcommand)]
+        action: K2Action,
+    },
     /// Pull held mail from the plane (one shot; requires `P5_HOLD=1`)
     Recv,
     /// Messages sent this month on this enrolled subdomain
@@ -230,6 +237,26 @@ enum PairAction {
         #[arg(long = "pem-file")]
         pem_file: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum K2Action {
+    /// Store a K2 API key scoped to one workspace (K2 runs this after a person
+    /// approves; the key comes on stdin, never argv)
+    Link {
+        /// K2 workspace slug
+        workspace: String,
+        /// Workspace folder (default: current directory)
+        #[arg(long)]
+        path: Option<String>,
+        /// Read the key from stdin (required)
+        #[arg(long = "key-stdin", required = true)]
+        key_stdin: bool,
+    },
+    /// Forget a workspace's key
+    Unlink { workspace: String },
+    /// List linked workspaces (never prints keys)
+    Links,
 }
 
 #[derive(Debug, Subcommand)]
@@ -377,10 +404,13 @@ Built-in  grok  (Grok Bot / Sand, usually type turn)
   From even if you export GROK_SESSION_ID.
 
 Built-in  k2  (K2 workspace, type session)
-  POST /cli/workspace/msg on the local k2-daemon (same route as k2 msg).
-  Auth: ~/.k2/daemon.port + daemon.token (P5_K2_MSG=0 disables)
-  Target: homes.cwd if it is an absolute path, else the Postal handle.
-  Knock text: the mail body (k2 stamps [from <addr>]). Tray stays ~/.postal/inbox.
+  POST /v1/w/<ws>/message on the local k2-daemon, Bearer a K2 API key
+  scoped to that workspace. K2 checks the workspace's remote-instruction
+  opt-in and refuses a busy agent. Never K2's owner token.
+  Link: K2 runs `p5 k2 link <ws> --key-stdin` after a person approves.
+  Unlinked workspace: no knock (P5_K2_MSG=0 disables). Tray stays ~/.postal/inbox.
+  Match: homes.cwd against the link's folder, else the workspace slug.
+  Knock text: `[postal <from>]`, then every body line quoted with `> `.
   wake=true unless the sender passed --no-wake.
 
 Exec plugin  (anything else)
@@ -490,8 +520,18 @@ fn format_sent_line(item: &MailItem) -> String {
     )
 }
 
+/// Held mail (HoldSeal-v1) has no sender signature yet: the plane asserts
+/// `from`. Say so until wire v2 signs it inside the seal.
+const HELD_UNVERIFIED: &str = "held: sender not verified";
+
 fn format_inbox_line(item: &MailItem) -> String {
-    format!("{}  {}  {}", item.id, item.from, item.to)
+    let mut line = format!("{}  {}  {}", item.id, item.from, item.to);
+    if item.hold_id.is_some() {
+        line.push_str("  (");
+        line.push_str(HELD_UNVERIFIED);
+        line.push(')');
+    }
+    line
 }
 
 fn print_lines(lines: impl IntoIterator<Item = String>) {
@@ -522,7 +562,12 @@ fn inbox_cmd(action: Option<InboxAction>) -> Result<(), MailboxError> {
             Ok(())
         }
         Some(InboxAction::Read { id }) => {
-            print!("{}", mb.read_inbox_cover(&id)?);
+            // Any folder: done/archived held mail is still unverified.
+            if mb.read_inbox(&id)?.hold_id.is_some() {
+                println!("[{HELD_UNVERIFIED}]");
+            }
+            // The cover on disk is the original; the terminal gets no escapes.
+            print!("{}", last_mile::strip_controls(&mb.read_inbox_cover(&id)?));
             Ok(())
         }
         Some(InboxAction::Respond { .. }) => {
@@ -768,6 +813,12 @@ fn main() {
             action: PairAction::SetKey { addr, pem_file },
         } => finish_pair(run_set_key(addr, pem_file)),
         Commands::Me { typ, pem } => finish_pair(run_me(typ, pem)),
+        Commands::K2 { action } => {
+            if let Err(err) = run_k2(action) {
+                eprintln!("{err}");
+                std::process::exit(EXIT_USAGE_K2);
+            }
+        }
         Commands::Recv => match hold::run_recv() {
             Ok(report) => println!("pulled {}", report.pulled),
             Err(err) => {
@@ -776,6 +827,54 @@ fn main() {
             }
         },
     }
+}
+
+const EXIT_USAGE_K2: i32 = 2;
+
+fn run_k2(action: K2Action) -> Result<(), String> {
+    let root = default_root();
+    let mut links = k2::try_load_links(&root)?;
+    match action {
+        K2Action::Link { workspace, path, .. } => {
+            let workspace = workspace.trim().to_string();
+            if workspace.is_empty() || workspace.contains('/') || workspace.contains("..") {
+                return Err("bad workspace slug".into());
+            }
+            let mut key = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut key)
+                .map_err(|e| format!("read key: {e}"))?;
+            let key = key.trim().to_string();
+            if key.is_empty() || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err("no key on stdin".into());
+            }
+            let path = match path {
+                Some(p) => p,
+                None => std::env::current_dir()
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            links.retain(|l| l.workspace != workspace);
+            links.push(k2::K2Link { workspace: workspace.clone(), path: path.clone(), key });
+            k2::save_links(&root, &links).map_err(|e| e.to_string())?;
+            println!("{workspace}  {path}");
+        }
+        K2Action::Unlink { workspace } => {
+            let before = links.len();
+            links.retain(|l| l.workspace != workspace);
+            if links.len() == before {
+                return Err(format!("{workspace} is not linked"));
+            }
+            k2::save_links(&root, &links).map_err(|e| e.to_string())?;
+            println!("ok");
+        }
+        K2Action::Links => {
+            for l in &links {
+                println!("{}  {}", l.workspace, l.path);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -817,7 +916,7 @@ mod tests {
         assert!(text.contains("sand-data/gateway.json"));
         assert!(text.contains("Authorization: Bearer"));
         assert!(text.contains("activeAgentId"));
-        assert!(text.contains("cli/workspace/msg"));
+        assert!(text.contains("/v1/w/<ws>/message"));
         assert!(text.contains("Knock JSON v1"));
         assert!(text.contains("401"));
         assert!(text.contains("[p5]"));
