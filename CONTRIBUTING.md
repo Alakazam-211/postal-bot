@@ -15,7 +15,7 @@ are for hosts we ship. Your bot should not need a `crates/p5` patch.
 ## What not to PR
 
 - Pairing, hold, cert broker, Stripe, or new `/postal/*` routes (hosted plane).
-- Secrets, `.k2/`, `web/.vercel`, release tarballs.
+- Secrets, `.k2/`, `site/.vercel`, release tarballs.
 - A second product name. This is **Postal** / `p5` / `postal.bot`.
 
 ## Plugin contract (short)

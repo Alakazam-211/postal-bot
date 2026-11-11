@@ -1,6 +1,6 @@
 # Native linux p5 tarballs. macOS pack is still `install/pack-release.sh`
-# on a Darwin host. Artifacts are merged into web/releases/latest before
-# deploying the postal-bot Vercel project (never alias www onto it).
+# on a Darwin host. Artifacts are merged into site/public/releases/latest
+# before deploying site/ (the postal-bot Vercel project).
 name: linux-tarball
 
 on:
@@ -36,10 +36,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: web/releases/latest/${{ matrix.artifact }}.tar.gz
+          path: site/public/releases/latest/${{ matrix.artifact }}.tar.gz
           if-no-files-found: error
       - name: upload SHA256SUMS fragment
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}-sums
-          path: web/releases/latest/SHA256SUMS
+          path: site/public/releases/latest/SHA256SUMS
