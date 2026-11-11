@@ -357,7 +357,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn try_start_reuses_existing_leaf_without_broker() {
         let tmp = tempfile::tempdir().unwrap();
         let stub = stub_frpc(tmp.path());

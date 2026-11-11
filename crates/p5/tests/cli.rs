@@ -6,8 +6,11 @@ use p5_core::{
     ToolFlags,
 };
 
+/// Every test starts without the developer's gates or secrets in env.
 fn p5() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_p5"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_p5"));
+    cmd.env_remove("P5_DEV_SECRET").env_remove("P5_OWNER_PAIR");
+    cmd
 }
 
 fn stdout(args: &[&str]) -> String {
@@ -453,6 +456,7 @@ fn msg_rejects_from_flag() {
     );
 }
 
+#[test]
 fn msg_bad_address_exits_2() {
     let home = tmp_home();
     let out = run_home(
