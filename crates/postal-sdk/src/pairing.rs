@@ -32,7 +32,9 @@
 //! **Host rules the types can't enforce:** answer at most one
 //! [`Response`] per commitment and per pair id, and limit how many pairing
 //! attempts a peer may start (say, a few per hour). Every extra response is
-//! another 1-in-10^6 guess for a party in the middle. A party in the middle must fix its key and nonce before it
+//! another 1-in-10^6 guess for a party in the middle.
+//!
+//! A party in the middle must fix its key and nonce before it
 //! can learn the other side's nonce, so it gets one guess per pairing
 //! attempt (1 in 10^6). Nonces are secrets until revealed; never log them.
 

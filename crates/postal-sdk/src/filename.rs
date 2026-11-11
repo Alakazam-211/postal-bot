@@ -11,9 +11,10 @@
 //! 2. Map anything outside `[A-Za-z0-9._-]` to `_`.
 //! 3. Strip leading and trailing `.`, `_` and `-` until none is left, so no
 //!    hidden files (`.bashrc`), no `..`, and no names that start like a flag.
-//! 4. Prefix Windows reserved device names (`CON`, `nul.txt`, `COM1.log`, …)
-//!    with `file-`.
-//! 5. Cap at [`MAX_LEN`] bytes, keeping a short extension.
+//! 4. Cap at [`MAX_LEN`] bytes, keeping a short extension.
+//! 5. Prefix Windows reserved device names (`CON`, `nul.txt`, `COM0.log`, …)
+//!    with `file-`, after the cut, since a cut can expose one; a name that is
+//!    still long is cut again to leave room for the prefix.
 //! 6. Anything empty becomes `attachment`.
 
 /// Longest storage name, in bytes (the output is ASCII).
@@ -21,9 +22,11 @@ pub const MAX_LEN: usize = 200;
 /// Longest extension kept when a name is cut, including the dot.
 const MAX_EXT: usize = 16;
 const FALLBACK: &str = "attachment";
+const RESERVED_PREFIX: &str = "file-";
+/// Microsoft's current list: COM0–9 and LPT0–9 included.
 const RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+    "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
 /// A storage name for `name`.
@@ -35,12 +38,14 @@ pub fn sanitize(name: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
         .collect();
     let mut out = trim_edges(&mapped).to_string();
-    let stem = out.split('.').next().unwrap_or("");
-    if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
-        out = format!("file-{out}");
-    }
     if out.len() > MAX_LEN {
-        out = trim_edges(&cap(&out)).to_string();
+        out = trim_edges(&cap(&out, MAX_LEN)).to_string();
+    }
+    if is_reserved(&out) {
+        if out.len() > MAX_LEN - RESERVED_PREFIX.len() {
+            out = trim_edges(&cap(&out, MAX_LEN - RESERVED_PREFIX.len())).to_string();
+        }
+        out = format!("{RESERVED_PREFIX}{out}");
     }
     if out.is_empty() {
         FALLBACK.to_string()
@@ -49,17 +54,22 @@ pub fn sanitize(name: &str) -> String {
     }
 }
 
+fn is_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("");
+    RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem))
+}
+
 fn trim_edges(s: &str) -> &str {
     s.trim_matches(|c| matches!(c, '.' | '_' | '-'))
 }
 
-/// Cut to [`MAX_LEN`], keeping the extension when it's short.
-fn cap(s: &str) -> String {
+/// Cut to `max` bytes, keeping the extension when it's short.
+fn cap(s: &str, max: usize) -> String {
     let (stem, ext) = match s.rfind('.') {
         Some(i) if s.len() - i <= MAX_EXT => (&s[..i], &s[i..]),
         _ => (s, ""),
     };
-    let room = MAX_LEN - ext.len();
+    let room = max - ext.len();
     let stem = trim_edges(&stem[..room.min(stem.len())]);
     let ext = if trim_edges(ext).is_empty() { "" } else { ext };
     format!("{stem}{ext}")
@@ -92,6 +102,9 @@ mod tests {
         "trailing.",
         "___",
         "a.b.c",
+        "COM0",
+        "lpt0.txt",
+        "CON.",
     ];
 
     #[test]
@@ -109,6 +122,9 @@ mod tests {
         assert_eq!(sanitize("nul.txt"), "file-nul.txt");
         assert_eq!(sanitize("COM1.log"), "file-COM1.log");
         assert_eq!(sanitize("CONSOLE.txt"), "CONSOLE.txt");
+        assert_eq!(sanitize("COM0"), "file-COM0");
+        assert_eq!(sanitize(&format!("CON{}.txt", "_".repeat(300))), "file-CON.txt");
+        assert_eq!(sanitize(&format!("nul{}x", "_".repeat(300))), "file-nul");
         assert_eq!(sanitize("ok-file_1.md"), "ok-file_1.md");
     }
 
@@ -116,15 +132,20 @@ mod tests {
     fn idempotent_and_never_hidden() {
         let long = format!("{}.pdf", "x".repeat(300));
         let long_ext = format!("a.{}", "y".repeat(300));
+        // A cut that exposes a reserved stem, and a reserved name still long.
+        let cut_con = format!("CON{}.txt", "_".repeat(300));
+        let cut_nul = format!("nul{}x", "_".repeat(300));
+        let long_con = format!("CON.{}", "a".repeat(300));
         let mut all: Vec<String> = PROBES.iter().map(|s| (*s).to_string()).collect();
-        all.extend([long, long_ext]);
+        all.extend([long, long_ext, cut_con, cut_nul, long_con]);
         for raw in &all {
             let once = sanitize(raw);
             assert_eq!(sanitize(&once), once, "not idempotent for {raw:?}");
             assert!(!once.is_empty());
             assert!(!once.starts_with(['.', '_', '-']), "{raw:?} -> {once:?}");
             assert!(once.len() <= MAX_LEN, "{raw:?}");
-            assert!(once.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
+            assert!(once.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')));
+            assert!(!super::is_reserved(&once), "{raw:?} -> {once:?}");
         }
     }
 
