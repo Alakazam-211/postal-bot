@@ -124,10 +124,6 @@ impl AgentState {
         if self.our_typ.is_some() {
             ctx.our_typ = self.our_typ;
         }
-        // Loopback secret skips pairing on receive; public path uses proof at HTTP.
-        if self.dev_secret.as_deref().is_some_and(|s| !s.is_empty()) {
-            ctx.dev_secret = true;
-        }
         Ok(ctx)
     }
 
@@ -271,6 +267,9 @@ fn handle_msg(state: &AgentState, headers: &[(String, String)], body: &[u8]) -> 
             return HttpOut::json(500, json!({"error": err.to_string()}));
         }
     };
+    // Only the request that carried the secret skips pairing. A configured
+    // secret must not open the door for proof-signed or held mail.
+    ctx.dev_secret = auth == MsgAuth::Secret;
 
     let default_host = ctx
         .homes
@@ -647,6 +646,16 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             secret.map(str::to_string),
         )
+    }
+
+    #[test]
+    fn configured_secret_does_not_open_shared_context() {
+        // Held mail and proof-signed mail build their context here. A secret
+        // on the box must not skip pairing for them; only the request that
+        // carried the header does (handle_msg).
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_home(tmp.path(), Some("s3cret"));
+        assert!(!state.context().unwrap().dev_secret);
     }
 
     #[test]

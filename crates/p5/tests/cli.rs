@@ -41,6 +41,8 @@ fn run_home(home: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::proc
     let mut cmd = p5();
     cmd.env("P5_HOME", home)
         .env("P5_BILLING", "0")
+        .env_remove("P5_DEV_SECRET")
+        .env_remove("P5_OWNER_PAIR")
         .env_remove("P5_HOLD")
         .env_remove("P5_PLANE_URL")
         .env_remove("P5_LIVE_URL")
@@ -586,6 +588,26 @@ fn agent_run_refuses_unspecified_bind() {
         err.contains("0.0.0.0") || err.contains("loopback") || err.contains("non-loopback"),
         "{err}"
     );
+}
+
+// Release builds ignore the secret, so the agent would start and run.
+#[cfg(debug_assertions)]
+#[test]
+fn agent_run_refuses_dev_secret_with_tunnel() {
+    let home = tmp_home();
+    let out = run_home(
+        home.path(),
+        &["agent", "run"],
+        &[
+            ("P5_DEV_SECRET", "s3cret"),
+            ("P5_TUNNEL", "1"),
+            ("P5_HTTP_BIND", "127.0.0.1:0"),
+        ],
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("P5_DEV_SECRET"), "{err}");
+    assert!(err.contains("tunnel"), "{err}");
 }
 
 #[test]
