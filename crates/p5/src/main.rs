@@ -9,6 +9,7 @@ mod http;
 mod k2;
 mod last_mile;
 mod pair;
+mod retry;
 mod service;
 mod session_map;
 mod sm;
@@ -290,6 +291,8 @@ enum SentAction {
 enum OutboxAction {
     /// List the retry queue
     List,
+    /// Retry every due row now (the resident agent also does this on its own)
+    Flush,
 }
 
 #[derive(Debug, Subcommand)]
@@ -694,6 +697,7 @@ fn outbox_cmd(action: Option<OutboxAction>) -> Result<(), MailboxError> {
             print_lines(items.iter().map(format_sent_line));
             Ok(())
         }
+        Some(OutboxAction::Flush) => unreachable!("flush is handled in main"),
     }
 }
 
@@ -749,6 +753,20 @@ fn main() {
         } => inbox_respond(id, text, no_wake, json),
         Commands::Inbox { action } => run_mailbox(inbox_cmd(action)),
         Commands::Sent { action } => run_mailbox(sent_cmd(action)),
+        Commands::Outbox {
+            action: Some(OutboxAction::Flush),
+        } => match SmContext::load_default().and_then(|ctx| {
+            sm::flush_outbox(&ctx, std::time::SystemTime::now())
+        }) {
+            Ok(r) => println!(
+                "tried {}  delivered {}  held {}  failed {}  queued {}",
+                r.tried, r.delivered, r.held, r.failed, r.queued
+            ),
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(err.exit_code());
+            }
+        },
         Commands::Outbox { action } => run_mailbox(outbox_cmd(action)),
         Commands::Agent {
             action: AgentAction::Run,

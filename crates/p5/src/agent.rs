@@ -176,6 +176,11 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
         None
     };
     let pair_handle = crate::pair::spawn_poll(root, Arc::clone(&state.stop));
+    // F11: retry queued sends and failed knocks (shares the live session map).
+    let retry_handle = {
+        let st = Arc::clone(&state);
+        crate::retry::spawn_loop(Arc::clone(&state.stop), move || st.context().ok())
+    };
 
     state.tunnel_up.store(tunnel.is_up(), Ordering::Relaxed);
     if tunnel.is_up() {
@@ -202,6 +207,9 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
     let _ = http_handle.join();
     let _ = uds_handle.join();
     if let Some(h) = hold_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = retry_handle {
         let _ = h.join();
     }
     if let Some(h) = pair_handle {
