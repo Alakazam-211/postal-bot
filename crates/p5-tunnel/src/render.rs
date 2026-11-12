@@ -17,6 +17,10 @@ pub const DEFAULT_FRP_SERVER: &str = "178.156.232.105";
 /// frps `bindPort`.
 pub const DEFAULT_FRP_PORT: u16 = 7000;
 pub const FRPC_TOML_FILE: &str = "frpc.toml";
+/// frpc's own log, beside `frpc.toml`. frpc rotates it daily.
+pub const FRPC_LOG_FILE: &str = "frpc.log";
+/// Days of rotated frpc logs to keep.
+pub const FRPC_LOG_DAYS: u32 = 3;
 
 #[derive(Clone)]
 pub struct FrpcSpec {
@@ -25,6 +29,9 @@ pub struct FrpcSpec {
     pub server_addr: String,
     pub server_port: u16,
     pub token: Option<String>,
+    /// Where frpc writes its log. `None` keeps frpc's default (the console,
+    /// which p5 discards).
+    pub log_file: Option<PathBuf>,
 }
 
 impl fmt::Debug for FrpcSpec {
@@ -35,6 +42,7 @@ impl fmt::Debug for FrpcSpec {
             .field("server_addr", &self.server_addr)
             .field("server_port", &self.server_port)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("log_file", &self.log_file)
             .finish()
     }
 }
@@ -84,6 +92,12 @@ pub fn render_frpc_toml(spec: &FrpcSpec) -> Result<String, SanError> {
     out.push_str("# Treat as a secret when a token is present (file is 0600).\n\n");
     out.push_str(&format!("serverAddr = {}\n", toml_str(&spec.server_addr)));
     out.push_str(&format!("serverPort = {}\n", spec.server_port));
+    if let Some(log) = &spec.log_file {
+        // Re-logins and their reasons, for diagnosing a flapping tunnel.
+        out.push_str(&format!("log.to = {}\n", toml_str(&log.to_string_lossy())));
+        out.push_str("log.level = \"info\"\n");
+        out.push_str(&format!("log.maxDays = {FRPC_LOG_DAYS}\n"));
+    }
     out.push('\n');
 
     if let Some(token) = spec
@@ -173,7 +187,26 @@ mod tests {
             server_addr: "127.0.0.1".into(),
             server_port: 7000,
             token: Some("tok_secret".into()),
+            log_file: None,
         }
+    }
+
+    #[test]
+    fn log_file_goes_before_any_table() {
+        let mut s = spec(8443);
+        s.log_file = Some(PathBuf::from("/home/a \"b\"/.postal/tunnel/frpc.log"));
+        let toml = render_frpc_toml(&s).unwrap();
+        let log = toml.find("log.to = ").expect("log.to");
+        assert!(
+            log < toml.find('[').unwrap(),
+            "top-level keys before tables: {toml}"
+        );
+        assert!(
+            toml.contains(r#"log.to = "/home/a \"b\"/.postal/tunnel/frpc.log""#),
+            "{toml}"
+        );
+        assert!(toml.contains("log.maxDays = 3"), "{toml}");
+        assert!(!render_frpc_toml(&spec(8443)).unwrap().contains("log."));
     }
 
     #[test]
