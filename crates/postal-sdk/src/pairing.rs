@@ -83,6 +83,8 @@ pub enum PairError {
     BadFingerprint,
     /// Not exactly 64 hex characters.
     BadHex,
+    /// Not a plane v2 pair id (16 to 64 ASCII letters and digits).
+    BadPairId,
     /// Not an Ed25519 `PUBLIC KEY` (SPKI) PEM, or a weak key.
     BadKey,
     /// Not standard padded base64 of exactly 64 bytes, or it doesn't verify.
@@ -111,6 +113,7 @@ impl std::fmt::Display for PairError {
         match self {
             Self::BadFingerprint => f.write_str("fingerprint must be 64 lowercase hex characters"),
             Self::BadHex => f.write_str("expected 64 hex characters"),
+            Self::BadPairId => f.write_str("pair id must be 16 to 64 ASCII letters and digits"),
             Self::BadKey => f.write_str("not an Ed25519 PUBLIC KEY PEM"),
             Self::BadSignature => {
                 f.write_str("confirmation signature is malformed or does not verify")
@@ -157,6 +160,12 @@ impl Fingerprint {
         from_hex32(s)
             .map(Self)
             .map_err(|_| PairError::BadFingerprint)
+    }
+
+    /// Raw SHA-256 bytes. For a stored pin, never for a pairing input.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
     #[must_use]
@@ -670,6 +679,7 @@ impl Handshake {
             .verify_strict(&msg, &Signature::from_bytes(&sig))
             .map_err(|_| PairError::WrongSigner)?;
         Ok(Confirmation {
+            pair_id: self.ctx.pair_id.clone(),
             side: self.side,
             decision,
             transcript: self.transcript,
@@ -704,6 +714,7 @@ pub enum Confirmed {
 /// One side's signed confirmation, for `POST /v1/pairs/{id}/confirm`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
+    pair_id: String,
     side: Side,
     decision: Decision,
     transcript: [u8; 32],
@@ -728,6 +739,70 @@ impl Confirmation {
     pub fn sig_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD.encode(self.sig)
     }
+
+    /// `POST {base}/api/postal/v1/pairs/{id}/confirm`.
+    ///
+    /// # Errors
+    /// [`PairError::BadPairId`].
+    pub fn path(&self) -> Result<String, PairError> {
+        confirm_path(&self.pair_id)
+    }
+
+    /// The request body, exactly the plane's
+    /// `{side, decision, transcript_sha256, sig}`. Every value is a fixed
+    /// word, hex or base64, so nothing needs escaping.
+    #[must_use]
+    pub fn body_json(&self) -> String {
+        format!(
+            r#"{{"side":"{}","decision":"{}","transcript_sha256":"{}","sig":"{}"}}"#,
+            self.side.as_str(),
+            self.decision.as_str(),
+            self.transcript_hex(),
+            self.sig_base64()
+        )
+    }
+
+    /// The plane answered 409 (this side already confirmed). Ed25519 is
+    /// deterministic, so a retry of the same confirmation carries the same
+    /// signature: if the stored one is ours, the earlier send landed and
+    /// this one is done. Anything else is a real conflict.
+    #[must_use]
+    pub fn same_as_stored(&self, stored_sig_base64: &str) -> bool {
+        stored_sig_base64.trim() == self.sig_base64()
+    }
+}
+
+/// Plane pair routes (K2 Web plane v1). The base URL is host config.
+pub const PAIRS_PATH: &str = "/api/postal/v1/pairs";
+/// Body of a revoke: unsigned, owner credentials of either side.
+pub const REVOKE_BODY: &str = "{}";
+
+/// The plane's v2 pair ids (a ULID in practice). Also keeps the id a safe
+/// path segment.
+fn check_pair_id(id: &str) -> Result<(), PairError> {
+    if (16..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        Ok(())
+    } else {
+        Err(PairError::BadPairId)
+    }
+}
+
+/// `POST {base}/api/postal/v1/pairs/{id}/confirm`.
+///
+/// # Errors
+/// [`PairError::BadPairId`].
+pub fn confirm_path(pair_id: &str) -> Result<String, PairError> {
+    check_pair_id(pair_id)?;
+    Ok(format!("{PAIRS_PATH}/{pair_id}/confirm"))
+}
+
+/// `POST {base}/api/postal/v1/pairs/{id}/revoke` with [`REVOKE_BODY`].
+///
+/// # Errors
+/// [`PairError::BadPairId`].
+pub fn revoke_path(pair_id: &str) -> Result<String, PairError> {
+    check_pair_id(pair_id)?;
+    Ok(format!("{PAIRS_PATH}/{pair_id}/revoke"))
 }
 
 /// This box's owner accepted. The peer isn't trusted until its own signed
@@ -1112,6 +1187,112 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    fn ulid_ctx() -> PairContext {
+        PairContext {
+            pair_id: "01JCONFIRMROUTE0000000000A".into(),
+            ..ctx()
+        }
+    }
+
+    /// K2 Web's FINAL route: `POST /api/postal/v1/pairs/{id}/confirm` with
+    /// exactly `{side, decision, transcript_sha256, sig}`.
+    #[test]
+    fn confirm_route_and_body_match_the_plane() {
+        let (ka, kb) = (sk(1), sk(2));
+        let (a, b) = handshake(ulid_ctx(), ulid_ctx(), &ka, &kb).unwrap();
+        let t = a.transcript_hex();
+        let code_b = b.code().clone();
+        let (conf, _) = accept(a, code_b.as_str(), &ka);
+        assert_eq!(
+            conf.path().unwrap(),
+            "/api/postal/v1/pairs/01JCONFIRMROUTE0000000000A/confirm"
+        );
+        let body: serde_json::Value = serde_json::from_str(&conf.body_json()).unwrap();
+        let obj = body.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["decision", "side", "sig", "transcript_sha256"]);
+        assert_eq!(obj["side"], "from");
+        assert_eq!(obj["decision"], "accept");
+        assert_eq!(obj["transcript_sha256"], t.as_str());
+        let sig = base64::engine::general_purpose::STANDARD
+            .decode(obj["sig"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(sig.len(), 64);
+        assert!(
+            obj["sig"].as_str().unwrap().ends_with("=="),
+            "standard padded base64"
+        );
+        assert_eq!(
+            revoke_path("01JCONFIRMROUTE0000000000A").unwrap(),
+            "/api/postal/v1/pairs/01JCONFIRMROUTE0000000000A/revoke"
+        );
+        assert_eq!(REVOKE_BODY, "{}");
+    }
+
+    #[test]
+    fn pair_ids_must_be_plane_ids_and_safe_path_segments() {
+        for bad in [
+            "",
+            "pair-1",
+            "short",
+            "../../etc/passwd",
+            "01JCONFIRMROUTE00000000/0A",
+            "01JCONFIRMROUTE0000000000A?x=1",
+            &"A".repeat(65),
+            "01JCONFIRMROUTÉ000000000A",
+        ] {
+            assert_eq!(confirm_path(bad), Err(PairError::BadPairId), "{bad:?}");
+            assert_eq!(revoke_path(bad), Err(PairError::BadPairId), "{bad:?}");
+        }
+        assert!(confirm_path(&"A".repeat(16)).is_ok());
+        assert!(confirm_path(&"A".repeat(64)).is_ok());
+    }
+
+    /// From #17: a retry of the same confirmation is idempotent, a different
+    /// one conflicts. Ed25519 is deterministic, so the same handshake and
+    /// decision always give the same signature.
+    #[test]
+    fn same_sig_is_idempotent_different_sig_conflicts() {
+        let (ka, kb) = (sk(1), sk(2));
+        let first = {
+            let (a, b) = handshake(ulid_ctx(), ulid_ctx(), &ka, &kb).unwrap();
+            let code_b = b.code().clone();
+            accept(a, code_b.as_str(), &ka).0
+        };
+        let retry = {
+            let (a, b) = handshake(ulid_ctx(), ulid_ctx(), &ka, &kb).unwrap();
+            let code_b = b.code().clone();
+            accept(a, code_b.as_str(), &ka).0
+        };
+        assert_eq!(
+            retry.body_json(),
+            first.body_json(),
+            "a resend is byte for byte the same"
+        );
+        assert!(
+            retry.same_as_stored(&first.sig_base64()),
+            "409 with our own sig: done"
+        );
+        let mismatch = {
+            let (a, _) = handshake(ulid_ctx(), ulid_ctx(), &ka, &kb).unwrap();
+            match a.confirm("000000", &ka).unwrap() {
+                Confirmed::Mismatch { confirmation } => confirmation,
+                Confirmed::Accept { .. } => panic!("000000 happened to match; pick another"),
+            }
+        };
+        assert!(
+            !mismatch.same_as_stored(&first.sig_base64()),
+            "a different decision conflicts"
+        );
+        let rejected = {
+            let (a, _) = handshake(ulid_ctx(), ulid_ctx(), &ka, &kb).unwrap();
+            a.reject(&ka).unwrap()
+        };
+        assert!(!rejected.same_as_stored(&first.sig_base64()));
+        assert!(!first.same_as_stored(""));
     }
 
     /// B4: the SDK only signs with this handle's key.
