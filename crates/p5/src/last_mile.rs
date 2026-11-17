@@ -310,19 +310,20 @@ fn knock_k2(client: &K2MsgClient, knock: &Knock) -> Result<(), LastMileError> {
     if client.is_off() {
         return Ok(());
     }
+    let raw = if knock.body.trim().is_empty() {
+        knock.title.as_str()
+    } else {
+        knock.body.as_str()
+    };
     let req = KnockRequest {
         // Absolute cwd is what `k2 msg` accepts (name/handle often ≠ Postal handle).
         workspace: k2_workspace(knock),
         // Label + quoted body (F17/F18). Do not send "Open: p5 inbox read":
-        // Postal is its own tray.
-        text: quote_for_inject(
-            &knock.from,
-            if knock.body.trim().is_empty() {
-                &knock.title
-            } else {
-                &knock.body
-            },
-        ),
+        // Postal is its own tray. New K2 quotes `body` itself; `text` stays
+        // quoted for older daemons.
+        text: quote_for_inject(&knock.from, raw),
+        id: knock.id.clone(),
+        body: raw.to_string(),
         from: knock.from.clone(),
         wake: knock.wake,
         project: knock.cwd.clone(),

@@ -1792,6 +1792,8 @@ mod tests {
         assert_eq!(knocks[0].from, "alice::acme.postal.bot");
         assert!(knocks[0].wake);
         assert_eq!(knocks[0].text, "[postal alice::acme.postal.bot]\n> hello scout");
+        assert_eq!(knocks[0].id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(knocks[0].body, "hello scout");
         assert!(!knocks[0].text.contains("p5 inbox"));
         assert!(!knocks[0].text.contains("[p5:"));
         assert_eq!(knocks[0].project, "/srv/scout");
@@ -1814,6 +1816,8 @@ mod tests {
         receive_session(&ctx, &inbound).unwrap();
         let knocks = ctx.last_mile.k2.recorded();
         assert_eq!(knocks[0].text, format!("[postal alice::acme.postal.bot]\n> {body}"));
+        assert_eq!(knocks[0].id, inbound.id);
+        assert_eq!(knocks[0].body, body);
         assert!(knocks[0].text.contains("Keep bot.postal.frpc"));
         assert!(!knocks[0].text.ends_with("Round trip pro"));
     }

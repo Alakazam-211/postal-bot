@@ -26,7 +26,12 @@ pub const LINKS_FILE: &str = "k2-links.json";
 pub struct KnockRequest {
     /// K2 workspace slug, or the claimed absolute cwd.
     pub workspace: String,
+    /// Quoted inject (`[postal from]` + `> ` lines). Old K2 types this.
     pub text: String,
+    /// p5 message id. K2 send-once key (`idempotency_key` on the JSON).
+    pub id: String,
+    /// Unquoted mail body (slash-guarded). New K2 quotes this itself.
+    pub body: String,
     pub from: String,
     pub wake: bool,
     /// Claimed cwd (matches a link's `path`).
@@ -315,6 +320,8 @@ fn post_msg(
     let path = format!("/v1/w/{}/message", form_encode(&link.workspace));
     let body = serde_json::json!({
         "text": req.text,
+        "body": req.body,
+        "idempotency_key": req.id,
         "from": req.from,
         "onBehalfOf": req.from,
         "wake": req.wake,
@@ -465,6 +472,8 @@ mod tests {
         let req = KnockRequest {
             workspace: "postal-bot".into(),
             text: knock_text("01ARZ3NDEKTSV4RRFFQ69G5FAV", "hi"),
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            body: "hi".into(),
             from: "alice::acme.postal.bot".into(),
             wake: true,
             project: "/srv/scout".into(),
@@ -480,6 +489,8 @@ mod tests {
             .knock(&KnockRequest {
                 workspace: "postal-bot".into(),
                 text: "x".into(),
+                id: "id-1".into(),
+                body: "x".into(),
                 from: "a::acme.postal.bot".into(),
                 wake: true,
                 project: String::new(),
@@ -565,6 +576,8 @@ mod tests {
         KnockRequest {
             workspace: "/srv/scout".into(),
             text: text.into(),
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            body: text.into(),
             from: "alice::acme.postal.bot".into(),
             wake: true,
             project: "/srv/scout".into(),
@@ -593,6 +606,8 @@ mod tests {
         assert_eq!(v["kind"], "postal");
         assert_eq!(v["from"], "alice::acme.postal.bot");
         assert_eq!(v["text"], "hi");
+        assert_eq!(v["body"], "hi");
+        assert_eq!(v["idempotency_key"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert_eq!(v["wake"], true);
     }
 
