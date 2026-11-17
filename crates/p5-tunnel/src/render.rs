@@ -294,10 +294,24 @@ mod tests {
         // A blank version is left out, and quoting holds.
         s.p5_version = Some("  ".into());
         assert!(!render_frpc_toml(&s).unwrap().contains("[metadatas]"));
+        // A free string with a quote and a newline can't inject a key:
+        // toml_str escapes both, so it stays one line and one value.
         s.p5_version = Some("1\"\nname = \"x".into());
-        assert!(render_frpc_toml(&s)
-            .unwrap()
-            .contains(r#"p5_version = "1\"\nname = \"x""#));
+        let toml = render_frpc_toml(&s).unwrap();
+        assert!(toml.contains(r#"p5_version = "1\"\nname = \"x""#), "{toml}");
+        assert!(!toml.lines().any(|l| l.starts_with("name = \"x")), "{toml}");
+        assert_eq!(
+            toml.lines().filter(|l| l.starts_with("name = ")).count(),
+            1,
+            "only the proxy's own name: {toml}"
+        );
+        let meta: Vec<&str> = toml
+            .lines()
+            .skip_while(|l| *l != "[metadatas]")
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .collect();
+        assert_eq!(meta.len(), 1, "one key in [metadatas]: {meta:?}");
     }
 
     #[test]
