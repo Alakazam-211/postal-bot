@@ -98,10 +98,21 @@ impl Fingerprint {
     /// # Errors
     /// [`PairError::BadFingerprint`] for any other form.
     pub fn parse(s: &str) -> Result<Self, PairError> {
-        if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if s.len() != 64
+            || !s
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(PairError::BadFingerprint);
         }
-        from_hex32(s).map(Self).map_err(|_| PairError::BadFingerprint)
+        from_hex32(s)
+            .map(Self)
+            .map_err(|_| PairError::BadFingerprint)
+    }
+
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
     #[must_use]
@@ -220,13 +231,30 @@ impl Initiator {
     ///
     /// # Errors
     /// [`PairError::Random`] or [`PairError::TooLong`].
-    pub fn start(ctx: PairContext, fp_a: Fingerprint, now: i64) -> Result<(Self, Commitment), PairError> {
+    pub fn start(
+        ctx: PairContext,
+        fp_a: Fingerprint,
+        now: i64,
+    ) -> Result<(Self, Commitment), PairError> {
         Self::start_with(ctx, fp_a, new_nonce()?, now)
     }
 
-    fn start_with(ctx: PairContext, fp_a: Fingerprint, na: Nonce, now: i64) -> Result<(Self, Commitment), PairError> {
+    fn start_with(
+        ctx: PairContext,
+        fp_a: Fingerprint,
+        na: Nonce,
+        now: i64,
+    ) -> Result<(Self, Commitment), PairError> {
         let c = commitment(&ctx, &fp_a, &na)?;
-        Ok((Self { ctx, fp_a, na, made_at: now }, c))
+        Ok((
+            Self {
+                ctx,
+                fp_a,
+                na,
+                made_at: now,
+            },
+            c,
+        ))
     }
 
     /// Step 3, once B's response is in. Returns the reveal to send and the
@@ -274,7 +302,17 @@ impl Responder {
         nb: Nonce,
         now: i64,
     ) -> (Self, Response) {
-        (Self { ctx, fp_a, fp_b, c, nb, made_at: now }, Response { fp_b, nb })
+        (
+            Self {
+                ctx,
+                fp_a,
+                fp_b,
+                c,
+                nb,
+                made_at: now,
+            },
+            Response { fp_b, nb },
+        )
     }
 
     /// Step 4, once A reveals. Checks `Na` against the commitment (constant
@@ -341,7 +379,13 @@ fn commitment(ctx: &PairContext, fp_a: &Fingerprint, na: &Nonce) -> Result<Commi
     Ok(Commitment(h.finalize().into()))
 }
 
-fn code(ctx: &PairContext, fp_a: &Fingerprint, fp_b: &Fingerprint, na: &Nonce, nb: &Nonce) -> Result<Code, PairError> {
+fn code(
+    ctx: &PairContext,
+    fp_a: &Fingerprint,
+    fp_b: &Fingerprint,
+    na: &Nonce,
+    nb: &Nonce,
+) -> Result<Code, PairError> {
     let mut h = Sha256::new();
     h.update(SAS_PREFIX);
     h.update(ctx.framed()?);
@@ -424,9 +468,18 @@ mod tests {
         h.update(NA);
         h.update(NB);
         let d = h.finalize();
-        let k2_code = format!("{:06}", u32::from_be_bytes([d[0], d[1], d[2], d[3]]) % 1_000_000);
-        assert_eq!(k2_code, "632758", "K2's own published vector for these inputs");
-        assert_ne!(code(&ctx(), &fp('a'), &fp('b'), &NA, &NB).unwrap().as_str(), k2_code);
+        let k2_code = format!(
+            "{:06}",
+            u32::from_be_bytes([d[0], d[1], d[2], d[3]]) % 1_000_000
+        );
+        assert_eq!(
+            k2_code, "632758",
+            "K2's own published vector for these inputs"
+        );
+        assert_ne!(
+            code(&ctx(), &fp('a'), &fp('b'), &NA, &NB).unwrap().as_str(),
+            k2_code
+        );
     }
 
     #[test]
@@ -440,8 +493,18 @@ mod tests {
     #[test]
     fn fingerprints_have_one_spelling() {
         assert!(Fingerprint::parse(&"a".repeat(64)).is_ok());
-        for bad in ["A".repeat(64), format!("SHA256:{}", "a".repeat(57)), "a".repeat(63), "a".repeat(65), "g".repeat(64)] {
-            assert_eq!(Fingerprint::parse(&bad), Err(PairError::BadFingerprint), "{bad}");
+        for bad in [
+            "A".repeat(64),
+            format!("SHA256:{}", "a".repeat(57)),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64),
+        ] {
+            assert_eq!(
+                Fingerprint::parse(&bad),
+                Err(PairError::BadFingerprint),
+                "{bad}"
+            );
         }
     }
 
@@ -470,9 +533,21 @@ mod tests {
     fn states_expire() {
         let (a, c) = Initiator::start_with(ctx(), fp('a'), NA, T0).unwrap();
         let (b, resp) = Responder::respond_with(ctx(), fp('a'), c, fp('b'), NB, T0);
-        assert_eq!(a.finish(resp, T0 + NONCE_TTL_SECS).unwrap_err(), PairError::Expired, "exactly the TTL is too old");
-        assert_eq!(b.finish(Reveal(NA), T0 - 1), Err(PairError::Expired), "clock went backwards");
-        assert_eq!(fresh(i64::MIN, i64::MAX), Err(PairError::Expired), "overflow is expired, not a panic");
+        assert_eq!(
+            a.finish(resp, T0 + NONCE_TTL_SECS).unwrap_err(),
+            PairError::Expired,
+            "exactly the TTL is too old"
+        );
+        assert_eq!(
+            b.finish(Reveal(NA), T0 - 1),
+            Err(PairError::Expired),
+            "clock went backwards"
+        );
+        assert_eq!(
+            fresh(i64::MIN, i64::MAX),
+            Err(PairError::Expired),
+            "overflow is expired, not a panic"
+        );
         assert_eq!(fresh(i64::MAX, i64::MIN), Err(PairError::Expired));
         assert_eq!(fresh(T0, T0 + NONCE_TTL_SECS - 1), Ok(()));
     }
@@ -506,14 +581,25 @@ mod tests {
             code(&ctx(), &fp('a'), &fp('b'), &NB, &NA).unwrap(),
         ];
         for v in &variants {
-            assert_ne!(v, &real, "changing any input must change the code (fixed vectors)");
+            assert_ne!(
+                v, &real,
+                "changing any input must change the code (fixed vectors)"
+            );
         }
     }
 
     #[test]
     fn context_framing_keeps_fields_apart() {
-        let a = PairContext { pair_id: "ab".into(), initiator: "c".into(), responder: "d".into() };
-        let b = PairContext { pair_id: "a".into(), initiator: "bc".into(), responder: "d".into() };
+        let a = PairContext {
+            pair_id: "ab".into(),
+            initiator: "c".into(),
+            responder: "d".into(),
+        };
+        let b = PairContext {
+            pair_id: "a".into(),
+            initiator: "bc".into(),
+            responder: "d".into(),
+        };
         assert_ne!(a.framed().unwrap(), b.framed().unwrap());
     }
 
@@ -522,7 +608,10 @@ mod tests {
         let (a, c) = Initiator::start_with(ctx(), fp('a'), NA, T0).unwrap();
         assert_eq!(Commitment::from_hex(&c.to_hex()).unwrap(), c);
         let (_b, resp) = Responder::respond_with(ctx(), fp('a'), c, fp('b'), NB, T0);
-        assert_eq!(Response::from_parts(&resp.fp_b.to_hex(), &resp.nb_hex()).unwrap(), resp);
+        assert_eq!(
+            Response::from_parts(&resp.fp_b.to_hex(), &resp.nb_hex()).unwrap(),
+            resp
+        );
         let (reveal, _) = a.finish(resp, T0).unwrap();
         assert_eq!(Reveal::from_hex(&reveal.to_hex()).unwrap(), reveal);
     }
@@ -534,7 +623,11 @@ mod tests {
             serde_json::from_str(include_str!("../vectors/postal-v1.json")).unwrap();
         for v in all["pairing"].as_array().unwrap() {
             let s = |k: &str| v[k].as_str().unwrap().to_string();
-            let ctx = PairContext { pair_id: s("pair_id"), initiator: s("initiator"), responder: s("responder") };
+            let ctx = PairContext {
+                pair_id: s("pair_id"),
+                initiator: s("initiator"),
+                responder: s("responder"),
+            };
             let fa = Fingerprint::parse(&s("fp_a")).unwrap();
             let fb = Fingerprint::parse(&s("fp_b")).unwrap();
             let na = from_hex32(&s("na_hex")).unwrap();
@@ -549,9 +642,15 @@ mod tests {
         for v in all["pairing_refused"].as_array().unwrap() {
             let s = |k: &str| v[k].as_str().unwrap().to_string();
             match s("case").as_str() {
-                "bad_fingerprint" => assert_eq!(Fingerprint::parse(&s("fp")), Err(PairError::BadFingerprint)),
+                "bad_fingerprint" => {
+                    assert_eq!(Fingerprint::parse(&s("fp")), Err(PairError::BadFingerprint))
+                }
                 "wrong_reveal" => {
-                    let ctx = PairContext { pair_id: s("pair_id"), initiator: s("initiator"), responder: s("responder") };
+                    let ctx = PairContext {
+                        pair_id: s("pair_id"),
+                        initiator: s("initiator"),
+                        responder: s("responder"),
+                    };
                     let fa = Fingerprint::parse(&s("fp_a")).unwrap();
                     let fb = Fingerprint::parse(&s("fp_b")).unwrap();
                     let c = Commitment::from_hex(&s("commitment_hex")).unwrap();
