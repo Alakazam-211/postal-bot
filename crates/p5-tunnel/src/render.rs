@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use crate::csr::TUNNEL_DIR;
 use crate::san::{hostname_for_label, SanError};
 
-/// Shared k2e-01 frps (K8). Override with `P5_FRP_SERVER`.
-pub const DEFAULT_FRP_SERVER: &str = "178.156.232.105";
+/// Postal's shared frps, by name so the relay can move without a p5 release
+/// (frpc resolves it again on every reconnect). Override with `P5_FRP_SERVER`.
+pub const DEFAULT_FRP_SERVER: &str = "frp.postal.bot";
 /// frps `bindPort`.
 pub const DEFAULT_FRP_PORT: u16 = 7000;
 pub const FRPC_TOML_FILE: &str = "frpc.toml";
@@ -164,6 +165,12 @@ fn toml_str(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_relay_is_a_name_not_an_ip() {
+        assert_eq!(super::DEFAULT_FRP_SERVER, "frp.postal.bot");
+        assert!(super::DEFAULT_FRP_SERVER.parse::<std::net::IpAddr>().is_err());
+    }
+
     use super::*;
 
     fn spec(port: u16) -> FrpcSpec {
