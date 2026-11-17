@@ -19,6 +19,9 @@ use crate::{to_hex, CryptoError};
 pub const KEYS_DIR: &str = "keys";
 /// PKCS#8 PEM of the Ed25519 private key.
 pub const IDENTITY_FILE: &str = "identity.pem";
+/// Leftover K2 domain tag. Open item: move live `p5 pair` onto `postal-sdk`
+/// (`postal-pair-v1`) and delete this. No **new** call site may use
+/// [`sas_code`]. Guard: `tests/no_k2_sas_tag.rs`.
 const SAS_SEP: &[u8] = b"::k2-federation-sas::";
 
 /// Local pairing identity. The X25519 twin is derived; it is never stored.
@@ -123,6 +126,10 @@ impl fmt::Debug for KeyPair {
 }
 
 /// Order-independent 6-digit SAS.
+///
+/// **Leftover.** Hashes with K2's `::k2-federation-sas::` tag. Live `p5 pair`
+/// still calls this. New Postal code must use `postal-sdk` pairing
+/// (`postal-pair-v1`), not this function.
 pub fn sas_code(fp_a: &str, fp_b: &str) -> String {
     let (lo, hi) = if fp_a <= fp_b {
         (fp_a, fp_b)
