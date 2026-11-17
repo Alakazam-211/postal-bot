@@ -3,8 +3,9 @@
 //! **Skeleton (0.0.x).** It holds the parts both ends must agree on
 //! byte for byte, plus the host contract:
 //!
-//! - [`pairing`]: commit-then-reveal 6-digit pairing code (SAS v2) as
-//!   typed Initiator / Responder state machines.
+//! - [`pairing`]: commit-then-reveal 6-digit pairing code (SAS v2) and
+//!   the signed both-sides confirmation, as
+//!   typed state machines.
 //! - [`badge`]: the envelope digest wire v2 signs, and a display-only
 //!   provenance badge derived from it.
 //! - [`filename`]: attachment name sanitizer.

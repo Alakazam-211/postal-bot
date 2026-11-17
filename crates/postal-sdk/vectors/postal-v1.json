@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib. A change here is a wire change. Every host's CI checks them (cargo test -p postal-sdk).",
+  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib (and the cryptography package for Ed25519 in 'confirm'). A change here is a wire change. Every host's CI checks them (cargo test -p postal-sdk).",
   "pairing": [
     {
       "pair_id": "pair-1",
@@ -189,7 +189,7 @@
       "storage": "my_report.pdf"
     },
     {
-      "wire": "re port‮.txt",
+      "wire": "re port\u202e.txt",
       "storage": "re_port_.txt"
     },
     {
@@ -247,6 +247,44 @@
     {
       "wire": "CON.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "storage": "file-CON.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "confirm": [
+    {
+      "pair_id": "01JCONFIRMVECTOR01",
+      "initiator": "alice::acme.postal.bot",
+      "responder": "scout::rosson.postal.bot",
+      "seed_a_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "seed_b_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+      "public_key_pem_a": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAiojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=\n-----END PUBLIC KEY-----\n",
+      "public_key_pem_b": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAgTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=\n-----END PUBLIC KEY-----\n",
+      "fp_a": "fd110d301d2f077de1414b8f99f441b1403fab207b2052fbd2c065e4ee8e7dc2",
+      "fp_b": "47dea58ea00fae9417ee19d76755bfef690899021132effb04fe1f9e4f0c8059",
+      "na_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "nb_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "commitment_hex": "4ed0b6f9e3545facdeba0557e299609c57f2b9c979ae7539d12466488ff49854",
+      "sas": "564904",
+      "transcript_hex": "d6c317edfaa6d09a093b85510708d8e7fae197f6eed258abb195d48132eea991",
+      "signatures": [
+        {
+          "side": "from",
+          "decision": "accept",
+          "message_hex": "706f7374616c2d706169722d636f6e6669726d2d76310000001230314a434f4e4649524d564543544f5230310000000466726f6d00000006616363657074d6c317edfaa6d09a093b85510708d8e7fae197f6eed258abb195d48132eea991",
+          "sig_b64": "yRfJJXM+MSfKoLXNOyn/2BAX1iZAJGgN4jmpzzLlMUXxKQvcSZXwtP6pcUSG7SR3O2RFQ7ybbrsgsnNkBGSeAg=="
+        },
+        {
+          "side": "to",
+          "decision": "accept",
+          "message_hex": "706f7374616c2d706169722d636f6e6669726d2d76310000001230314a434f4e4649524d564543544f52303100000002746f00000006616363657074d6c317edfaa6d09a093b85510708d8e7fae197f6eed258abb195d48132eea991",
+          "sig_b64": "ooq1yYUm7E7dd69GQl1oHV0lucCf0+zMGYPhnt9S8CayxKQVjjkcul+uYTz0fcw3DotylsydgVzIdlMNqeZZBg=="
+        },
+        {
+          "side": "to",
+          "decision": "mismatch",
+          "message_hex": "706f7374616c2d706169722d636f6e6669726d2d76310000001230314a434f4e4649524d564543544f52303100000002746f000000086d69736d61746368d6c317edfaa6d09a093b85510708d8e7fae197f6eed258abb195d48132eea991",
+          "sig_b64": "5A+0GvKHnLxEcf42DTxywjJeR5MRGfIHgbBfWqguLjvm0IQ8R1M3Oytw+HxgCnO5B26dJZg8T9FUr8UEIEaMBQ=="
+        }
+      ]
     }
   ]
 }
