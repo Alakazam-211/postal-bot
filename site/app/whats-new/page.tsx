@@ -4,7 +4,7 @@ import { loadHtml } from "@/lib/load-html";
 export const metadata: Metadata = {
   title: "What’s new — Postal Bot",
   description:
-    "Postal Bot public alpha changelog. Current p5 is 0.1.10.",
+    "Postal Bot public alpha changelog. Current p5 is 0.1.11.",
   alternates: {
     canonical: "/whats-new",
     types: { "text/markdown": "/whats-new.md" },

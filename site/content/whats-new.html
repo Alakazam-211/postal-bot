@@ -264,6 +264,11 @@
     </section>
 
     <article class="rel">
+      <h2>0.1.11</h2>
+      <p class="when">17 Nov 2026</p>
+      <p>The tunnel now connects to <code>frp.postal.bot</code> by name, not a fixed address, so the relay can move without a new p5. <code>P5_FRP_SERVER</code> still overrides it. The tunnel writes a log to <code>~/.postal/tunnel/frpc.log</code>. Mail that couldn&rsquo;t be sent is retried on its own (<code>p5 outbox flush</code> to retry now). A friend&rsquo;s key is pinned: if it changes, nothing is delivered until you accept the new key with its code. K2 links use a key scoped to one workspace (<code>p5 k2 link &lt;ws&gt; --key-stdin</code>), and every line of K2 mail is quoted. The development secret works only in development builds, and never with the tunnel on.</p>
+    </article>
+    <article class="rel">
       <h2>0.1.10</h2>
       <p class="when">23 Aug 2026</p>
       <p>Live inject will not start a line with <code>/</code>. A slash command in mail is rewritten as <code>[mail] /…</code> so it cannot end an LLM session or hit a raw terminal. The inbox cover is unchanged. Free included messages are 10000/UTC month from the plane.</p>
