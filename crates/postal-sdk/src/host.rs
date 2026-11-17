@@ -344,12 +344,44 @@ pub struct RekeyPending {
     pub new_fingerprint: String,
 }
 
+impl Friend {
+    /// P1 box half: keep the old pin in service; remember the offered key.
+    pub fn offer_rekey(&mut self, new_fingerprint: String) {
+        self.rekey_pending = Some(new_fingerprint);
+    }
+
+    /// Both sides confirmed the new key. Move the pin.
+    pub fn commit_rekey(&mut self, new_fingerprint: String, new_pem: String) {
+        self.pinned_fingerprint = new_fingerprint;
+        self.pinned_public_key_pem = new_pem;
+        self.rekey_pending = None;
+        self.trusted = true;
+    }
+
+    /// Rejected, expired, or mismatch. Old pin stays; pending clears.
+    pub fn abort_rekey(&mut self) {
+        self.rekey_pending = None;
+    }
+}
+
+/// What this box shows its owner. They type the code the **other** box shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingPrompt {
+    pub pair_id: String,
+    pub local_handle: String,
+    pub peer: String,
+    /// 6 digits derived on this box. Display only. Never submit as typed.
+    pub show: String,
+}
+
 /// Human gates record and return. They never decide: a person answers later
 /// (a K2 permission card, a click on the account page), and the host calls
-/// back into the SDK with the answer and the typed pairing code. A hook that
-/// returned the decision would invite an agent to answer it.
+/// back into the SDK with the answer and the code they read from the **other**
+/// box. A hook that returned the decision would invite an agent to answer it.
 pub trait HumanGate {
     fn friend_request(&self, req: &FriendRequest);
+    /// Raise the SAS prompt. [`PairingPrompt::show`] is this box's digits.
+    fn pairing_confirm(&self, prompt: &PairingPrompt);
     fn rekey(&self, pending: &RekeyPending);
 }
 
@@ -383,5 +415,35 @@ mod tests {
         let mut renamed = parts;
         renamed.files = vec![Attachment::new("x_y.txt", b"x".to_vec())];
         assert_ne!(VerifiedMessage::new(renamed).unwrap().badge(), m.badge());
+    }
+
+    fn friend() -> Friend {
+        Friend {
+            local_handle: "scout::acme.postal.bot".into(),
+            peer: "alice::acme.postal.bot".into(),
+            pinned_fingerprint: "aa".repeat(32),
+            pinned_public_key_pem: "OLDPEM".into(),
+            rekey_pending: None,
+            trusted: true,
+        }
+    }
+
+    #[test]
+    fn rekey_rejected_or_expired_keeps_the_old_pin() {
+        let mut f = friend();
+        f.offer_rekey("bb".repeat(32));
+        assert!(f.trusted);
+        assert_eq!(f.pinned_fingerprint, "aa".repeat(32));
+        assert_eq!(f.rekey_pending.as_deref(), Some(&*"bb".repeat(32)));
+        f.abort_rekey();
+        assert!(f.trusted);
+        assert_eq!(f.pinned_fingerprint, "aa".repeat(32));
+        assert_eq!(f.pinned_public_key_pem, "OLDPEM");
+        assert!(f.rekey_pending.is_none());
+        f.offer_rekey("bb".repeat(32));
+        f.commit_rekey("bb".repeat(32), "NEWPEM".into());
+        assert_eq!(f.pinned_fingerprint, "bb".repeat(32));
+        assert_eq!(f.pinned_public_key_pem, "NEWPEM");
+        assert!(f.rekey_pending.is_none());
     }
 }

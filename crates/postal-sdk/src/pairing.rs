@@ -29,14 +29,22 @@
 //! a nonce can't be used twice. Each state expires [`NONCE_TTL_SECS`] after
 //! it was made.
 //!
+//! **B1.** [`Responder::respond`] pins `C` before `Nb` is sent. [`Responder::finish`]
+//! checks `Na` opens that pinned `C`. A plane that picks `Na'` after seeing
+//! `Nb` fails that check.
+//!
+//! **B3.** [`AttemptLimiter`] is the box's own cap (5 / hour / peer). The
+//! plane's rate limit does not bind a malicious plane.
+//!
 //! **Host rules the types can't enforce:** answer at most one
-//! [`Response`] per commitment and per pair id, and limit how many pairing
-//! attempts a peer may start (say, a few per hour). Every extra response is
+//! [`Response`] per commitment and per pair id. Every extra response is
 //! another 1-in-10^6 guess for a party in the middle.
 //!
 //! A party in the middle must fix its key and nonce before it
 //! can learn the other side's nonce, so it gets one guess per pairing
 //! attempt (1 in 10^6). Nonces are secrets until revealed; never log them.
+
+use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
@@ -50,6 +58,10 @@ pub const SAS_PREFIX: &[u8] = b"postal-pair-v1";
 pub const NONCE_LEN: usize = 32;
 /// A pairing state is single-use and expires this many seconds after it was made.
 pub const NONCE_TTL_SECS: i64 = 600;
+/// B3: pairing attempts this box will start or answer per peer per window.
+pub const BOX_ATTEMPT_LIMIT: u32 = 5;
+/// B3 window, seconds.
+pub const BOX_ATTEMPT_WINDOW_SECS: i64 = 3600;
 
 type Nonce = [u8; NONCE_LEN];
 
@@ -69,6 +81,8 @@ pub enum PairError {
     Mismatch,
     /// The OS random source failed.
     Random(String),
+    /// B3: this peer already used [`BOX_ATTEMPT_LIMIT`] attempts in the window.
+    RateLimited,
 }
 
 impl std::fmt::Display for PairError {
@@ -80,6 +94,7 @@ impl std::fmt::Display for PairError {
             Self::Expired => f.write_str("pairing step expired; start again"),
             Self::Mismatch => f.write_str("revealed nonce does not match the commitment"),
             Self::Random(e) => write!(f, "system random source failed: {e}"),
+            Self::RateLimited => f.write_str("too many pairing attempts for this peer"),
         }
     }
 }
@@ -239,7 +254,7 @@ impl Initiator {
         Self::start_with(ctx, fp_a, new_nonce()?, now)
     }
 
-    fn start_with(
+    pub(crate) fn start_with(
         ctx: PairContext,
         fp_a: Fingerprint,
         na: Nonce,
@@ -280,7 +295,14 @@ pub struct Responder {
 }
 
 impl Responder {
-    /// Step 2, once A's commitment is in. B's key is fixed here, with `Nb`.
+    /// The commitment pinned before `Nb` was sent (B1).
+    #[must_use]
+    pub fn pinned_c(&self) -> Commitment {
+        self.c
+    }
+
+    /// Step 2, once A's commitment is in. Pins `C` **before** `Nb` is
+    /// returned (B1). B's key is fixed here, with `Nb`.
     ///
     /// # Errors
     /// [`PairError::Random`].
@@ -294,7 +316,7 @@ impl Responder {
         Ok(Self::respond_with(ctx, fp_a, c, fp_b, new_nonce()?, now))
     }
 
-    fn respond_with(
+    pub(crate) fn respond_with(
         ctx: PairContext,
         fp_a: Fingerprint,
         c: Commitment,
@@ -315,8 +337,8 @@ impl Responder {
         )
     }
 
-    /// Step 4, once A reveals. Checks `Na` against the commitment (constant
-    /// time) and returns the code to show. Consumes the state.
+    /// Step 4, once A reveals. Checks `Na` opens the **pinned** `C` (B1,
+    /// constant time) and returns the code to show. Consumes the state.
     ///
     /// # Errors
     /// [`PairError::Expired`], [`PairError::Mismatch`] or [`PairError::TooLong`].
@@ -361,6 +383,34 @@ fn fresh(made_at: i64, now: i64) -> Result<(), PairError> {
     match now.checked_sub(made_at) {
         Some(age) if (0..NONCE_TTL_SECS).contains(&age) => Ok(()),
         _ => Err(PairError::Expired),
+    }
+}
+
+/// B3: how many pairing attempts this box will run for one peer.
+/// Hosts persist the struct; a malicious plane's cap does not apply here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttemptLimiter {
+    windows: BTreeMap<String, (i64, u32)>,
+}
+
+impl AttemptLimiter {
+    /// Record one attempt for `peer`. `now` is unix seconds.
+    ///
+    /// # Errors
+    /// [`PairError::RateLimited`] when this peer is at the cap, or the clock
+    /// went backwards.
+    pub fn allow(&mut self, peer: &str, now: i64) -> Result<(), PairError> {
+        let e = self.windows.entry(peer.to_string()).or_insert((now, 0));
+        match now.checked_sub(e.0) {
+            Some(age) if age >= BOX_ATTEMPT_WINDOW_SECS => *e = (now, 0),
+            Some(age) if age >= 0 => {}
+            _ => return Err(PairError::RateLimited),
+        }
+        if e.1 >= BOX_ATTEMPT_LIMIT {
+            return Err(PairError::RateLimited);
+        }
+        e.1 += 1;
+        Ok(())
     }
 }
 
@@ -515,6 +565,37 @@ mod tests {
         let mut wrong = NA;
         wrong[31] ^= 1;
         assert_eq!(b.finish(Reveal(wrong), T0), Err(PairError::Mismatch));
+    }
+
+    /// B1: C is pinned before Nb is sent; a plane that picks Na' after
+    /// seeing Nb cannot open C, even if it grinds until the 6 digits match
+    /// some other handshake.
+    #[test]
+    fn b1_pins_c_before_nb_and_rejects_na_chosen_after() {
+        let (_a, c) = Initiator::start_with(ctx(), fp('a'), NA, T0).unwrap();
+        let (b, resp) = Responder::respond_with(ctx(), fp('a'), c, fp('b'), NB, T0);
+        assert_eq!(b.pinned_c(), c, "C is stored before Nb leaves");
+        assert_eq!(resp.nb_hex(), to_hex(&NB));
+        let mut na_after_nb = NA;
+        na_after_nb[0] ^= 0xff;
+        assert_eq!(
+            b.finish(Reveal(na_after_nb), T0),
+            Err(PairError::Mismatch)
+        );
+    }
+
+    /// B3: the box, not the plane, caps attempts per peer.
+    #[test]
+    fn b3_box_limits_attempts_per_peer() {
+        let mut lim = AttemptLimiter::default();
+        let peer = "mallory::evil.postal.bot";
+        for i in 0..BOX_ATTEMPT_LIMIT {
+            lim.allow(peer, T0 + i64::from(i)).unwrap();
+        }
+        assert_eq!(lim.allow(peer, T0 + 4), Err(PairError::RateLimited));
+        lim.allow("other::acme.postal.bot", T0).unwrap();
+        lim.allow(peer, T0 + BOX_ATTEMPT_WINDOW_SECS).unwrap();
+        assert_eq!(lim.allow(peer, T0 - 1), Err(PairError::RateLimited));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! host contract. No network or disk code lives here; hosts bring their own.
 //!
 //! - [`pairing`]: commit-then-reveal 6-digit pairing code (SAS v2).
+//! - [`confirm`]: both-sides signed decide (no SAS on the plane).
 //! - [`badge`]: envelope digest wire v2 signs, and a display-only badge.
 //! - [`wire`]: v2 message format and Ed25519 signature over that digest.
 //! - [`seal`]: HoldSeal-v1 (X25519 ECDH + HKDF-SHA256 + ChaCha20-Poly1305).
@@ -18,6 +19,7 @@
 
 pub mod b64;
 pub mod badge;
+pub mod confirm;
 pub mod filename;
 pub mod hex;
 pub mod host;

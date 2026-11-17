@@ -83,6 +83,15 @@ pub fn fingerprint_spki_pem(pem: &str) -> Result<Fingerprint, IdentityError> {
     Ok(fingerprint_verifying_key(&parse_spki_pem(pem)?))
 }
 
+/// B2: fingerprint from the PEM **this box pins**. Never from a plane
+/// `peer_fingerprint` field.
+///
+/// # Errors
+/// [`IdentityError::Key`] if the PEM is not an Ed25519 public key.
+pub fn pin_fingerprint(pem: &str) -> Result<Fingerprint, IdentityError> {
+    fingerprint_spki_pem(pem)
+}
+
 pub(crate) fn fingerprint_verifying_key(vk: &VerifyingKey) -> Fingerprint {
     let der = vk.to_public_key_der().expect("ed25519 SPKI DER encode");
     let hash: [u8; 32] = Sha256::digest(der.as_bytes()).into();
