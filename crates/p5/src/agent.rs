@@ -126,7 +126,7 @@ pub fn run_at(root: &Path) -> Result<(), AgentError> {
         return Err(AgentError::DevSecretWithTunnel);
     }
     // Issue the leaf before bind so loopback can speak TLS for passthrough.
-    let mut tunnel = p5_tunnel::start_from_env(root, bind.port());
+    let mut tunnel = p5_tunnel::start_from_env(root, bind.port(), env!("CARGO_PKG_VERSION"));
     let ssl = load_ssl(root).map_err(AgentError::Tls)?;
     let (server, local) = match bind_http(bind, ssl) {
         Ok(v) => v,
