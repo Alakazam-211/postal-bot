@@ -38,6 +38,23 @@ impl Mode {
     }
 }
 
+impl serde::Serialize for Mode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Mode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "live" => Ok(Self::Live),
+            "tray" => Ok(Self::Tray),
+            other => Err(serde::de::Error::custom(format!("unknown mode {other}"))),
+        }
+    }
+}
+
 /// A file that came with the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
@@ -110,14 +127,16 @@ pub(crate) struct VerifiedParts {
 }
 
 impl VerifiedMessage {
-    #[allow(dead_code)] // first caller is wire v2 verification
     pub(crate) fn new(p: VerifiedParts) -> Result<Self, crate::badge::TooLong> {
         use crate::badge::{badge, envelope_digest, sha256, Envelope, FileDigest};
         let body_sha256 = sha256(&p.body);
         let files: Vec<FileDigest> = p
             .files
             .iter()
-            .map(|f| FileDigest { name: f.wire_name.clone(), sha256: sha256(&f.bytes) })
+            .map(|f| FileDigest {
+                name: f.wire_name.clone(),
+                sha256: sha256(&f.bytes),
+            })
             .collect();
         let digest = envelope_digest(&Envelope {
             version: crate::WIRE_VERSION,
@@ -243,7 +262,10 @@ impl RefuseCode {
 pub enum DeliverError {
     /// Not kept; try again. `after` is the host's hint (busy agent, disk
     /// pressure). Held mail stays held.
-    Retry { after: Option<Duration>, reason: String },
+    Retry {
+        after: Option<Duration>,
+        reason: String,
+    },
     /// Never keep it. The SDK dead-letters it with this code.
     Refuse(RefuseCode),
 }
