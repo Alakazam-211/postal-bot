@@ -8,6 +8,8 @@ description = "Postal agent-to-agent mail: sans-IO core (message types, pairing 
 publish = false
 
 [dependencies]
+base64 = "0.22"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem", "fast", "zeroize"] }
 getrandom = "0.2"
 sha2 = "0.10"
 subtle = "2.6"

@@ -304,13 +304,27 @@ pub trait FriendStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreError(pub String);
 
-/// An incoming friend request, waiting for a person.
+/// A finished pairing handshake, waiting for this box's owner. Raised on
+/// **both** boxes, the one that asked and the one that was asked.
+///
+/// Show the owner `show_code` and tell them to read it to the other side.
+/// Ask them for the code shown on the **other** box, never this one. The
+/// host then passes what they typed to
+/// [`crate::pairing::Handshake::confirm`], which checks it here and only
+/// then signs `accept`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FriendRequest {
     pub pair_id: String,
     pub local_handle: String,
     pub peer: String,
     pub peer_owner_name: Option<String>,
+    /// This box asked (`From`) or was asked (`To`).
+    pub side: crate::pairing::Side,
+    /// This box's 6 digits, to read **out** to the other side. Show it only
+    /// to the owner, never to an agent or in a log.
+    pub show_code: String,
+    /// Derived from the peer's key by the SDK.
+    pub peer_fingerprint: crate::pairing::Fingerprint,
 }
 
 /// A friend's key changed on the plane, waiting for a person.
@@ -323,9 +337,9 @@ pub struct RekeyPending {
 }
 
 /// Human gates record and return. They never decide: a person answers later
-/// (a K2 permission card, a click on the account page), and the host calls
-/// back into the SDK with the answer and the typed pairing code. A hook that
-/// returned the decision would invite an agent to answer it.
+/// (a K2 permission card, `p5 pair decide`), and the host calls back into the
+/// SDK with the answer and the code the person typed from the **other** box.
+/// A hook that returned the decision would invite an agent to answer it.
 pub trait HumanGate {
     fn friend_request(&self, req: &FriendRequest);
     fn rekey(&self, pending: &RekeyPending);
