@@ -11,39 +11,50 @@ pub fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Parse lowercase hex of any even length: only `[0-9a-f]`. Uppercase, a
+/// sign, whitespace and an odd length are refused, so a value has one
+/// spelling on the wire.
+///
+/// # Errors
+/// [`HexError`] unless the input is even-length lowercase hex.
+pub fn from_hex(s: &str) -> Result<Vec<u8>, HexError> {
+    let (pairs, rest) = s.as_bytes().as_chunks::<2>();
+    if !rest.is_empty() {
+        return Err(HexError);
+    }
+    pairs
+        .iter()
+        .map(|p| Ok((nibble(p[0])? << 4) | nibble(p[1])?))
+        .collect()
+}
+
 /// Parse exactly 32 bytes of lowercase hex: 64 characters of `[0-9a-f]`,
-/// nothing else. Uppercase, a sign, whitespace and any other length are
-/// refused, so a value has one spelling on the wire (the plane refuses the
-/// same inputs).
+/// nothing else (the plane refuses the same inputs).
 ///
 /// # Errors
 /// [`HexError`] unless the input is exactly 64 lowercase hex characters.
 pub fn from_hex32(s: &str) -> Result<[u8; 32], HexError> {
-    fn nibble(c: u8) -> Result<u8, HexError> {
-        match c {
-            b'0'..=b'9' => Ok(c - b'0'),
-            b'a'..=b'f' => Ok(c - b'a' + 10),
-            _ => Err(HexError),
-        }
-    }
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 {
+    if s.len() != 64 {
         return Err(HexError);
     }
-    let mut out = [0u8; 32];
-    for (i, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
-        out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
-    }
-    Ok(out)
+    from_hex(s)?.try_into().map_err(|_| HexError)
 }
 
-/// Not 64 hex characters.
+fn nibble(c: u8) -> Result<u8, HexError> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        _ => Err(HexError),
+    }
+}
+
+/// Not lowercase hex of the expected length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HexError;
 
 impl std::fmt::Display for HexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("expected 64 hex characters")
+        f.write_str("expected lowercase hex")
     }
 }
 
@@ -81,6 +92,15 @@ mod tests {
             format!("é{}", "a".repeat(62)),
         ] {
             assert_eq!(from_hex32(&bad), Err(HexError), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn from_hex_is_as_strict() {
+        assert_eq!(from_hex("00ff").unwrap(), vec![0x00, 0xff]);
+        assert_eq!(from_hex("").unwrap(), Vec::<u8>::new());
+        for bad in ["abc", "AbCd", "+f", "-f", " ab", "ab\n", "é0"] {
+            assert_eq!(from_hex(bad), Err(HexError), "{bad:?}");
         }
     }
 }
