@@ -30,6 +30,9 @@ pub struct FrpcSpec {
     pub server_addr: String,
     pub server_port: u16,
     pub token: Option<String>,
+    /// The p5 that wrote this config, sent to frps as `metadatas.p5_version`
+    /// so the relay can count boxes still on an old p5. Not a secret.
+    pub p5_version: Option<String>,
     /// Where frpc writes its log. `None` keeps frpc's default (the console,
     /// which p5 discards).
     pub log_file: Option<PathBuf>,
@@ -43,6 +46,7 @@ impl fmt::Debug for FrpcSpec {
             .field("server_addr", &self.server_addr)
             .field("server_port", &self.server_port)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("p5_version", &self.p5_version)
             .field("log_file", &self.log_file)
             .finish()
     }
@@ -101,14 +105,22 @@ pub fn render_frpc_toml(spec: &FrpcSpec) -> Result<String, SanError> {
     }
     out.push('\n');
 
-    if let Some(token) = spec
-        .token
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    let nonblank = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let token = nonblank(&spec.token);
+    let version = nonblank(&spec.p5_version);
+    if token.is_some() || version.is_some() {
         out.push_str("[metadatas]\n");
-        out.push_str(&format!("token = {}\n", toml_str(token)));
+        if let Some(token) = &token {
+            out.push_str(&format!("token = {}\n", toml_str(token)));
+        }
+        if let Some(version) = &version {
+            out.push_str(&format!("p5_version = {}\n", toml_str(version)));
+        }
         out.push('\n');
     }
 
@@ -182,7 +194,9 @@ mod tests {
     #[test]
     fn default_relay_is_a_name_not_an_ip() {
         assert_eq!(super::DEFAULT_FRP_SERVER, "frp.postal.bot");
-        assert!(super::DEFAULT_FRP_SERVER.parse::<std::net::IpAddr>().is_err());
+        assert!(super::DEFAULT_FRP_SERVER
+            .parse::<std::net::IpAddr>()
+            .is_err());
     }
 
     use super::*;
@@ -194,6 +208,7 @@ mod tests {
             server_addr: "127.0.0.1".into(),
             server_port: 7000,
             token: Some("tok_secret".into()),
+            p5_version: None,
             log_file: None,
         }
     }
@@ -256,6 +271,33 @@ mod tests {
         let toml = render_frpc_toml(&s).unwrap();
         assert!(!toml.contains("[metadatas]"), "{toml}");
         assert!(!toml.contains("token ="), "{toml}");
+    }
+
+    #[test]
+    fn p5_version_goes_in_metadatas() {
+        let mut s = spec(8443);
+        s.p5_version = Some("0.1.12".into());
+        let toml = render_frpc_toml(&s).unwrap();
+        assert_eq!(toml.matches("[metadatas]").count(), 1, "{toml}");
+        assert!(
+            toml.contains("token = \"tok_secret\"\np5_version = \"0.1.12\"\n"),
+            "{toml}"
+        );
+        // Without a token the version still goes, in its own table.
+        s.token = None;
+        let toml = render_frpc_toml(&s).unwrap();
+        assert!(
+            toml.contains("[metadatas]\np5_version = \"0.1.12\"\n"),
+            "{toml}"
+        );
+        assert!(!toml.contains("token ="), "{toml}");
+        // A blank version is left out, and quoting holds.
+        s.p5_version = Some("  ".into());
+        assert!(!render_frpc_toml(&s).unwrap().contains("[metadatas]"));
+        s.p5_version = Some("1\"\nname = \"x".into());
+        assert!(render_frpc_toml(&s)
+            .unwrap()
+            .contains(r#"p5_version = "1\"\nname = \"x""#));
     }
 
     #[test]
