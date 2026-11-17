@@ -182,6 +182,7 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        log_file: Some(opts.root.join(csr::TUNNEL_DIR).join(render::FRPC_LOG_FILE)),
     };
     let toml_path = match write_frpc_toml(opts.root, &spec) {
         Ok(p) => p,
