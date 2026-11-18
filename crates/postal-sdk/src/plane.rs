@@ -339,13 +339,21 @@ impl HoldItem {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct HoldPage {
     pub items: Vec<HoldItem>,
+    /// Set by the plane when more items remain, including when it cut the
+    /// page short by size (about 2.5 MiB sealed).
+    #[serde(default)]
+    pub next_after: Option<String>,
 }
 
 impl HoldPage {
-    /// The `after=` cursor for the next page, or `None` when this one was
-    /// short (the last).
+    /// The `after=` cursor for the next page, or `None` when this was the
+    /// last. The plane's `next_after` wins; without it, a full page means
+    /// pull again (at worst one empty pull).
     #[must_use]
     pub fn next_after(&self, limit: u32) -> Option<&str> {
+        if let Some(n) = self.next_after.as_deref() {
+            return Some(n);
+        }
         if self.items.len() < limit.clamp(1, HOLD_PAGE) as usize {
             return None;
         }
@@ -907,6 +915,11 @@ mod tests {
         .unwrap();
         assert_eq!(page.next_after(100), None);
         assert_eq!(page.next_after(1), Some("h1"));
+        // A page cut short by size still says there's more.
+        let cut: HoldPage = parse(200, br#"{"items":[],"next_after":"h9"}"#).unwrap();
+        assert_eq!(cut.next_after(100), Some("h9"));
+        let last: HoldPage = parse(200, br#"{"items":[],"next_after":null}"#).unwrap();
+        assert_eq!(last.next_after(100), None);
         let (outer, sealed) = page.items[0].decode().unwrap();
         assert_eq!(outer, Outer::of(&msg));
         assert_eq!(sealed, blob);
