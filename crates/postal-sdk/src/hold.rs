@@ -135,6 +135,9 @@ impl HoldError {
         use crate::plane::RefuseCode;
         match self {
             Self::Wire(WireError::Replayed) => Disposition::Ack,
+            // Our own key is unusable: a local fault, not the sender's.
+            // Leave the mail on the plane until the key is fixed.
+            Self::BadKey => Disposition::Retry,
             e if e.is_retryable() => Disposition::Retry,
             Self::TooLarge | Self::Wire(WireError::TooLarge) => {
                 Disposition::Refuse(RefuseCode::TooLarge)
@@ -558,6 +561,7 @@ mod tests {
             HoldError::Wire(WireError::Store("disk".into())).disposition(),
             Disposition::Retry
         );
+        assert_eq!(HoldError::BadKey.disposition(), Disposition::Retry);
         assert_eq!(
             HoldError::Wire(WireError::Stale).disposition(),
             Disposition::Refuse(RefuseCode::Gated)
