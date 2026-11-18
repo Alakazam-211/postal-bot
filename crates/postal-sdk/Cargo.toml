@@ -4,16 +4,26 @@ version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Postal agent-to-agent mail: sans-IO core (message types, pairing codes, badges, delivery hooks) for hosts like p5"
+description = "agent-to-agent mail"
 publish = false
 
 [dependencies]
 base64 = "0.22"
-ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem", "fast", "zeroize"] }
+chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem", "fast", "zeroize", "rand_core"] }
 getrandom = "0.2"
-sha2 = "0.10"
-subtle = "2.6"
-
-[dev-dependencies]
+hkdf = "0.12"
+pkcs8 = { version = "0.10", features = ["pem"] }
+rand = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
+spki = { version = "0.7", features = ["pem"] }
+subtle = "2.6"
+ulid = "1"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+zeroize = "1"
+
+[features]
+# HoldSeal-v1 (p5-hold-v1), for p5's old hold routes only.
+hold-v1 = []

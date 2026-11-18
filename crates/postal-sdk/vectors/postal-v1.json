@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib (and the cryptography package for Ed25519 in 'confirm'). A change here is a wire change. Every host's CI checks them (cargo test -p postal-sdk).",
+  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib (and the cryptography package for Ed25519 in 'confirm' and 'wire', X25519, HKDF and ChaCha20-Poly1305 in 'hold_v2'). A change here is a wire change. Every host's CI checks them (cargo test -p postal-sdk).",
   "pairing": [
     {
       "pair_id": "pair-1",
@@ -285,6 +285,97 @@
           "sig_b64": "5A+0GvKHnLxEcf42DTxywjJeR5MRGfIHgbBfWqguLjvm0IQ8R1M3Oytw+HxgCnO5B26dJZg8T9FUr8UEIEaMBQ=="
         }
       ]
+    }
+  ],
+  "wire": [
+    {
+      "sender_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sender_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=\n-----END PUBLIC KEY-----\n",
+      "digest_hex": "894b5511dae5de4cd699755b1f62a06e99d3539e1f1319580ab59d74a029d741",
+      "signed_hex": "b9e8b1bce202c406b9a769a041f298500ac7799be49dc9122566023b0b43634e",
+      "message": {
+        "v": 2,
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "from": "alice::acme.postal.bot",
+        "to": "scout::bravo.postal.bot",
+        "sent_at": 1800000000,
+        "mode": "live",
+        "content_type": "text/plain; charset=utf-8",
+        "wake": true,
+        "body": "hello scout",
+        "files": [],
+        "sig": "F+bhYY/VFL3Yd3yP+TGK4+PW/DnDHOfg7NDcUgcA3fWbI2hie+tXIqqstVYDCodtQwp2mHSb/qcV8HkYM+PsCg=="
+      },
+      "json": "{\"v\":2,\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"from\":\"alice::acme.postal.bot\",\"to\":\"scout::bravo.postal.bot\",\"sent_at\":1800000000,\"mode\":\"live\",\"content_type\":\"text/plain; charset=utf-8\",\"wake\":true,\"body\":\"hello scout\",\"files\":[],\"sig\":\"F+bhYY/VFL3Yd3yP+TGK4+PW/DnDHOfg7NDcUgcA3fWbI2hie+tXIqqstVYDCodtQwp2mHSb/qcV8HkYM+PsCg==\"}"
+    },
+    {
+      "sender_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sender_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=\n-----END PUBLIC KEY-----\n",
+      "digest_hex": "b98d0d4df61f45617cf035df9c8e8838773604a474d989859c5ebfac6411cea3",
+      "signed_hex": "28c61d58047473d933a9110653a252b8550f6d2e4f6e3ecfeceaef4bb9222b2e",
+      "message": {
+        "v": 2,
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "from": "alice::acme.postal.bot",
+        "to": "scout::bravo.postal.bot",
+        "sent_at": 1800000000,
+        "mode": "tray",
+        "content_type": "text/markdown",
+        "wake": true,
+        "body": "line 1\nline \"2\"",
+        "files": [
+          {
+            "name": "a.txt",
+            "content": "eA=="
+          },
+          {
+            "name": "b.md",
+            "content": ""
+          }
+        ],
+        "sig": "ZWesI334ryO2scz6ivLvAxAcW9+oX4QR1enTzS1WB4NYv0CzxqMINByGZYyg5HYxRQZjiSLLzNZtkOc9XHDTAg=="
+      },
+      "json": "{\"v\":2,\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"from\":\"alice::acme.postal.bot\",\"to\":\"scout::bravo.postal.bot\",\"sent_at\":1800000000,\"mode\":\"tray\",\"content_type\":\"text/markdown\",\"wake\":true,\"body\":\"line 1\\nline \\\"2\\\"\",\"files\":[{\"name\":\"a.txt\",\"content\":\"eA==\"},{\"name\":\"b.md\",\"content\":\"\"}],\"sig\":\"ZWesI334ryO2scz6ivLvAxAcW9+oX4QR1enTzS1WB4NYv0CzxqMINByGZYyg5HYxRQZjiSLLzNZtkOc9XHDTAg==\"}"
+    },
+    {
+      "sender_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sender_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=\n-----END PUBLIC KEY-----\n",
+      "digest_hex": "c7e5b76fd4ad90977b77ab40f1735875e9339a983502b8812e14b1392f05538a",
+      "signed_hex": "5ebf260ae7fdafac31f9a2b2acca157043c5d6c4690c004fd594f6bb9486d466",
+      "message": {
+        "v": 2,
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "from": "alice::acme.postal.bot",
+        "to": "scout::bravo.postal.bot",
+        "sent_at": 1800000000,
+        "mode": "tray",
+        "content_type": "text/plain",
+        "wake": false,
+        "body": "keep quiet",
+        "files": [],
+        "sig": "5GaL57FCvDYafCp4yYDHAwjrPLKFIwYrYJfMntzBzISi+npt5D9M9fRwJ4iG/wfPFtmG5AH3h4BJSB9vJXzOAg=="
+      },
+      "json": "{\"v\":2,\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"from\":\"alice::acme.postal.bot\",\"to\":\"scout::bravo.postal.bot\",\"sent_at\":1800000000,\"mode\":\"tray\",\"content_type\":\"text/plain\",\"wake\":false,\"body\":\"keep quiet\",\"files\":[],\"sig\":\"5GaL57FCvDYafCp4yYDHAwjrPLKFIwYrYJfMntzBzISi+npt5D9M9fRwJ4iG/wfPFtmG5AH3h4BJSB9vJXzOAg==\"}"
+    }
+  ],
+  "hold_v2": [
+    {
+      "recipient_seed_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "recipient_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAoJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA=\n-----END PUBLIC KEY-----\n",
+      "recipient_x25519_hex": "9d8d78b9c9e6661e552f2f1af02095ee2f8743fa2e6183f41bb7077ef51b5379",
+      "eph_secret_hex": "3333333333333333333333333333333333333333333333333333333333333333",
+      "eph_pub_hex": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+      "nonce_hex": "444444444444444444444444",
+      "shared_hex": "1f655333fcdfaf813012885bc759e67682a755f6e887fb6c050792666090fd66",
+      "key_hex": "46611fa3d5b287219893f5c71d1e48390fd040328997890edb721d3d84d03315",
+      "aad_hex": "706f7374616c2d686f6c642d76320200000016616c6963653a3a61636d652e706f7374616c2e626f740000001773636f75743a3a627261766f2e706f7374616c2e626f740000001a303141525a334e44454b54535634525246465136394735464156",
+      "outer": {
+        "from": "alice::acme.postal.bot",
+        "to": "scout::bravo.postal.bot",
+        "client_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+      },
+      "plaintext": "{\"v\":2,\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"from\":\"alice::acme.postal.bot\",\"to\":\"scout::bravo.postal.bot\",\"sent_at\":1800000000,\"mode\":\"live\",\"content_type\":\"text/plain; charset=utf-8\",\"wake\":true,\"body\":\"hello scout\",\"files\":[],\"sig\":\"F+bhYY/VFL3Yd3yP+TGK4+PW/DnDHOfg7NDcUgcA3fWbI2hie+tXIqqstVYDCodtQwp2mHSb/qcV8HkYM+PsCg==\"}",
+      "sealed_b64": "AnsNR9k0J/gxEWB4HHxzP9ifiJcK70kNiqDuGaTLihsUREREREREREREREREzIyUNppkq7FXgbZZTUxnn1gSX7k8TxR7lpRU9j90RMWrZqN2zlqsU0h6dPhlN7+aozm8s+dg1jkt+t8pW5Z93/cRdMz1tCqAolWp8enocoVkIhsO2b7Ou4Dy5IrdG8zqlXhiYtu7leuOeQAqsVglQz/la83Jp6Wg8garY4x6TWcrWk3HGq9idzHX43LypdGE0jRjJGqamGWbKneB23RATYPakHha+rrVHLRVGfv0fuVz6Dhz7SVEyAQlmmGIXXI8lRml/+MzfU2IQZKQRNRfy4SgKrKCMkFB5X/OF/m1XGnVcFXN/WsxRK5ruKMcU8ljJRDO6dg+G68VvuEmLrjp/ByOGb11CTKMTFqWjOBGd3KNvK5jCLhm3UqPTHwBT1LbjzMQBW7eWMfaPPPKd/faNDU36yPyEqyqJD1eGOYCJVUjLd286iqEFM2qRkpppqKeLDTv"
     }
   ]
 }
