@@ -24,6 +24,10 @@ ulid = "1"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 zeroize = "1"
 
+[dev-dependencies]
+# examples/e2e_plane.rs only.
+ureq = { version = "2.12", features = ["json"] }
+
 [features]
 # HoldSeal-v1 (p5-hold-v1), for p5's old hold routes only.
 hold-v1 = []

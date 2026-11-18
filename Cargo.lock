@@ -865,6 +865,7 @@ dependencies = [
  "spki",
  "subtle",
  "ulid",
+ "ureq",
  "x25519-dalek",
  "zeroize",
 ]
