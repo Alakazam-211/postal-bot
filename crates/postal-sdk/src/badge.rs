@@ -123,14 +123,8 @@ mod tests {
     #[test]
     fn every_envelope_field_changes_the_badge() {
         let none: [FileDigest; 0] = [];
-        let one = [FileDigest {
-            name: "a.txt".into(),
-            sha256: sha256(b"x"),
-        }];
-        let other = [FileDigest {
-            name: "a.txt".into(),
-            sha256: sha256(b"y"),
-        }];
+        let one = [FileDigest { name: "a.txt".into(), sha256: sha256(b"x") }];
+        let other = [FileDigest { name: "a.txt".into(), sha256: sha256(b"y") }];
         let base = badge(&envelope_digest(&env(&none)).unwrap());
         let mut variants = Vec::new();
         let mut e = env(&none);
