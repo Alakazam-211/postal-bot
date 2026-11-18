@@ -11,8 +11,10 @@
 //! cargo run -p postal-sdk --example e2e_plane
 //! ```
 //!
-//! `creds.json` (0600; never printed):
-//! `{"a": {"addr", "box_token", "owner_token"}, "b": {…}}`.
+//! `creds.json` (0600; never printed): `{base_url, labels: {<label>:
+//! {connect_credential, decide_token}}}` for labels `ptest-a` and `ptest-b`.
+//! Box calls use a `pst_` from `POST /session`; confirm and revoke use the
+//! label's `k2c_pd_`.
 //! Only for a throwaway plane: it creates pairs and hold items.
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -91,39 +93,58 @@ fn ok<T: for<'de> serde::Deserialize<'de>>(what: &str, (s, b): (u16, Vec<u8>)) -
 }
 
 fn load() -> (String, Side, Side) {
-    let base = std::env::var("POSTAL_E2E_BASE").expect("POSTAL_E2E_BASE");
     let path = std::env::var("POSTAL_E2E_CREDS").expect("POSTAL_E2E_CREDS");
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let side = |k: &str, seed: u8| {
+    let base = std::env::var("POSTAL_E2E_BASE")
+        .ok()
+        .or_else(|| v["base_url"].as_str().map(str::to_owned))
+        .expect("POSTAL_E2E_BASE or base_url");
+    // Request paths already start with /api/postal/v1.
+    let base = base
+        .trim_end_matches('/')
+        .trim_end_matches(plane::API)
+        .to_string();
+    let run = {
+        let mut r = [0u8; 3];
+        getrandom::getrandom(&mut r).unwrap();
+        postal_sdk::hex::to_hex(&r)
+    };
+    let side = |label: &str, handle: &str| {
+        let l = &v["labels"][label];
         let s = |f: &str| {
-            v[k][f]
-                .as_str()
-                .unwrap_or_else(|| panic!("{k}.{f}"))
+            l[f].as_str()
+                .unwrap_or_else(|| panic!("{label}.{f}"))
                 .to_string()
         };
-        // Fresh keys every run, so repeated runs make new pairs.
-        let mut bytes = [0u8; 32];
-        getrandom::getrandom(&mut bytes).unwrap();
-        bytes[0] ^= seed;
-        let sk = SigningKey::from_bytes(&bytes);
+        let mut seed = [0u8; 32];
+        getrandom::getrandom(&mut seed).unwrap();
+        let sk = SigningKey::from_bytes(&seed);
         let pem = sk
             .verifying_key()
             .to_public_key_pem(LineEnding::LF)
             .unwrap();
+        // The Connect credential is only for minting a pst_ session.
+        let session = Request {
+            method: Method::Post,
+            path: format!("{}/session", plane::API),
+            body: Some("{}".into()),
+        };
+        let tok: serde_json::Value = ok(
+            "POST /session",
+            call(&base, &s("connect_credential"), &session),
+        );
         Side {
-            addr: Address::parse(&s("addr")).unwrap(),
-            box_token: s("box_token"),
-            owner_token: s("owner_token"),
+            addr: Address::new(&format!("{handle}{run}"), label).unwrap(),
+            box_token: tok["token"].as_str().expect("pst_").to_string(),
+            owner_token: s("decide_token"),
             pk: PublicKey::from_pem(&pem).unwrap(),
             sk,
         }
     };
-    (
-        base.trim_end_matches('/').to_string(),
-        side("a", 1),
-        side("b", 2),
-    )
+    let a = side("ptest-a", "alice");
+    let b = side("ptest-b", "bob");
+    (base, a, b)
 }
 
 fn get_pair(base: &str, who: &Side, id: &str) -> PairItem {
@@ -136,18 +157,6 @@ fn get_pair(base: &str, who: &Side, id: &str) -> PairItem {
 fn main() {
     let (base, a, b) = load();
     println!("plane {base}: {} -> {}", a.addr, b.addr);
-
-    // Keys on file for both handles.
-    for s in [&a, &b] {
-        let _: serde_json::Value = ok(
-            "PUT /me",
-            call(
-                &base,
-                &s.box_token,
-                &plane::me_put(&s.addr, &s.pk, Typ::Session),
-            ),
-        );
-    }
 
     // ---- pairing, SAS v2 ----
     let id = ulid();
@@ -284,6 +293,10 @@ fn main() {
         "GET /events (head, B)",
         call(&base, &b.box_token, &plane::events(None, 0)),
     );
+    let a_head = ok::<plane::EventPage>(
+        "GET /events (head, A)",
+        call(&base, &a.box_token, &plane::events(None, 0)),
+    );
     let msg_id = ulid();
     let msg = wire::sign(
         &a.sk,
@@ -407,6 +420,19 @@ fn main() {
     let rc = plane::parse_receipts(s, &body).unwrap();
     assert_eq!(rc.get(&msg_id), Some(&Receipt::Delivered), "{rc:?}");
     println!("ok    receipt delivered");
+    // And A was told by an event (a hint; the pull above is the answer).
+    let (st, body) = call(&base, &a.box_token, &plane::events(Some(&a_head.cursor), 5));
+    let AfterEvents::Next(p) = plane::after_events(st, &body) else {
+        panic!("A events")
+    };
+    assert!(
+        p.events
+            .iter()
+            .any(|e| matches!(e, Event::Receipt { client_id, .. } if *client_id == msg_id)),
+        "{:?}",
+        p.events
+    );
+    println!("ok    receipt event reached A");
 
     // A refusal leaves a refused:<code> receipt.
     let id2 = ulid();
