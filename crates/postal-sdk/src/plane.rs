@@ -94,6 +94,8 @@ pub enum Code {
     PairIdTaken,
     CursorExpired,
     TooLarge,
+    /// `sealed` isn't HoldSeal-v2 framing (byte 0 = 0x02, at least 61 bytes).
+    BadSealed,
     Other(String),
 }
 
@@ -126,6 +128,7 @@ impl Code {
             "pair_id_taken" => Self::PairIdTaken,
             "cursor_expired" => Self::CursorExpired,
             "too_large" => Self::TooLarge,
+            "bad_sealed" => Self::BadSealed,
             other => Self::Other(other.to_string()),
         }
     }
@@ -415,7 +418,8 @@ pub fn hold_refuse(ids: &[String], code: RefuseCode) -> Result<Request, PlaneErr
     ))
 }
 
-/// `GET /hold/sent?client_ids=a,b`: receipts for this sender's own items.
+/// `GET /hold/sent?client_ids=a,b`: receipts for this caller's own items,
+/// across all its handles. Unknown ids are absent from the answer.
 ///
 /// # Errors
 /// [`PlaneError::BadInput`].
@@ -499,9 +503,15 @@ pub enum Event {
         #[serde(default)]
         reason: Option<String>,
     },
+    /// One of this sender's held items changed state. Feed `state` to
+    /// [`Receipt::parse`] and [`crate::outbox::Item::on_receipt`].
     Receipt {
+        /// The sender address (`from`) the item was held under.
         #[serde(default)]
-        client_ids: Vec<String>,
+        handle: String,
+        client_id: String,
+        /// `delivered`, `expired` or `refused:<code>`.
+        state: String,
     },
     #[serde(other)]
     Unknown,
@@ -908,7 +918,7 @@ mod tests {
         let page = br#"{"cursor":"c2","events":[
             {"type":"hold","handle":"scout::bravo.postal.bot","count":2},
             {"type":"pair","id":"01J","status":"pending_in","step":"responded"},
-            {"type":"receipt","client_ids":["m1"]},
+            {"type":"receipt","handle":"alice::acme.postal.bot","client_id":"m1","state":"refused:gated"},
             {"type":"from_the_future","x":1}]}"#;
         let AfterEvents::Next(p) = after_events(200, page) else {
             panic!()
@@ -916,6 +926,14 @@ mod tests {
         assert_eq!(p.cursor, "c2");
         assert_eq!(p.events.len(), 4);
         assert_eq!(p.events[3], Event::Unknown);
+        let Event::Receipt {
+            client_id, state, ..
+        } = &p.events[2]
+        else {
+            panic!("{:?}", p.events[2])
+        };
+        assert_eq!(client_id, "m1");
+        assert_eq!(Receipt::parse(state), Receipt::Refused(RefuseCode::Gated));
         assert!(matches!(
             after_events(200, br#"{"cursor":"c3","events":[]}"#),
             AfterEvents::Next(_)
