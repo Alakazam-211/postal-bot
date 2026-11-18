@@ -1,539 +1,1010 @@
-//! Sans-IO plane contract: P-4 hold v2 and P-5 events.
+//! Typed, sans-IO client for the Postal plane API v1 (`/api/postal/v1`).
 //!
-//! Locked with k2-dev-web (`m_lqHkCWz0rZ`). Hosts bring HTTP. Hold is not
-//! shipped until they ping.
+//! Each call is a [`Request`] builder and a parser for the `(status, body)`
+//! the host got back. The host brings HTTP, the base URL and the bearer
+//! (Connect token, `pst_`, `k2c_cli_` or `k2c_pd_`), and checks the
+//! `Postal-Api: 1` header. Nothing here does I/O.
+//!
+//! Hold v2 (P-4) and events (P-5) follow contract draft 2 with K2 Web:
+//! first-write-wins on `(from, client_id)`, a 512 KiB decoded cap, `after=`
+//! paging, `{acked}`, refusals with a receipt, events as hints only.
+//! Pair routes are in `docs/postal-plane-v1.md`; the confirm body comes from
+//! [`crate::pairing::Confirmation`].
 
-use std::time::Duration;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::seal::{is_holdseal_v1, seal, SealAad, SealError};
+use crate::address::Address;
+use crate::hold::{Outer, HOLDSEAL_V2, MAX_SEALED, MIN_SEALED};
+use crate::pairing::{Commitment, PairError, PublicKey, Reveal};
 
-/// Hold TTL we send. Plane may GC after this.
-pub const HOLD_TTL_SECS: u64 = 7 * 24 * 60 * 60;
-/// Agent poll target when events are down and `P5_HOLD=1`.
-pub const HOLD_POLL_SECS: u64 = 30;
-/// Jitter around [`HOLD_POLL_SECS`] so pollers do not sync.
-pub const HOLD_POLL_JITTER_SECS: u64 = 10;
-/// Minimum HoldSeal-v1 blob: version + eph_pub + nonce + tag.
-pub const MIN_BLOB_LEN: usize = 61;
-/// P-4 PUT / GET.
-pub const HOLD_PATH: &str = "/postal/hold";
-/// P-5 long-poll / poll. Cursor is opaque; not a unix `since`.
-pub const EVENTS_PATH: &str = "/postal/events";
+/// Path prefix of every v1 route.
+pub const API: &str = "/api/postal/v1";
+/// Most ids in one ACK, refuse or receipts call.
+pub const MAX_IDS: usize = 100;
+/// Longest long-poll wait the plane allows, in seconds.
+pub const MAX_WAIT_SECS: u32 = 60;
+/// Default page size for `GET /hold`.
+pub const HOLD_PAGE: u32 = 100;
 
-/// `PUT /postal/hold` body. `ciphertext` is opaque HoldSeal-v1 (standard base64).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HoldEnvelope {
-    pub id: String,
-    pub to: String,
-    pub from: String,
-    pub size: u64,
-    /// Unix seconds (TTL). Opaque to the plane besides GC.
-    pub expiry: u64,
-    pub ciphertext: String,
+/// HTTP method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
 }
 
-/// `PUT /postal/hold` or `POST /postal/hold/{id}/ack` 200 body.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HoldOk {
-    #[serde(default)]
-    pub ok: bool,
-    #[serde(default)]
-    pub id: String,
+/// One plane call. `body` is JSON, `None` for a GET.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub method: Method,
+    /// Path and query, starting with [`API`].
+    pub path: String,
+    pub body: Option<String>,
 }
 
-/// `GET /postal/hold` — `{items:[…]}` only.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HoldList {
-    #[serde(default)]
-    pub items: Vec<HoldEnvelope>,
+impl Request {
+    fn get(path: String) -> Self {
+        Self {
+            method: Method::Get,
+            path,
+            body: None,
+        }
+    }
+
+    fn post(path: String, body: &impl Serialize) -> Self {
+        Self {
+            method: Method::Post,
+            path,
+            body: Some(serde_json::to_string(body).expect("plane bodies serialize")),
+        }
+    }
 }
 
-/// Content-blind P-5 event. No body, no ciphertext, no SAS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EventKind {
-    Hold,
-    Pair,
+// ---------------------------------------------------------------- errors
+
+/// A stable error code from `{"error":{"code",…}}`. Unknown codes are kept,
+/// so a newer plane never breaks an older SDK.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Code {
+    RateLimited,
+    HoldQuota,
+    Unavailable,
+    Internal,
+    BadRequest,
+    InvalidAddr,
+    Unauthorized,
+    Forbidden,
+    OwnerRequired,
+    NotYourHandle,
+    BadConfirmation,
+    NotFound,
+    Conflict,
+    AlreadyResponded,
+    NotResponded,
+    AlreadyRevealed,
+    CommitmentMismatch,
+    PairExpired,
+    NotRevealed,
+    AlreadyDecided,
+    TranscriptMismatch,
+    PairNotAccepted,
+    PairIdTaken,
+    CursorExpired,
+    TooLarge,
+    Other(String),
 }
 
-/// One content-blind notify.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Event {
-    pub kind: EventKind,
-    pub id: String,
-    pub from: String,
-    pub to: String,
+impl Code {
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "rate_limited" => Self::RateLimited,
+            "hold_quota" => Self::HoldQuota,
+            "unavailable" => Self::Unavailable,
+            "internal" => Self::Internal,
+            "bad_request" => Self::BadRequest,
+            "invalid_addr" => Self::InvalidAddr,
+            "unauthorized" => Self::Unauthorized,
+            "forbidden" => Self::Forbidden,
+            "owner_required" => Self::OwnerRequired,
+            "not_your_handle" => Self::NotYourHandle,
+            "bad_confirmation" => Self::BadConfirmation,
+            "not_found" => Self::NotFound,
+            "conflict" => Self::Conflict,
+            "already_responded" => Self::AlreadyResponded,
+            "not_responded" => Self::NotResponded,
+            "already_revealed" => Self::AlreadyRevealed,
+            "commitment_mismatch" => Self::CommitmentMismatch,
+            "pair_expired" => Self::PairExpired,
+            "not_revealed" => Self::NotRevealed,
+            "already_decided" => Self::AlreadyDecided,
+            "transcript_mismatch" => Self::TranscriptMismatch,
+            "pair_not_accepted" => Self::PairNotAccepted,
+            "pair_id_taken" => Self::PairIdTaken,
+            "cursor_expired" => Self::CursorExpired,
+            "too_large" => Self::TooLarge,
+            other => Self::Other(other.to_string()),
+        }
+    }
 }
 
-/// `GET /postal/events` 200 body. Timeout is 200 with `events: []`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WaitPage {
-    pub cursor: String,
-    #[serde(default)]
-    pub events: Vec<Event>,
-}
-
-/// Fail-closed plane error. HTTP mapping is the host's job.
+/// What a failed call means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlaneError {
-    /// Decoded blob is not HoldSeal-v1 (wrong version or shorter than 61).
-    Plaintext,
-    /// Hold/pair id would be interpolated into a URL path.
-    BadHoldId,
-    /// PUT same id, different ciphertext (plane 409).
-    Conflict,
-    /// ACK of an id that is not this bearer (plane 404).
-    NotFound,
-    /// Host transport / HTTP.
-    Host(String),
-    Crypto(String),
+    /// A v1 error answer.
+    Api {
+        status: u16,
+        code: Code,
+        message: String,
+        retry_after_s: Option<u64>,
+    },
+    /// A success status with a body that isn't the expected shape.
+    BadBody(String),
+    /// An argument the SDK refuses to send (bad id, too many ids, plaintext).
+    BadInput(&'static str),
+}
+
+impl PlaneError {
+    /// Whether the same request may succeed later (the contract's class;
+    /// an unknown code goes by its HTTP status).
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Api { code, status, .. } => match code {
+                Code::RateLimited | Code::HoldQuota | Code::Unavailable | Code::Internal => true,
+                Code::Other(_) => *status == 429 || *status >= 500,
+                _ => false,
+            },
+            Self::BadBody(_) | Self::BadInput(_) => false,
+        }
+    }
+
+    /// Seconds to wait before retrying, when the plane said.
+    #[must_use]
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            Self::Api { retry_after_s, .. } => *retry_after_s,
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn code(&self) -> Option<&Code> {
+        match self {
+            Self::Api { code, .. } => Some(code),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for PlaneError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Plaintext => f.write_str("refusing to upload plaintext hold body"),
-            Self::BadHoldId => f.write_str("hold id contains invalid characters"),
-            Self::Conflict => f.write_str("hold id already stored with a different ciphertext"),
-            Self::NotFound => f.write_str("hold not found for this bearer"),
-            Self::Host(msg) => write!(f, "plane: {msg}"),
-            Self::Crypto(msg) => write!(f, "postal hold crypto: {msg}"),
+            Self::Api {
+                status,
+                code,
+                message,
+                ..
+            } => write!(f, "plane {status} {code:?}: {message}"),
+            Self::BadBody(e) => write!(f, "plane answer not understood: {e}"),
+            Self::BadInput(e) => write!(f, "refused before sending: {e}"),
         }
     }
 }
 
 impl std::error::Error for PlaneError {}
 
-impl From<SealError> for PlaneError {
-    fn from(e: SealError) -> Self {
-        Self::Crypto(e.to_string())
-    }
+#[derive(Deserialize)]
+struct ErrorBody {
+    error: ErrorInner,
 }
 
-/// `id` is interpolated into `/postal/hold/{id}/ack`.
-#[must_use]
-pub fn is_safe_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+#[derive(Deserialize)]
+struct ErrorInner {
+    code: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    retry_after_s: Option<u64>,
 }
 
-/// `POST /postal/hold/{id}/ack`.
+/// Parse any answer: a 2xx body as `T`, anything else as [`PlaneError::Api`].
+/// A non-2xx without the v1 error shape (a proxy page, say) is classed by
+/// its status.
 ///
 /// # Errors
-/// [`PlaneError::BadHoldId`].
-pub fn hold_ack_path(id: &str) -> Result<String, PlaneError> {
-    if !is_safe_id(id) {
-        return Err(PlaneError::BadHoldId);
+/// [`PlaneError`].
+pub fn parse<T: for<'de> Deserialize<'de>>(status: u16, body: &[u8]) -> Result<T, PlaneError> {
+    if (200..300).contains(&status) {
+        return serde_json::from_slice(body).map_err(|e| PlaneError::BadBody(e.to_string()));
     }
-    Ok(format!("{HOLD_PATH}/{id}/ack"))
+    Err(match serde_json::from_slice::<ErrorBody>(body) {
+        Ok(e) => PlaneError::Api {
+            status,
+            code: Code::parse(&e.error.code),
+            message: e.error.message,
+            retry_after_s: e.error.retry_after_s,
+        },
+        Err(_) => PlaneError::Api {
+            status,
+            code: Code::Other(format!("http_{status}")),
+            message: String::new(),
+            retry_after_s: None,
+        },
+    })
 }
 
-/// `GET /postal/events?cursor=&wait=`.
+// ---------------------------------------------------------------- hold v2
+
+#[derive(Serialize)]
+struct HoldPutBody<'a> {
+    v: u8,
+    from: &'a Address,
+    to: &'a Address,
+    client_id: &'a str,
+    sealed: String,
+}
+
+/// `POST /hold {v:2, from, to, client_id, sealed}`. Refuses anything that
+/// isn't a sized HoldSeal-v2 blob, so plaintext never leaves the box.
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn hold_put(outer: &Outer, sealed: &[u8]) -> Result<Request, PlaneError> {
+    if sealed.len() < MIN_SEALED || sealed.len() > MAX_SEALED || sealed[0] != HOLDSEAL_V2 {
+        return Err(PlaneError::BadInput("not a HoldSeal-v2 blob"));
+    }
+    if !crate::wire::is_canonical_ulid(&outer.client_id) {
+        return Err(PlaneError::BadInput("client_id is not a ULID"));
+    }
+    Ok(Request::post(
+        format!("{API}/hold"),
+        &HoldPutBody {
+            v: HOLDSEAL_V2,
+            from: &outer.from,
+            to: &outer.to,
+            client_id: &outer.client_id,
+            sealed: crate::b64::encode(sealed),
+        },
+    ))
+}
+
+/// `POST /hold` answer. A repeat `(from, client_id)` answers the original
+/// with `duplicate: true`, whatever the bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HoldPutOk {
+    pub id: String,
+    pub expires_at: String,
+    #[serde(default)]
+    pub duplicate: bool,
+}
+
+/// `GET /hold?after=&limit=`, oldest first.
 #[must_use]
-pub fn events_path(cursor: Option<&str>, wait: u64) -> String {
-    let wait = wait.min(60);
+pub fn hold_list(after: Option<&str>, limit: u32) -> Request {
+    let limit = limit.clamp(1, HOLD_PAGE);
+    match after {
+        Some(a) => Request::get(format!("{API}/hold?after={}&limit={limit}", query(a))),
+        None => Request::get(format!("{API}/hold?limit={limit}")),
+    }
+}
+
+/// One held item, as listed. `sealed` is still base64; see
+/// [`HoldItem::decode`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HoldItem {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub client_id: String,
+    pub sealed: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub expires_at: String,
+}
+
+impl HoldItem {
+    /// The outer fields and the sealed bytes, ready for
+    /// [`crate::hold::open`]. An item that fails here can never open:
+    /// refuse it (`too_large` if oversize) rather than leave it.
+    ///
+    /// # Errors
+    /// [`PlaneError::BadBody`].
+    pub fn decode(&self) -> Result<(Outer, Vec<u8>), PlaneError> {
+        let bad = |e: &str| PlaneError::BadBody(format!("hold item {}: {e}", self.id));
+        let outer = Outer {
+            from: Address::parse(&self.from).map_err(|_| bad("from"))?,
+            to: Address::parse(&self.to).map_err(|_| bad("to"))?,
+            client_id: self.client_id.clone(),
+        };
+        let sealed = crate::b64::decode(&self.sealed).map_err(|_| bad("sealed"))?;
+        Ok((outer, sealed))
+    }
+}
+
+/// `GET /hold` answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct HoldPage {
+    pub items: Vec<HoldItem>,
+}
+
+impl HoldPage {
+    /// The `after=` cursor for the next page, or `None` when this one was
+    /// short (the last).
+    #[must_use]
+    pub fn next_after(&self, limit: u32) -> Option<&str> {
+        if self.items.len() < limit.clamp(1, HOLD_PAGE) as usize {
+            return None;
+        }
+        self.items.last().map(|i| i.id.as_str())
+    }
+}
+
+#[derive(Serialize)]
+struct Ids<'a> {
+    ids: &'a [String],
+}
+
+fn check_ids(ids: &[String]) -> Result<(), PlaneError> {
+    if ids.is_empty() || ids.len() > MAX_IDS {
+        return Err(PlaneError::BadInput("1 to 100 ids"));
+    }
+    if !ids.iter().all(|i| is_safe_id(i)) {
+        return Err(PlaneError::BadInput("bad id"));
+    }
+    Ok(())
+}
+
+/// `POST /hold/ack {ids}`. Only after the host stored each message.
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn hold_ack(ids: &[String]) -> Result<Request, PlaneError> {
+    check_ids(ids)?;
+    Ok(Request::post(format!("{API}/hold/ack"), &Ids { ids }))
+}
+
+/// `POST /hold/ack` answer. An id missing from `acked` was foreign or already
+/// gone; that is not an error.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Acked {
+    pub acked: Vec<String>,
+}
+
+/// Why a box refuses held mail for good. The sender's receipt shows
+/// `refused:<code>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefuseCode {
+    NoAgent,
+    Gated,
+    TooLarge,
+}
+
+impl From<crate::host::RefuseCode> for RefuseCode {
+    fn from(c: crate::host::RefuseCode) -> Self {
+        match c {
+            crate::host::RefuseCode::NoAgent => Self::NoAgent,
+            crate::host::RefuseCode::Gated => Self::Gated,
+            crate::host::RefuseCode::TooLarge => Self::TooLarge,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RefuseBody<'a> {
+    ids: &'a [String],
+    code: RefuseCode,
+}
+
+/// `POST /hold/refuse {ids, code}`: deletes like an ACK and leaves a receipt.
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn hold_refuse(ids: &[String], code: RefuseCode) -> Result<Request, PlaneError> {
+    check_ids(ids)?;
+    Ok(Request::post(
+        format!("{API}/hold/refuse"),
+        &RefuseBody { ids, code },
+    ))
+}
+
+/// `GET /hold/sent?client_ids=a,b`: receipts for this sender's own items.
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn hold_sent(client_ids: &[String]) -> Result<Request, PlaneError> {
+    check_ids(client_ids)?;
+    Ok(Request::get(format!(
+        "{API}/hold/sent?client_ids={}",
+        client_ids.join(",")
+    )))
+}
+
+/// A sender's receipt for one held item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Receipt {
+    Held,
+    /// The recipient ACKed: the bytes are on its disk.
+    Delivered,
+    Expired,
+    Refused(RefuseCode),
+    /// A state this SDK doesn't know yet. Keep waiting.
+    Other(String),
+}
+
+impl Receipt {
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "held" => Self::Held,
+            "delivered" => Self::Delivered,
+            "expired" => Self::Expired,
+            "refused:no_agent" => Self::Refused(RefuseCode::NoAgent),
+            "refused:gated" => Self::Refused(RefuseCode::Gated),
+            "refused:too_large" => Self::Refused(RefuseCode::TooLarge),
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+/// Parse a `/hold/sent` answer: `{"<client_id>": "<receipt>", …}`.
+///
+/// # Errors
+/// [`PlaneError`].
+pub fn parse_receipts(status: u16, body: &[u8]) -> Result<BTreeMap<String, Receipt>, PlaneError> {
+    let raw: BTreeMap<String, String> = parse(status, body)?;
+    Ok(raw
+        .into_iter()
+        .map(|(k, v)| (k, Receipt::parse(&v)))
+        .collect())
+}
+
+// ---------------------------------------------------------------- events
+
+/// `GET /events?cursor=&wait=`. No cursor starts at the head.
+#[must_use]
+pub fn events(cursor: Option<&str>, wait_secs: u32) -> Request {
+    let wait = wait_secs.min(MAX_WAIT_SECS);
     match cursor {
         Some(c) if !c.is_empty() => {
-            format!("{EVENTS_PATH}?cursor={}&wait={wait}", url_query(c))
+            Request::get(format!("{API}/events?cursor={}&wait={wait}", query(c)))
         }
-        _ => format!("{EVENTS_PATH}?wait={wait}"),
+        _ => Request::get(format!("{API}/events?wait={wait}")),
     }
 }
 
-fn url_query(s: &str) -> String {
+/// A content-blind hint. On any event, pull `/hold` or `/pairs`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Event {
+    Hold {
+        #[serde(default)]
+        handle: String,
+        #[serde(default)]
+        count: u64,
+    },
+    Pair {
+        id: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default)]
+        step: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    Receipt {
+        #[serde(default)]
+        client_ids: Vec<String>,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+/// `GET /events` answer. A timeout is 200 with no events.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EventPage {
+    pub cursor: String,
+    #[serde(default)]
+    pub events: Vec<Event>,
+}
+
+/// What to do after an events call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterEvents {
+    /// Store `cursor`, act on the events, poll again at once.
+    Next(EventPage),
+    /// 410 `cursor_expired`: drop the cursor, do one full pull of `/hold`
+    /// and `/pairs`, then poll from the head.
+    Restart,
+    /// Back off (60 s is fine, or `retry_after_s`), keep the cursor.
+    BackOff(PlaneError),
+    /// A permanent error (auth, say). Stop and tell the owner.
+    Stop(PlaneError),
+}
+
+#[must_use]
+pub fn after_events(status: u16, body: &[u8]) -> AfterEvents {
+    match parse::<EventPage>(status, body) {
+        Ok(page) => AfterEvents::Next(page),
+        Err(e) if e.code() == Some(&Code::CursorExpired) => AfterEvents::Restart,
+        Err(e) if e.is_retryable() => AfterEvents::BackOff(e),
+        Err(e @ PlaneError::BadBody(_)) => AfterEvents::BackOff(e),
+        Err(e) => AfterEvents::Stop(e),
+    }
+}
+
+// ---------------------------------------------------------------- pairs
+
+/// The client's own pair id: a ULID, because the commitment binds it.
+fn pair_path(pair_id: &str, rest: &str) -> Result<String, PlaneError> {
+    if !crate::wire::is_canonical_ulid(pair_id) {
+        return Err(PlaneError::BadInput("pair id is not a ULID"));
+    }
+    Ok(format!("{API}/pairs/{pair_id}{rest}"))
+}
+
+/// The other end's kind of agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Typ {
+    Session,
+    Turn,
+}
+
+#[derive(Serialize)]
+struct PairCreate<'a> {
+    id: &'a str,
+    from: &'a Address,
+    to: &'a Address,
+    typ: Typ,
+    public_key_pem: &'a str,
+    sas_version: u8,
+    commitment: String,
+}
+
+/// `POST /pairs`, step 1 (A). `id` must be the `pair_id` in the
+/// [`crate::pairing::PairContext`] the commitment was made over.
+///
+/// # Errors
+/// [`PlaneError::BadInput`] for a non-ULID id.
+pub fn pair_create(
+    id: &str,
+    from: &Address,
+    to: &Address,
+    typ: Typ,
+    me: &PublicKey,
+    c: &Commitment,
+) -> Result<Request, PlaneError> {
+    pair_path(id, "")?;
+    Ok(Request::post(
+        format!("{API}/pairs"),
+        &PairCreate {
+            id,
+            from,
+            to,
+            typ,
+            public_key_pem: me.pem(),
+            sas_version: 2,
+            commitment: c.to_hex(),
+        },
+    ))
+}
+
+#[derive(Serialize)]
+struct PairRespond<'a> {
+    public_key_pem: &'a str,
+    nb: String,
+    typ: Typ,
+}
+
+/// `POST /pairs/{id}/respond`, step 2 (B).
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn pair_respond(
+    id: &str,
+    resp: &crate::pairing::Response,
+    typ: Typ,
+) -> Result<Request, PlaneError> {
+    Ok(Request::post(
+        pair_path(id, "/respond")?,
+        &PairRespond {
+            public_key_pem: resp.key().pem(),
+            nb: resp.nb_hex(),
+            typ,
+        },
+    ))
+}
+
+#[derive(Serialize)]
+struct PairReveal {
+    na: String,
+}
+
+/// `POST /pairs/{id}/reveal`, step 3 (A).
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn pair_reveal(id: &str, reveal: &Reveal) -> Result<Request, PlaneError> {
+    Ok(Request::post(
+        pair_path(id, "/reveal")?,
+        &PairReveal {
+            na: reveal.to_hex(),
+        },
+    ))
+}
+
+/// `POST /pairs/{id}/confirm` with this box's signed confirmation. Owner
+/// credentials only (`k2c_pd_`, `k2c_cli_`).
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn pair_confirm(c: &crate::pairing::Confirmation) -> Result<Request, PlaneError> {
+    Ok(Request {
+        method: Method::Post,
+        path: c
+            .path()
+            .map_err(|_: PairError| PlaneError::BadInput("pair id"))?,
+        body: Some(c.body_json()),
+    })
+}
+
+/// `POST /pairs/{id}/revoke {}`. Owner credentials only.
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn pair_revoke(id: &str) -> Result<Request, PlaneError> {
+    Ok(Request {
+        method: Method::Post,
+        path: crate::pairing::revoke_path(id).map_err(|_| PlaneError::BadInput("pair id"))?,
+        body: Some(crate::pairing::REVOKE_BODY.to_string()),
+    })
+}
+
+/// `GET /pairs`.
+#[must_use]
+pub fn pairs_list() -> Request {
+    Request::get(format!("{API}/pairs"))
+}
+
+/// `GET /pairs/{id}`.
+///
+/// # Errors
+/// [`PlaneError::BadInput`].
+pub fn pair_get(id: &str) -> Result<Request, PlaneError> {
+    Ok(Request::get(pair_path(id, "")?))
+}
+
+/// A pair's status, from the caller's side.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairStatus {
+    PendingIn,
+    PendingOut,
+    Accepted,
+    Rejected,
+    Revoked,
+    Failed,
+    Expired,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One stored confirmation, as the plane relays it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct StoredConfirmation {
+    pub side: String,
+    pub decision: String,
+    /// Null only for a dashboard (unsigned) reject.
+    pub transcript_sha256: Option<String>,
+    pub sig: Option<String>,
+    #[serde(default)]
+    pub at: Option<String>,
+}
+
+/// One `GET /pairs` item. Plane data: the box derives fingerprints from
+/// `peer_key_pem` and never trusts `peer_fingerprint` (rule B2).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PairItem {
+    pub id: String,
+    pub side: Option<String>,
+    pub handle: String,
+    pub peer: String,
+    pub peer_typ: Option<Typ>,
+    pub peer_key_pem: Option<String>,
+    pub direction: String,
+    pub status: PairStatus,
+    pub step: Option<String>,
+    pub sas_version: u8,
+    pub commitment: Option<String>,
+    pub nb: Option<String>,
+    pub na: Option<String>,
+    #[serde(default)]
+    pub confirmed_by: Vec<String>,
+    #[serde(default)]
+    pub confirmations: Vec<StoredConfirmation>,
+    pub failed_reason: Option<String>,
+    pub rekey_of: Option<String>,
+    #[serde(default)]
+    pub rekey_pending: bool,
+    pub created_at: Option<String>,
+    pub decided_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+impl PairItem {
+    /// The peer's signed confirmation, if it has one.
+    #[must_use]
+    pub fn peer_confirmation(&self) -> Option<&StoredConfirmation> {
+        let mine = self.side.as_deref()?;
+        self.confirmations.iter().find(|c| c.side != mine)
+    }
+}
+
+/// `GET /pairs` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PairList {
+    pub pairs: Vec<PairItem>,
+}
+
+// ---------------------------------------------------------------- helpers
+
+/// A plane-issued id that can sit in a path or a comma list.
+#[must_use]
+pub fn is_safe_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn query(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(
-                    char::from_digit((b >> 4) as u32, 16)
-                        .unwrap()
-                        .to_ascii_uppercase(),
-                );
-                out.push(
-                    char::from_digit((b & 0xf) as u32, 16)
-                        .unwrap()
-                        .to_ascii_uppercase(),
-                );
-            }
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
         }
     }
     out
 }
 
-/// `30s ± 10s`. `unit` is in `[0, 1)`.
-#[must_use]
-pub fn hold_poll_delay(unit: f64) -> Duration {
-    let unit = unit.clamp(0.0, 0.999_999);
-    let lo = (HOLD_POLL_SECS.saturating_sub(HOLD_POLL_JITTER_SECS)) as f64;
-    let span = (2 * HOLD_POLL_JITTER_SECS) as f64;
-    Duration::from_secs_f64(lo + unit * span)
-}
-
-/// `expiry = now + ttl`. Host passes unix seconds.
-#[must_use]
-pub fn expiry_unix(now: u64, ttl: u64) -> u64 {
-    now.saturating_add(ttl)
-}
-
-/// Fail closed: PUT body must be HoldSeal-v1, never the cover text.
-/// Blob must start with `0x01` and be at least [`MIN_BLOB_LEN`] bytes.
-///
-/// # Errors
-/// [`PlaneError::Plaintext`] if it is not a HoldSeal-v1 blob, or `size` disagrees.
-pub fn refuse_plaintext(env: &HoldEnvelope) -> Result<Vec<u8>, PlaneError> {
-    let blob = crate::b64::decode(&env.ciphertext).map_err(|_| PlaneError::Plaintext)?;
-    if blob.len() < MIN_BLOB_LEN || !is_holdseal_v1(&blob) {
-        return Err(PlaneError::Plaintext);
-    }
-    if env.size != 0 && env.size != blob.len() as u64 {
-        return Err(PlaneError::Plaintext);
-    }
-    Ok(blob)
-}
-
-/// Seal plaintext and build a PUT envelope. `now` is unix seconds.
-///
-/// # Errors
-/// Crypto or id errors.
-pub fn seal_envelope(
-    id: &str,
-    to: &str,
-    from: &str,
-    plaintext: &[u8],
-    peer_spki_pem: &str,
-    now: u64,
-    ttl: u64,
-) -> Result<HoldEnvelope, PlaneError> {
-    if !is_safe_id(id) {
-        return Err(PlaneError::BadHoldId);
-    }
-    let aad = SealAad {
-        id: id.to_string(),
-        from: from.to_string(),
-        to: to.to_string(),
-    };
-    let blob = seal(peer_spki_pem, plaintext, &aad)?;
-    Ok(HoldEnvelope {
-        id: id.to_string(),
-        to: to.to_string(),
-        from: from.to_string(),
-        size: blob.len() as u64,
-        expiry: expiry_unix(now, ttl),
-        ciphertext: crate::b64::encode(&blob),
-    })
-}
-
-/// Parse GET `/postal/hold`. Only `{items:[…]}` is accepted.
-///
-/// # Errors
-/// [`PlaneError::Host`] if the JSON is another shape.
-pub fn parse_hold_list(v: &serde_json::Value) -> Result<HoldList, PlaneError> {
-    if v.get("items").is_some() && v.get("holds").is_none() && !v.is_array() {
-        return serde_json::from_value(v.clone())
-            .map_err(|e| PlaneError::Host(format!("hold list: {e}")));
-    }
-    Err(PlaneError::Host(
-        "GET /postal/hold must be {items:[...]} only".into(),
-    ))
-}
-
-/// What a host implements. No sockets here.
-pub trait Plane {
-    /// `PUT /postal/hold`. Call [`refuse_plaintext`] first.
-    ///
-    /// # Errors
-    /// [`PlaneError::Conflict`] on 409 (same id, different ciphertext).
-    fn put_hold(&self, env: &HoldEnvelope) -> Result<HoldOk, PlaneError>;
-
-    /// `GET /postal/hold`.
-    ///
-    /// # Errors
-    /// [`PlaneError::Host`] on transport or a non-`{items}` body.
-    fn list_hold(&self) -> Result<HoldList, PlaneError>;
-
-    /// `POST /postal/hold/{id}/ack` with `{}`. Only after the host fsynced.
-    ///
-    /// # Errors
-    /// [`PlaneError::NotFound`] on 404 (not this bearer).
-    fn ack_hold(&self, id: &str) -> Result<HoldOk, PlaneError>;
-
-    /// `GET /postal/events?cursor=&wait=`. Timeout is 200 empty events.
-    ///
-    /// # Errors
-    /// [`PlaneError::Host`].
-    fn wait(&self, cursor: Option<&str>, wait: Duration) -> Result<WaitPage, PlaneError>;
-}
-
-/// Map a PUT status to a plane error. 200 is the host's to parse.
-#[must_use]
-pub fn classify_put_status(status: u16) -> Option<PlaneError> {
-    match status {
-        409 => Some(PlaneError::Conflict),
-        404 => Some(PlaneError::NotFound),
-        _ => None,
-    }
-}
-
-/// Map an ACK status. 200 is the host's to parse.
-#[must_use]
-pub fn classify_ack_status(status: u16) -> Option<PlaneError> {
-    match status {
-        404 => Some(PlaneError::NotFound),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::Identity;
-    use crate::seal::HOLDSEAL_V1;
-    use std::cell::RefCell;
-    use std::collections::BTreeMap;
+    use crate::wire::tests::{key, signed};
+    use serde_json::{json, Value};
 
-    const ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-    const T0: u64 = 1_800_000_000;
-
-    struct MemoryPlane {
-        holds: RefCell<BTreeMap<String, HoldEnvelope>>,
-        events: RefCell<Vec<Event>>,
-        cursor: RefCell<String>,
-    }
-
-    impl MemoryPlane {
-        fn new() -> Self {
-            Self {
-                holds: RefCell::new(BTreeMap::new()),
-                events: RefCell::new(Vec::new()),
-                cursor: RefCell::new("0".into()),
-            }
-        }
-    }
-
-    impl Plane for MemoryPlane {
-        fn put_hold(&self, env: &HoldEnvelope) -> Result<HoldOk, PlaneError> {
-            refuse_plaintext(env)?;
-            if !is_safe_id(&env.id) {
-                return Err(PlaneError::BadHoldId);
-            }
-            let mut holds = self.holds.borrow_mut();
-            if let Some(existing) = holds.get(&env.id) {
-                if existing.ciphertext != env.ciphertext {
-                    return Err(PlaneError::Conflict);
-                }
-                return Ok(HoldOk {
-                    ok: true,
-                    id: env.id.clone(),
-                });
-            }
-            holds.insert(env.id.clone(), env.clone());
-            Ok(HoldOk {
-                ok: true,
-                id: env.id.clone(),
-            })
-        }
-
-        fn list_hold(&self) -> Result<HoldList, PlaneError> {
-            Ok(HoldList {
-                items: self.holds.borrow().values().cloned().collect(),
-            })
-        }
-
-        fn ack_hold(&self, id: &str) -> Result<HoldOk, PlaneError> {
-            if !is_safe_id(id) {
-                return Err(PlaneError::BadHoldId);
-            }
-            match self.holds.borrow_mut().remove(id) {
-                Some(_) => Ok(HoldOk {
-                    ok: true,
-                    id: id.to_string(),
-                }),
-                None => Err(PlaneError::NotFound),
-            }
-        }
-
-        fn wait(&self, _cursor: Option<&str>, _wait: Duration) -> Result<WaitPage, PlaneError> {
-            let events = self.events.replace(Vec::new());
-            Ok(WaitPage {
-                cursor: self.cursor.borrow().clone(),
-                events,
-            })
-        }
+    fn body(r: &Request) -> Value {
+        serde_json::from_str(r.body.as_deref().unwrap()).unwrap()
     }
 
     #[test]
-    fn refuse_plaintext_catches_cover_text_and_short_blobs() {
-        let env = HoldEnvelope {
-            id: ID.into(),
-            to: "scout::acme.postal.bot".into(),
-            from: "alice::acme.postal.bot".into(),
-            size: 5,
-            expiry: expiry_unix(T0, 60),
-            ciphertext: crate::b64::encode(b"hello"),
+    fn hold_put_sends_only_sealed_v2() {
+        let msg = signed(&[]);
+        let (_, scout) = key(0x22);
+        let blob = crate::hold::seal(&scout, &msg).unwrap();
+        let outer = Outer::of(&msg);
+        let r = hold_put(&outer, &blob).unwrap();
+        assert_eq!(
+            (r.method, r.path.as_str()),
+            (Method::Post, "/api/postal/v1/hold")
+        );
+        let b = body(&r);
+        assert_eq!(b["v"], 2);
+        assert_eq!(b["from"], "alice::acme.postal.bot");
+        assert_eq!(b["to"], "scout::bravo.postal.bot");
+        assert_eq!(b["client_id"], msg.id.as_str());
+        assert_eq!(
+            crate::b64::decode(b["sealed"].as_str().unwrap()).unwrap(),
+            blob
+        );
+        assert_eq!(b.as_object().unwrap().len(), 5, "{b}");
+
+        let json = crate::wire::encode_json(&msg).unwrap();
+        assert!(hold_put(&outer, &json).is_err(), "plaintext refused");
+        let mut v1 = blob.clone();
+        v1[0] = 1;
+        assert!(hold_put(&outer, &v1).is_err());
+        assert!(hold_put(&outer, &blob[..MIN_SEALED - 1]).is_err());
+    }
+
+    #[test]
+    fn hold_put_answers_and_duplicates() {
+        let ok: HoldPutOk =
+            parse(200, br#"{"id":"h1","expires_at":"2026-11-25T00:00:00Z"}"#).unwrap();
+        assert!(!ok.duplicate);
+        let dup: HoldPutOk =
+            parse(200, br#"{"id":"h1","expires_at":"x","duplicate":true}"#).unwrap();
+        assert!(dup.duplicate);
+        let quota = parse::<HoldPutOk>(
+            429,
+            br#"{"error":{"code":"hold_quota","message":"full","retry_after_s":60}}"#,
+        )
+        .unwrap_err();
+        assert!(quota.is_retryable());
+        assert_eq!(quota.retry_after(), Some(60));
+        let big =
+            parse::<HoldPutOk>(413, br#"{"error":{"code":"too_large","message":""}}"#).unwrap_err();
+        assert!(!big.is_retryable());
+        assert_eq!(big.code(), Some(&Code::TooLarge));
+        let proxy = parse::<HoldPutOk>(502, b"<html>bad gateway</html>").unwrap_err();
+        assert!(proxy.is_retryable());
+        let future =
+            parse::<HoldPutOk>(409, br#"{"error":{"code":"brand_new","message":""}}"#).unwrap_err();
+        assert!(!future.is_retryable());
+    }
+
+    #[test]
+    fn hold_list_pages_and_items_decode() {
+        assert_eq!(hold_list(None, 100).path, "/api/postal/v1/hold?limit=100");
+        assert_eq!(
+            hold_list(Some("h 1&x"), 500).path,
+            "/api/postal/v1/hold?after=h%201%26x&limit=100"
+        );
+        let msg = signed(&[]);
+        let (_, scout) = key(0x22);
+        let blob = crate::hold::seal(&scout, &msg).unwrap();
+        let page: HoldPage = parse(
+            200,
+            json!({"items":[{"id":"h1","from":"alice::acme.postal.bot","to":"scout::bravo.postal.bot",
+                "client_id": msg.id, "sealed": crate::b64::encode(&blob), "size": blob.len(),
+                "created_at":"t","expires_at":"t"}]})
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(page.next_after(100), None);
+        assert_eq!(page.next_after(1), Some("h1"));
+        let (outer, sealed) = page.items[0].decode().unwrap();
+        assert_eq!(outer, Outer::of(&msg));
+        assert_eq!(sealed, blob);
+        let mut bad = page.items[0].clone();
+        bad.from = "Alice::acme.postal.bot".into();
+        assert!(bad.decode().is_err());
+    }
+
+    #[test]
+    fn ack_refuse_and_receipts() {
+        let ids = vec!["h1".to_string(), "h2".to_string()];
+        let r = hold_ack(&ids).unwrap();
+        assert_eq!(r.path, "/api/postal/v1/hold/ack");
+        assert_eq!(body(&r), json!({"ids":["h1","h2"]}));
+        let acked: Acked = parse(200, br#"{"acked":["h1"]}"#).unwrap();
+        assert_eq!(acked.acked, ["h1"]);
+        let r = hold_refuse(&ids, crate::host::RefuseCode::Gated.into()).unwrap();
+        assert_eq!(body(&r), json!({"ids":["h1","h2"],"code":"gated"}));
+        assert!(hold_ack(&[]).is_err());
+        assert!(hold_ack(&vec!["x".to_string(); MAX_IDS + 1]).is_err());
+        assert!(hold_ack(&["a/b".to_string()]).is_err());
+        assert!(hold_ack(&["a,b".to_string()]).is_err());
+        let r = hold_sent(&ids).unwrap();
+        assert_eq!(r.path, "/api/postal/v1/hold/sent?client_ids=h1,h2");
+        let rc = parse_receipts(
+            200,
+            br#"{"a":"held","b":"delivered","c":"expired","d":"refused:too_large","e":"lost"}"#,
+        )
+        .unwrap();
+        assert_eq!(rc["b"], Receipt::Delivered);
+        assert_eq!(rc["d"], Receipt::Refused(RefuseCode::TooLarge));
+        assert_eq!(rc["e"], Receipt::Other("lost".into()));
+    }
+
+    #[test]
+    fn events_paths_and_outcomes() {
+        assert_eq!(events(None, 25).path, "/api/postal/v1/events?wait=25");
+        assert_eq!(
+            events(Some("c/1="), 99).path,
+            "/api/postal/v1/events?cursor=c%2F1%3D&wait=60"
+        );
+        let page = br#"{"cursor":"c2","events":[
+            {"type":"hold","handle":"scout::bravo.postal.bot","count":2},
+            {"type":"pair","id":"01J","status":"pending_in","step":"responded"},
+            {"type":"receipt","client_ids":["m1"]},
+            {"type":"from_the_future","x":1}]}"#;
+        let AfterEvents::Next(p) = after_events(200, page) else {
+            panic!()
         };
-        assert_eq!(refuse_plaintext(&env), Err(PlaneError::Plaintext));
-        let raw = HoldEnvelope {
-            ciphertext: "hello world".into(),
-            size: 0,
-            ..env.clone()
+        assert_eq!(p.cursor, "c2");
+        assert_eq!(p.events.len(), 4);
+        assert_eq!(p.events[3], Event::Unknown);
+        assert!(matches!(
+            after_events(200, br#"{"cursor":"c3","events":[]}"#),
+            AfterEvents::Next(_)
+        ));
+        assert_eq!(
+            after_events(410, br#"{"error":{"code":"cursor_expired","message":""}}"#),
+            AfterEvents::Restart
+        );
+        assert!(matches!(after_events(503, b""), AfterEvents::BackOff(_)));
+        assert!(matches!(
+            after_events(401, br#"{"error":{"code":"unauthorized","message":""}}"#),
+            AfterEvents::Stop(_)
+        ));
+    }
+
+    #[test]
+    fn pair_routes_match_the_contract() {
+        use crate::pairing::{Attempts, Initiator, PairContext, Responder};
+        let id = "01JD8X4Q2W3E4R5T6Y7Z8A9B0C";
+        assert!(crate::wire::is_canonical_ulid(id));
+        let ctx = PairContext {
+            pair_id: id.into(),
+            initiator: "alice::acme.postal.bot".into(),
+            responder: "scout::bravo.postal.bot".into(),
         };
-        assert_eq!(refuse_plaintext(&raw), Err(PlaneError::Plaintext));
-        let mut short = vec![HOLDSEAL_V1; MIN_BLOB_LEN - 1];
-        short[0] = HOLDSEAL_V1;
-        let too_short = HoldEnvelope {
-            ciphertext: crate::b64::encode(&short),
-            size: short.len() as u64,
-            ..env
-        };
-        assert_eq!(refuse_plaintext(&too_short), Err(PlaneError::Plaintext));
-    }
-
-    #[test]
-    fn seal_envelope_is_holdseal_v1_and_min_61() {
-        let bob = Identity::generate();
-        let env = seal_envelope(
-            ID,
-            "scout::acme.postal.bot",
-            "alice::acme.postal.bot",
-            b"secret cover",
-            &bob.public_key_pem(),
-            T0,
-            HOLD_TTL_SECS,
+        let (_, a) = key(0x11);
+        let (_, b) = key(0x22);
+        let (init, c) = Initiator::start(
+            ctx.clone(),
+            a.clone(),
+            &mut Attempts::default(),
+            1_800_000_000,
         )
         .unwrap();
-        let blob = refuse_plaintext(&env).unwrap();
-        assert!(is_holdseal_v1(&blob));
-        assert!(blob.len() >= MIN_BLOB_LEN);
-        assert_eq!(env.size, blob.len() as u64);
-        assert!(!env.ciphertext.contains("secret cover"));
-        assert_eq!(env.expiry, T0 + HOLD_TTL_SECS);
+        let from = Address::parse(&ctx.initiator).unwrap();
+        let to = Address::parse(&ctx.responder).unwrap();
+        let r = pair_create(id, &from, &to, Typ::Session, &a, &c).unwrap();
+        assert_eq!(r.path, "/api/postal/v1/pairs");
+        let bd = body(&r);
+        assert_eq!(bd["id"], id);
+        assert_eq!(bd["sas_version"], 2);
+        assert_eq!(bd["commitment"], c.to_hex());
+        assert_eq!(bd["typ"], "session");
+        assert_eq!(bd["public_key_pem"], a.pem());
+
+        let (_resp_state, resp) =
+            Responder::respond(ctx, a, c, b, &mut Attempts::default(), 1_800_000_000).unwrap();
+        let r = pair_respond(id, &resp, Typ::Turn).unwrap();
+        assert_eq!(r.path, format!("/api/postal/v1/pairs/{id}/respond"));
+        assert_eq!(body(&r)["nb"], resp.nb_hex());
+        let (reveal, _hs) = init.finish(resp, 1_800_000_001).unwrap();
+        let r = pair_reveal(id, &reveal).unwrap();
+        assert_eq!(r.path, format!("/api/postal/v1/pairs/{id}/reveal"));
+        assert_eq!(body(&r), json!({"na": reveal.to_hex()}));
+        assert_eq!(pair_revoke(id).unwrap().body.as_deref(), Some("{}"));
+        assert_eq!(pairs_list().path, "/api/postal/v1/pairs");
         assert_eq!(
-            bob.open(
-                &blob,
-                &SealAad {
-                    id: ID.into(),
-                    from: env.from.clone(),
-                    to: env.to.clone(),
-                }
-            )
-            .unwrap(),
-            b"secret cover"
+            pair_get(id).unwrap().path,
+            format!("/api/postal/v1/pairs/{id}")
         );
+        assert!(pair_get("../me").is_err());
     }
 
     #[test]
-    fn put_same_ciphertext_is_ok_different_is_conflict() {
-        let plane = MemoryPlane::new();
-        let bob = Identity::generate();
-        let a = seal_envelope(
-            ID,
-            "scout::acme.postal.bot",
-            "alice::acme.postal.bot",
-            b"one",
-            &bob.public_key_pem(),
-            T0,
-            60,
+    fn pair_items_parse() {
+        let list: PairList = parse(
+            200,
+            json!({"pairs":[{"id":"01J","side":"from","handle":"alice::acme.postal.bot",
+              "peer":"scout::bravo.postal.bot","peer_typ":"session","peer_fingerprint":"ab",
+              "peer_key_pem":null,"direction":"out","status":"pending_out","step":"revealed",
+              "sas_version":2,"commitment":"c","nb":"n","na":"a","confirmed_by":["from","to"],
+              "confirmations":[{"side":"from","decision":"accept","transcript_sha256":"t","sig":"s","at":"x"},
+                               {"side":"to","decision":"reject","transcript_sha256":null,"sig":null,"at":"y"}],
+              "failed_reason":null,"rekey_of":null,"rekey_pending":false,
+              "created_at":"x","decided_at":null,"expires_at":"y"},
+              {"id":"01K","side":null,"handle":"h","peer":"p","peer_typ":null,"peer_key_pem":null,
+               "direction":"in","status":"something_new","step":null,"sas_version":1,"commitment":null,
+               "nb":null,"na":null,"failed_reason":null,"rekey_of":null,"created_at":null,
+               "decided_at":null,"expires_at":null}]})
+            .to_string()
+            .as_bytes(),
         )
         .unwrap();
-        let b = seal_envelope(
-            ID,
-            "scout::acme.postal.bot",
-            "alice::acme.postal.bot",
-            b"two",
-            &bob.public_key_pem(),
-            T0,
-            60,
-        )
-        .unwrap();
-        assert_ne!(a.ciphertext, b.ciphertext);
-        assert_eq!(plane.put_hold(&a).unwrap().id, ID);
-        assert!(plane.put_hold(&a).unwrap().ok);
-        assert_eq!(plane.put_hold(&b), Err(PlaneError::Conflict));
-        assert_eq!(classify_put_status(409), Some(PlaneError::Conflict));
-    }
-
-    #[test]
-    fn ack_deletes_or_404() {
-        let plane = MemoryPlane::new();
-        let bob = Identity::generate();
-        let env = seal_envelope(
-            ID,
-            "scout::acme.postal.bot",
-            "alice::acme.postal.bot",
-            b"x",
-            &bob.public_key_pem(),
-            T0,
-            60,
-        )
-        .unwrap();
-        plane.put_hold(&env).unwrap();
+        assert_eq!(list.pairs[0].status, PairStatus::PendingOut);
         assert_eq!(
-            plane.ack_hold(ID).unwrap(),
-            HoldOk {
-                ok: true,
-                id: ID.into()
-            }
+            list.pairs[0].peer_confirmation().unwrap().decision,
+            "reject"
         );
-        assert_eq!(plane.ack_hold(ID), Err(PlaneError::NotFound));
-        assert!(plane.list_hold().unwrap().items.is_empty());
-        assert_eq!(classify_ack_status(404), Some(PlaneError::NotFound));
-        assert_eq!(
-            hold_ack_path(ID).unwrap(),
-            "/postal/hold/01ARZ3NDEKTSV4RRFFQ69G5FAV/ack"
-        );
-        assert!(hold_ack_path("../x").is_err());
-    }
-
-    #[test]
-    fn parse_hold_list_items_only() {
-        let env = serde_json::json!({
-            "id": ID,
-            "to": "scout::acme.postal.bot",
-            "from": "alice::acme.postal.bot",
-            "size": 61,
-            "expiry": 1,
-            "ciphertext": "YQ=="
-        });
-        let ok = parse_hold_list(&serde_json::json!({"items":[env.clone()]})).unwrap();
-        assert_eq!(ok.items.len(), 1);
-        assert!(parse_hold_list(&serde_json::json!([env.clone()])).is_err());
-        assert!(parse_hold_list(&serde_json::json!({"holds":[env]})).is_err());
-        assert!(parse_hold_list(&serde_json::json!({"ok":true})).is_err());
-    }
-
-    #[test]
-    fn events_path_and_empty_wait() {
-        assert_eq!(events_path(None, 0), "/postal/events?wait=0");
-        assert_eq!(
-            events_path(Some("abc+def"), 30),
-            "/postal/events?cursor=abc%2Bdef&wait=30"
-        );
-        assert_eq!(
-            events_path(Some("x"), 99),
-            "/postal/events?cursor=x&wait=60"
-        );
-        let plane = MemoryPlane::new();
-        let page = plane.wait(None, Duration::from_secs(0)).unwrap();
-        assert!(page.events.is_empty());
-        assert_eq!(page.cursor, "0");
-    }
-
-    #[test]
-    fn poll_delay_is_30s_plus_or_minus_10() {
-        let lo = Duration::from_secs(20);
-        let hi = Duration::from_secs(40);
-        assert_eq!(hold_poll_delay(0.0), lo);
-        let top = hold_poll_delay(0.999_999);
-        assert!(top >= lo && top <= hi, "{top:?}");
-        assert!(hold_poll_delay(0.5) > lo && hold_poll_delay(0.5) < hi);
+        assert_eq!(list.pairs[1].status, PairStatus::Unknown);
+        assert!(list.pairs[1].peer_confirmation().is_none());
     }
 }

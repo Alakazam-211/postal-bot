@@ -211,6 +211,19 @@ impl PublicKey {
     pub fn pem(&self) -> &str {
         &self.pem
     }
+
+    /// Strict Ed25519 verification (RFC 8032 with the small-order and
+    /// non-canonical checks).
+    #[must_use]
+    pub fn verifies(&self, message: &[u8], sig: &[u8; 64]) -> bool {
+        self.vk
+            .verify_strict(message, &Signature::from_bytes(sig))
+            .is_ok()
+    }
+
+    pub(crate) fn verifying_key(&self) -> &VerifyingKey {
+        &self.vk
+    }
 }
 
 impl std::fmt::Debug for PublicKey {

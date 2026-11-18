@@ -9,7 +9,10 @@
 //! - [`badge`]: the envelope digest wire v2 signs, and a display-only
 //!   provenance badge derived from it.
 //! - [`wire`]: v2 message format and Ed25519 signature over that digest.
-//! - [`seal`]: HoldSeal-v1 (X25519 ECDH + HKDF-SHA256 + ChaCha20-Poly1305).
+//! - [`address`]: canonical `handle::label.postal.bot`.
+//! - [`replay`]: time windows and the host's seen list (F6).
+//! - [`hold`]: HoldSeal-v2, the sender-signed message sealed to the recipient (F4).
+//! - [`seal`]: HoldSeal-v1, byte-identical to p5-crypto, for the old routes only.
 //! - [`plane`]: P-4 hold PUT/GET/ACK + P-5 `/postal/events` (trait; hosts HTTP).
 //! - [`outbox`]: queued → live → held/delivered/acked/failed.
 //! - [`filename`]: attachment name sanitizer.
@@ -17,17 +20,20 @@
 //!   human gates.
 //! - Golden vectors in `vectors/`.
 //!
-//! Not here yet: typed addresses. p5 does not depend on this crate yet.
+//! p5 does not depend on this crate yet.
 
+pub mod address;
 pub mod b64;
 pub mod badge;
 pub mod filename;
 pub mod hex;
+pub mod hold;
 pub mod host;
 pub mod identity;
 pub mod outbox;
 pub mod pairing;
 pub mod plane;
+pub mod replay;
 pub mod seal;
 pub mod wire;
 

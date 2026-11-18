@@ -9,12 +9,13 @@ pub fn encode(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
 }
 
-/// Decode standard base64. Whitespace around the string is ignored.
+/// Decode standard padded base64, canonical only: no whitespace, no
+/// missing padding, no stray trailing bits, so a value has one spelling.
 ///
 /// # Errors
 /// [`B64Error`] if the input is not standard base64.
 pub fn decode(s: &str) -> Result<Vec<u8>, B64Error> {
-    STANDARD.decode(s.trim()).map_err(|_| B64Error)
+    STANDARD.decode(s).map_err(|_| B64Error)
 }
 
 /// Not standard base64.
@@ -28,3 +29,16 @@ impl std::fmt::Display for B64Error {
 }
 
 impl std::error::Error for B64Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_spelling() {
+        assert_eq!(decode("aGk=").unwrap(), b"hi");
+        for bad in [" aGk=", "aGk=\n", "aGk", "aGl=", "aG-=", "aGk==", "aGk_"] {
+            assert_eq!(decode(bad), Err(B64Error), "{bad:?}");
+        }
+    }
+}

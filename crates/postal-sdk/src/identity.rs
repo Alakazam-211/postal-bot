@@ -1,7 +1,7 @@
 //! In-memory Ed25519 pairing identity. Hosts keep the private key; this
 //! crate never touches the disk.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use pkcs8::LineEnding;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
@@ -45,8 +45,13 @@ impl Identity {
         fingerprint_verifying_key(&self.verifying_key())
     }
 
-    pub(crate) fn sign(&self, msg: &[u8]) -> [u8; 64] {
-        self.signing.sign(msg).to_bytes()
+    /// The public key, parsed as pairing and wire use it.
+    ///
+    /// # Panics
+    /// Never: a key made by this type always round-trips.
+    #[must_use]
+    pub fn public_key(&self) -> crate::pairing::PublicKey {
+        crate::pairing::PublicKey::from_pem(&self.public_key_pem()).expect("own key parses")
     }
 
     pub(crate) fn verifying_key(&self) -> VerifyingKey {
@@ -55,6 +60,18 @@ impl Identity {
 
     pub(crate) fn static_secret(&self) -> StaticSecret {
         StaticSecret::from(self.signing.to_scalar_bytes())
+    }
+}
+
+impl crate::pairing::Signer for Identity {
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
+        ed25519_dalek::Signer::sign(&self.signing, message).to_bytes()
+    }
+}
+
+impl crate::hold::Opener for Identity {
+    fn agree(&self, their_public: &[u8; 32]) -> [u8; 32] {
+        crate::hold::Opener::agree(&self.signing, their_public)
     }
 }
 
@@ -91,15 +108,6 @@ pub(crate) fn fingerprint_verifying_key(vk: &VerifyingKey) -> Fingerprint {
 
 pub(crate) fn x25519_public_from_ed25519(vk: &VerifyingKey) -> X25519Public {
     X25519Public::from(vk.to_montgomery().to_bytes())
-}
-
-pub(crate) fn verify_sig(
-    vk: &VerifyingKey,
-    msg: &[u8],
-    sig: &[u8; 64],
-) -> Result<(), IdentityError> {
-    vk.verify(msg, &Signature::from_bytes(sig))
-        .map_err(|_| IdentityError::Sig)
 }
 
 /// Fail-closed identity / signature error.
@@ -141,12 +149,9 @@ mod tests {
         let a = Identity::from_seed([0x11; 32]);
         let b = Identity::from_seed([0x22; 32]);
         let msg = b"postal-envelope-v1-digest";
-        let sig = a.sign(msg);
-        verify_sig(&a.verifying_key(), msg, &sig).unwrap();
-        assert_eq!(
-            verify_sig(&b.verifying_key(), msg, &sig),
-            Err(IdentityError::Sig)
-        );
+        let sig = crate::pairing::Signer::sign(&a, msg);
+        assert!(a.public_key().verifies(msg, &sig));
+        assert!(!b.public_key().verifies(msg, &sig));
     }
 
     #[test]

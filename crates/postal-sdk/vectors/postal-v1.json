@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib (and the cryptography package for Ed25519 in 'confirm'). A change here is a wire change. Every host's CI checks them (cargo test -p postal-sdk).",
+  "_comment": "Golden vectors for postal-sdk, computed with Python hashlib (and the cryptography package for Ed25519 in 'confirm' and 'wire', X25519, HKDF and ChaCha20-Poly1305 in 'hold_v2'). A change here is a wire change. Every host's CI checks them (cargo test -p postal-sdk).",
   "pairing": [
     {
       "pair_id": "pair-1",
@@ -285,6 +285,75 @@
           "sig_b64": "5A+0GvKHnLxEcf42DTxywjJeR5MRGfIHgbBfWqguLjvm0IQ8R1M3Oytw+HxgCnO5B26dJZg8T9FUr8UEIEaMBQ=="
         }
       ]
+    }
+  ],
+  "wire": [
+    {
+      "sender_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sender_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=\n-----END PUBLIC KEY-----\n",
+      "digest_hex": "894b5511dae5de4cd699755b1f62a06e99d3539e1f1319580ab59d74a029d741",
+      "message": {
+        "v": 2,
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "from": "alice::acme.postal.bot",
+        "to": "scout::bravo.postal.bot",
+        "sent_at": 1800000000,
+        "mode": "live",
+        "content_type": "text/plain; charset=utf-8",
+        "wake": true,
+        "body": "hello scout",
+        "files": [],
+        "sig": "txbUD1Ak0lUNtTu2qhVtfCTUmW6a8Dq9oeK/njC1gt2yQ3SLbQaugs7f29bUS7oguuLqgdkkwC19f1sRiaylAA=="
+      },
+      "json": "{\"v\":2,\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"from\":\"alice::acme.postal.bot\",\"to\":\"scout::bravo.postal.bot\",\"sent_at\":1800000000,\"mode\":\"live\",\"content_type\":\"text/plain; charset=utf-8\",\"wake\":true,\"body\":\"hello scout\",\"files\":[],\"sig\":\"txbUD1Ak0lUNtTu2qhVtfCTUmW6a8Dq9oeK/njC1gt2yQ3SLbQaugs7f29bUS7oguuLqgdkkwC19f1sRiaylAA==\"}"
+    },
+    {
+      "sender_seed_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sender_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=\n-----END PUBLIC KEY-----\n",
+      "digest_hex": "b98d0d4df61f45617cf035df9c8e8838773604a474d989859c5ebfac6411cea3",
+      "message": {
+        "v": 2,
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "from": "alice::acme.postal.bot",
+        "to": "scout::bravo.postal.bot",
+        "sent_at": 1800000000,
+        "mode": "tray",
+        "content_type": "text/markdown",
+        "wake": true,
+        "body": "line 1\nline \"2\"",
+        "files": [
+          {
+            "name": "a.txt",
+            "content": "eA=="
+          },
+          {
+            "name": "b.md",
+            "content": ""
+          }
+        ],
+        "sig": "e5YpfT0+KcslojxrpUCygSzGaPpoaKFBuBhe9ojXgZgrbPW9tznY87+cdmUN7xhSY1gVjiBT0Zr/LBEVwvpuBA=="
+      },
+      "json": "{\"v\":2,\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"from\":\"alice::acme.postal.bot\",\"to\":\"scout::bravo.postal.bot\",\"sent_at\":1800000000,\"mode\":\"tray\",\"content_type\":\"text/markdown\",\"wake\":true,\"body\":\"line 1\\nline \\\"2\\\"\",\"files\":[{\"name\":\"a.txt\",\"content\":\"eA==\"},{\"name\":\"b.md\",\"content\":\"\"}],\"sig\":\"e5YpfT0+KcslojxrpUCygSzGaPpoaKFBuBhe9ojXgZgrbPW9tznY87+cdmUN7xhSY1gVjiBT0Zr/LBEVwvpuBA==\"}"
+    }
+  ],
+  "hold_v2": [
+    {
+      "recipient_seed_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "recipient_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAoJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA=\n-----END PUBLIC KEY-----\n",
+      "recipient_x25519_hex": "9d8d78b9c9e6661e552f2f1af02095ee2f8743fa2e6183f41bb7077ef51b5379",
+      "eph_secret_hex": "3333333333333333333333333333333333333333333333333333333333333333",
+      "eph_pub_hex": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+      "nonce_hex": "444444444444444444444444",
+      "shared_hex": "1f655333fcdfaf813012885bc759e67682a755f6e887fb6c050792666090fd66",
+      "key_hex": "46611fa3d5b287219893f5c71d1e48390fd040328997890edb721d3d84d03315",
+      "aad_hex": "706f7374616c2d686f6c642d76320200000016616c6963653a3a61636d652e706f7374616c2e626f740000001773636f75743a3a627261766f2e706f7374616c2e626f740000001a303141525a334e44454b54535634525246465136394735464156",
+      "outer": {
+        "from": "alice::acme.postal.bot",
+        "to": "scout::bravo.postal.bot",
+        "client_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+      },
+      "plaintext": "{\"v\":2,\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"from\":\"alice::acme.postal.bot\",\"to\":\"scout::bravo.postal.bot\",\"sent_at\":1800000000,\"mode\":\"live\",\"content_type\":\"text/plain; charset=utf-8\",\"wake\":true,\"body\":\"hello scout\",\"files\":[],\"sig\":\"txbUD1Ak0lUNtTu2qhVtfCTUmW6a8Dq9oeK/njC1gt2yQ3SLbQaugs7f29bUS7oguuLqgdkkwC19f1sRiaylAA==\"}",
+      "sealed_b64": "AnsNR9k0J/gxEWB4HHxzP9ifiJcK70kNiqDuGaTLihsUREREREREREREREREzIyUNppkq7FXgbZZTUxnn1gSX7k8TxR7lpRU9j90RMWrZqN2zlqsU0h6dPhlN7+aozm8s+dg1jkt+t8pW5Z93/cRdMz1tCqAolWp8enocoVkIhsO2b7Ou4Dy5IrdG8zqlXhiYtu7leuOeQAqsVglQz/la83Jp6Wg8garY4x6TWcrWk3HGq9idzHX43LypdGE0jRjJGqamGWbKneB23RATYPakHha+rrVHLRVGfv0fuVz6Dhz7SVEyAQlmmGIXXI8lRml/+MzfU2IQZKQRNRfy4SgKrKCMkFB5X/OF/m1XGnVcFXN/WsxRK5Z66MhTqENGGbuj88ufKN35N03EeqB+B7MCuVQeTmbEgK9g6x9elL96LwGE6Bn5m+INmksYVCdmnV/Pn/OAMzJGPH2NP32DDxv2XGdTNWyLxkUMfkAA1UjLd1+Twh32F2lwh/wUisxiFB0"
     }
   ]
 }
