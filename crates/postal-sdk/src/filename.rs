@@ -35,7 +35,13 @@ pub fn sanitize(name: &str) -> String {
     let last = name.rsplit(['/', '\\']).next().unwrap_or("");
     let mapped: String = last
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let mut out = trim_edges(&mapped).to_string();
     if out.len() > MAX_LEN {
@@ -123,7 +129,10 @@ mod tests {
         assert_eq!(sanitize("COM1.log"), "file-COM1.log");
         assert_eq!(sanitize("CONSOLE.txt"), "CONSOLE.txt");
         assert_eq!(sanitize("COM0"), "file-COM0");
-        assert_eq!(sanitize(&format!("CON{}.txt", "_".repeat(300))), "file-CON.txt");
+        assert_eq!(
+            sanitize(&format!("CON{}.txt", "_".repeat(300))),
+            "file-CON.txt"
+        );
         assert_eq!(sanitize(&format!("nul{}x", "_".repeat(300))), "file-nul");
         assert_eq!(sanitize("ok-file_1.md"), "ok-file_1.md");
     }
@@ -144,7 +153,9 @@ mod tests {
             assert!(!once.is_empty());
             assert!(!once.starts_with(['.', '_', '-']), "{raw:?} -> {once:?}");
             assert!(once.len() <= MAX_LEN, "{raw:?}");
-            assert!(once.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')));
+            assert!(once
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')));
             assert!(!super::is_reserved(&once), "{raw:?} -> {once:?}");
         }
     }
@@ -162,7 +173,11 @@ mod tests {
         let all: serde_json::Value =
             serde_json::from_str(include_str!("../vectors/postal-v1.json")).unwrap();
         for v in all["filename"].as_array().unwrap() {
-            assert_eq!(sanitize(v["wire"].as_str().unwrap()), v["storage"].as_str().unwrap(), "{v}");
+            assert_eq!(
+                sanitize(v["wire"].as_str().unwrap()),
+                v["storage"].as_str().unwrap(),
+                "{v}"
+            );
         }
     }
 }

@@ -326,6 +326,10 @@ impl HoldItem {
             to: Address::parse(&self.to).map_err(|_| bad("to"))?,
             client_id: self.client_id.clone(),
         };
+        // Length before decoding: never decode a blob that can't be legal.
+        if self.sealed.len() > MAX_SEALED.div_ceil(3) * 4 {
+            return Err(bad("sealed over 512 KiB"));
+        }
         let sealed = crate::b64::decode(&self.sealed).map_err(|_| bad("sealed"))?;
         Ok((outer, sealed))
     }
@@ -484,16 +488,21 @@ pub fn events(cursor: Option<&str>, wait_secs: u32) -> Request {
     }
 }
 
-/// A content-blind hint. On any event, pull `/hold` or `/pairs`.
+/// A content-blind hint. Events are only hints: on any event, pull the
+/// state it points at (`/hold`, `/pairs/{id}`, `/hold/sent`) and act on that
+/// answer. Nothing is decided from an event alone, so a lost, repeated or
+/// malformed event costs at most a pull.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    /// Held mail is waiting: pull `GET /hold`.
     Hold {
         #[serde(default)]
         handle: String,
         #[serde(default)]
         count: u64,
     },
+    /// A pair moved a step: pull `GET /pairs/{id}`.
     Pair {
         id: String,
         #[serde(default)]
@@ -503,26 +512,50 @@ pub enum Event {
         #[serde(default)]
         reason: Option<String>,
     },
-    /// One of this sender's held items changed state. Feed `state` to
-    /// [`Receipt::parse`] and [`crate::outbox::Item::on_receipt`].
+    /// One of this sender's held items changed state: pull
+    /// `GET /hold/sent?client_ids=<client_id>` and feed that receipt to
+    /// [`crate::outbox::Item::on_receipt`]. Find the item by `client_id`;
+    /// `handle` is plane data, so don't route on it.
     Receipt {
-        /// The sender address (`from`) the item was held under.
         #[serde(default)]
         handle: String,
         client_id: String,
-        /// `delivered`, `expired` or `refused:<code>`.
+        #[serde(default)]
         state: String,
     },
+    /// A type this SDK doesn't know, or an event missing a field it needs.
+    /// Skip it.
     #[serde(other)]
     Unknown,
 }
 
-/// `GET /events` answer. A timeout is 200 with no events.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// `GET /events` answer. A timeout is 200 with no events. Each event is
+/// parsed on its own: one this SDK can't read becomes [`Event::Unknown`]
+/// instead of failing the page, so the cursor always moves on.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventPage {
     pub cursor: String,
-    #[serde(default)]
     pub events: Vec<Event>,
+}
+
+impl<'de> Deserialize<'de> for EventPage {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            cursor: String,
+            #[serde(default)]
+            events: Vec<serde_json::Value>,
+        }
+        let raw = Raw::deserialize(d)?;
+        Ok(Self {
+            cursor: raw.cursor,
+            events: raw
+                .events
+                .into_iter()
+                .map(|e| serde_json::from_value(e).unwrap_or(Event::Unknown))
+                .collect(),
+        })
+    }
 }
 
 /// What to do after an events call.
@@ -880,6 +913,9 @@ mod tests {
         let mut bad = page.items[0].clone();
         bad.from = "Alice::acme.postal.bot".into();
         assert!(bad.decode().is_err());
+        let mut big = page.items[0].clone();
+        big.sealed = "A".repeat(MAX_SEALED.div_ceil(3) * 4 + 4);
+        assert!(big.decode().is_err());
     }
 
     #[test]
@@ -926,14 +962,31 @@ mod tests {
         assert_eq!(p.cursor, "c2");
         assert_eq!(p.events.len(), 4);
         assert_eq!(p.events[3], Event::Unknown);
-        let Event::Receipt {
-            client_id, state, ..
-        } = &p.events[2]
-        else {
+        let Event::Receipt { client_id, .. } = &p.events[2] else {
             panic!("{:?}", p.events[2])
         };
         assert_eq!(client_id, "m1");
-        assert_eq!(Receipt::parse(state), Receipt::Refused(RefuseCode::Gated));
+        // K2 review MUST 2: a bad event never fails the page.
+        let page = br#"{"cursor":"c9","events":[
+            {"type":"receipt","handle":"h","state":"delivered"},
+            {"type":"receipt","client_ids":["m1"]},
+            {"type":"pair","status":"accepted"},
+            {"type":"pair","id":7},
+            "not an object",
+            {"no_type":true},
+            {"type":"hold","handle":"scout::bravo.postal.bot","count":1}]}"#;
+        let AfterEvents::Next(p) = after_events(200, page) else {
+            panic!("a bad event must not fail the page")
+        };
+        assert_eq!(p.cursor, "c9");
+        assert_eq!(p.events[..6], vec![Event::Unknown; 6][..]);
+        assert!(matches!(p.events[6], Event::Hold { count: 1, .. }));
+        // The page itself still has to be a page.
+        assert!(matches!(
+            after_events(200, br#"{"events":[]}"#),
+            AfterEvents::BackOff(PlaneError::BadBody(_))
+        ));
+
         assert!(matches!(
             after_events(200, br#"{"cursor":"c3","events":[]}"#),
             AfterEvents::Next(_)

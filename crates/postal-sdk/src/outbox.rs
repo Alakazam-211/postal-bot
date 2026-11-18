@@ -14,6 +14,12 @@
 //! a permanent plane error ─▶ Dead(Plane code)
 //! ```
 //!
+//! The item keeps no signed message. For every try, live or hold, the
+//! host signs the message again ([`crate::wire::sign`]) with the same `id`
+//! and a fresh `sent_at`: a signed copy older than
+//! [`crate::replay::MAX_SKEW_SECS`] would be refused live as stale. The
+//! receiver dedupes on `(from, id)`, so re-signing never delivers twice.
+//!
 //! A message is never held once live delivery succeeded. Holding after a
 //! soft miss is safe because receivers dedupe on `(from, id)`
 //! ([`crate::replay`]); a copy that also arrived live is dropped there.

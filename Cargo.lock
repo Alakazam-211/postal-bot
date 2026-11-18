@@ -866,6 +866,7 @@ dependencies = [
  "subtle",
  "ulid",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

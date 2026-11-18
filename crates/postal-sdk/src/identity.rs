@@ -6,6 +6,7 @@ use pkcs8::LineEnding;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use spki::{DecodePublicKey, EncodePublicKey};
+#[cfg(feature = "hold-v1")]
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
 use crate::pairing::Fingerprint;
@@ -58,6 +59,7 @@ impl Identity {
         self.signing.verifying_key()
     }
 
+    #[cfg(feature = "hold-v1")]
     pub(crate) fn static_secret(&self) -> StaticSecret {
         StaticSecret::from(self.signing.to_scalar_bytes())
     }
@@ -70,7 +72,7 @@ impl crate::pairing::Signer for Identity {
 }
 
 impl crate::hold::Opener for Identity {
-    fn agree(&self, their_public: &[u8; 32]) -> [u8; 32] {
+    fn agree(&self, their_public: &[u8; 32]) -> zeroize::Zeroizing<[u8; 32]> {
         crate::hold::Opener::agree(&self.signing, their_public)
     }
 }
@@ -106,6 +108,7 @@ pub(crate) fn fingerprint_verifying_key(vk: &VerifyingKey) -> Fingerprint {
     Fingerprint::from_bytes(hash)
 }
 
+#[cfg(feature = "hold-v1")]
 pub(crate) fn x25519_public_from_ed25519(vk: &VerifyingKey) -> X25519Public {
     X25519Public::from(vk.to_montgomery().to_bytes())
 }

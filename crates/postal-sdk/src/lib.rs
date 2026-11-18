@@ -22,6 +22,8 @@
 //!
 //! p5 does not depend on this crate yet.
 
+#![forbid(unsafe_code)]
+
 pub mod address;
 pub mod b64;
 pub mod badge;
@@ -34,6 +36,9 @@ pub mod outbox;
 pub mod pairing;
 pub mod plane;
 pub mod replay;
+/// HoldSeal-v1, for p5's old hold routes only. Off unless the `hold-v1`
+/// feature is on, so a host can't seal or open v1 by mistake.
+#[cfg(feature = "hold-v1")]
 pub mod seal;
 pub mod wire;
 

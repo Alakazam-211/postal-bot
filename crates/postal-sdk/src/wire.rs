@@ -1,16 +1,24 @@
 //! Wire v2: the signed message. `v` is [`crate::WIRE_VERSION`].
 //!
 //! The same JSON goes out live (`POST /p5/msg`) and, sealed, into the hold
-//! ([`crate::seal`]). The signature is Ed25519 over the envelope digest
-//! ([`crate::badge::envelope_digest`], tag `postal-envelope-v1`), raw, sent as
-//! standard padded base64, like a pair confirmation.
+//! ([`crate::hold`]). The signature is Ed25519, raw, over
+//!
+//! ```text
+//! S = SHA-256("postal-wire-v2" || envelope_digest || wake)   wake: 0x00 | 0x01
+//! ```
+//!
+//! where `envelope_digest` is [`crate::badge::envelope_digest`] (tag
+//! `postal-envelope-v1`, also the badge's input). It goes on the wire as
+//! standard padded base64, like a pair confirmation. `wake` is signed so an
+//! edit can't wake an agent the sender asked to keep quiet; the field is
+//! required, never defaulted.
 //!
 //! The hop-auth proof on `POST /p5/msg` (`p5-msg-v1`) is separate: it
 //! authenticates the HTTP request. [`WireMessage::sig`] authenticates the mail.
 //!
-//! `wake` is carried but not signed (the envelope digest is shared with the
-//! badge and its vectors). A receiver must treat `wake` as a hint it may make
-//! quieter, never louder than its own rules.
+//! Retrying a send: sign again with the same `id` and a fresh `sent_at`. A
+//! signed message older than [`crate::replay::MAX_SKEW_SECS`] is refused live
+//! as stale; the receiver's seen list dedupes the id across copies.
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +35,9 @@ pub const MAX_CONTENT: usize = 448 * 1024;
 /// travel as base64, so with files the real limit is this one, about
 /// 380 KiB of raw attachment bytes.
 pub const MAX_WIRE_JSON: usize = 512 * 1024 - 61;
+/// Domain tag of the signed bytes.
+pub const SIG_TAG: &[u8] = b"postal-wire-v2";
+
 /// Longest `content_type`.
 pub const MAX_CONTENT_TYPE: usize = 255;
 /// Most attachments on one message.
@@ -53,17 +64,13 @@ pub struct WireMessage {
     pub sent_at: i64,
     pub mode: Mode,
     pub content_type: String,
-    #[serde(default = "default_wake")]
+    /// Signed. Required on the wire.
     pub wake: bool,
     pub body: String,
     #[serde(default)]
     pub files: Vec<WireFile>,
     /// Ed25519 signature over the envelope digest, standard padded base64.
     pub sig: String,
-}
-
-fn default_wake() -> bool {
-    true
 }
 
 /// What the sender signs.
@@ -111,6 +118,8 @@ pub enum WireError {
     BadFile,
     /// The host's seen list failed; retry later, nothing was delivered.
     Store(String),
+    /// Not a wire v2 JSON object.
+    BadJson,
 }
 
 impl WireError {
@@ -134,6 +143,7 @@ impl std::fmt::Display for WireError {
             Self::Replayed => f.write_str("message already delivered"),
             Self::BadFile => f.write_str("file content is not standard base64"),
             Self::Store(e) => write!(f, "seen list: {e}"),
+            Self::BadJson => f.write_str("not a wire v2 message"),
         }
     }
 }
@@ -157,9 +167,9 @@ pub fn sign(
     draft: &Draft<'_>,
 ) -> Result<WireMessage, WireError> {
     check_shape(draft.id, draft.content_type, draft.body, draft.files)?;
-    let digest = digest_of(draft)?;
-    let sig = signer.sign(&digest);
-    if !me.verifies(&digest, &sig) {
+    let signed = signed_bytes(&digest_of(draft)?, draft.wake);
+    let sig = signer.sign(&signed);
+    if !me.verifies(&signed, &sig) {
         return Err(WireError::WrongSigner);
     }
     Ok::<_, WireError>(WireMessage {
@@ -199,9 +209,10 @@ pub struct Expect<'a> {
     pub arrival: Arrival,
 }
 
-/// Verify `msg` and record it as seen. In order: version, id, sizes,
-/// recipient, time window, signature, then the seen list, so a forged or
-/// stale message never takes a slot in it.
+/// Verify `msg` and record it as seen. In order: version, recipient, time
+/// window, encoded sizes, then decoding, id and sizes, the signature, and
+/// last the seen list, so a forged or stale message never takes a slot in
+/// it and nothing is decoded for a message that isn't ours or is stale.
 ///
 /// # Errors
 /// See [`WireError`]. Only [`WireError::Store`] is worth retrying.
@@ -213,14 +224,14 @@ pub fn verify(
     if msg.v != crate::WIRE_VERSION {
         return Err(WireError::BadVersion);
     }
-    let files = decode_files(&msg.files)?;
-    check_shape(&msg.id, &msg.content_type, &msg.body, &files)?;
     if &msg.to != expect.to {
         return Err(WireError::NotForUs);
     }
     if !in_window(msg.sent_at, expect.now, expect.arrival) {
         return Err(WireError::Stale);
     }
+    let files = decode_files(&msg.files)?;
+    check_shape(&msg.id, &msg.content_type, &msg.body, &files)?;
     let draft = Draft {
         id: &msg.id,
         from: &msg.from,
@@ -232,12 +243,12 @@ pub fn verify(
         files: &files,
         wake: msg.wake,
     };
-    let digest = digest_of(&draft)?;
+    let signed = signed_bytes(&digest_of(&draft)?, msg.wake);
     let sig: [u8; 64] = crate::b64::decode(&msg.sig)
         .ok()
         .and_then(|v| v.try_into().ok())
         .ok_or(WireError::BadSig)?;
-    if !expect.sender.verifies(&digest, &sig) {
+    if !expect.sender.verifies(&signed, &sig) {
         return Err(WireError::BadSig);
     }
     let entry = SeenEntry::new(&msg.from.to_string(), &msg.id, msg.sent_at);
@@ -289,8 +300,23 @@ fn check_shape(
     Ok(())
 }
 
+/// The bytes the sender signs: the envelope digest plus `wake`.
+#[must_use]
+pub fn signed_bytes(envelope_digest: &[u8; 32], wake: bool) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(SIG_TAG);
+    h.update(envelope_digest);
+    h.update([u8::from(wake)]);
+    h.finalize().into()
+}
+
 fn decode_files(files: &[WireFile]) -> Result<Vec<FileBytes>, WireError> {
-    if files.len() > MAX_FILES {
+    // Encoded length first, so nothing big is decoded only to be refused.
+    let encoded = files
+        .iter()
+        .try_fold(0usize, |n, f| n.checked_add(f.content.len()));
+    if files.len() > MAX_FILES || encoded.is_none_or(|n| n > MAX_CONTENT.div_ceil(3) * 4) {
         return Err(WireError::TooLarge);
     }
     files
@@ -335,13 +361,17 @@ pub fn encode_json(msg: &WireMessage) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(msg)
 }
 
-/// JSON decoding of a wire message. Unknown fields and non-canonical
-/// addresses are refused.
+/// JSON decoding of a wire message. Over [`MAX_WIRE_JSON`] bytes, unknown
+/// fields, a missing field and non-canonical addresses are refused.
 ///
 /// # Errors
-/// [`serde_json::Error`] if the bytes are not a v2 message object.
-pub fn decode_json(bytes: &[u8]) -> Result<WireMessage, serde_json::Error> {
-    serde_json::from_slice(bytes)
+/// [`WireError::TooLarge`], or [`WireError::BadJson`] if the bytes are not a
+/// v2 message object.
+pub fn decode_json(bytes: &[u8]) -> Result<WireMessage, WireError> {
+    if bytes.len() > MAX_WIRE_JSON {
+        return Err(WireError::TooLarge);
+    }
+    serde_json::from_slice(bytes).map_err(|_| WireError::BadJson)
 }
 
 #[cfg(test)]
@@ -589,21 +619,103 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn json_roundtrip_wake_default_and_strictness() {
+    fn json_roundtrip_and_strictness() {
         let msg = signed(&[]);
         let bytes = encode_json(&msg).unwrap();
         assert_eq!(decode_json(&bytes).unwrap(), msg);
-        let mut obj: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let obj: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(obj["v"], 2);
-        obj.as_object_mut().unwrap().remove("wake");
-        let no_wake: WireMessage = serde_json::from_value(obj.clone()).unwrap();
-        assert!(no_wake.wake, "missing wake defaults on");
+        let refused = |o: serde_json::Value| decode_json(o.to_string().as_bytes()).unwrap_err();
+        let mut no_wake = obj.clone();
+        no_wake.as_object_mut().unwrap().remove("wake");
+        assert_eq!(refused(no_wake), WireError::BadJson, "wake is required");
         let mut extra = obj.clone();
         extra["admin"] = true.into();
-        assert!(serde_json::from_value::<WireMessage>(extra).is_err());
+        assert_eq!(refused(extra), WireError::BadJson);
         let mut upper = obj;
         upper["from"] = "Alice::acme.postal.bot".into();
-        assert!(serde_json::from_value::<WireMessage>(upper).is_err());
+        assert_eq!(refused(upper), WireError::BadJson);
+        let mut big = bytes.clone();
+        big.resize(MAX_WIRE_JSON + 1, b' ');
+        assert_eq!(decode_json(&big).unwrap_err(), WireError::TooLarge);
+    }
+
+    /// K2 review MUST 1: `wake` is signed.
+    #[test]
+    fn a_flipped_wake_fails() {
+        let msg = signed(&[]);
+        assert!(msg.wake);
+        let mut quiet = msg.clone();
+        quiet.wake = false;
+        assert_eq!(
+            check(&quiet, T0, Arrival::Live).unwrap_err(),
+            WireError::BadSig
+        );
+        // And the other way: a sender's quiet message can't be woken.
+        let (sk, pk) = key(0x11);
+        let (from, to) = (alice_addr(), scout_addr());
+        let mut m = sign(
+            &sk,
+            &pk,
+            &Draft {
+                id: ID,
+                from: &from,
+                to: &to,
+                sent_at: T0,
+                mode: Mode::Tray,
+                content_type: "text/plain",
+                body: "keep quiet",
+                files: &[],
+                wake: false,
+            },
+        )
+        .unwrap();
+        check(&m, T0, Arrival::Live).unwrap();
+        m.wake = true;
+        assert_eq!(check(&m, T0, Arrival::Live).unwrap_err(), WireError::BadSig);
+        let mut obj: serde_json::Value = serde_json::to_value(&m).unwrap();
+        obj.as_object_mut().unwrap().remove("wake");
+        assert!(decode_json(obj.to_string().as_bytes()).is_err());
+    }
+
+    /// K2 review SHOULD 3: recipient and time are checked before anything
+    /// is decoded, and encoded sizes before decoding.
+    #[test]
+    fn cheap_checks_come_before_decoding() {
+        let mut m = signed(&[]);
+        m.files = vec![WireFile {
+            name: "x".into(),
+            content: "not base64!".into(),
+        }];
+        let (_, alice) = key(0x11);
+        let other = Address::parse("other::bravo.postal.bot").unwrap();
+        let err = verify(
+            &m,
+            &Expect {
+                sender: &alice,
+                to: &other,
+                now: T0,
+                arrival: Arrival::Live,
+            },
+            &mut MemorySeen::default(),
+        );
+        assert_eq!(err.unwrap_err(), WireError::NotForUs);
+        assert_eq!(
+            check(&m, T0 + 10_000, Arrival::Live).unwrap_err(),
+            WireError::Stale
+        );
+        assert_eq!(
+            check(&m, T0, Arrival::Live).unwrap_err(),
+            WireError::BadFile
+        );
+        m.files = vec![WireFile {
+            name: "x".into(),
+            content: "A".repeat(MAX_CONTENT.div_ceil(3) * 4 + 4),
+        }];
+        assert_eq!(
+            check(&m, T0, Arrival::Live).unwrap_err(),
+            WireError::TooLarge
+        );
     }
 
     #[test]
@@ -633,7 +745,7 @@ pub(crate) mod tests {
         let all: serde_json::Value =
             serde_json::from_str(include_str!("../vectors/postal-v1.json")).unwrap();
         let wires = all["wire"].as_array().unwrap();
-        assert!(!wires.is_empty());
+        assert!(wires.iter().any(|w| w["message"]["wake"] == false));
         for v in wires {
             let seed: [u8; 32] =
                 crate::hex::from_hex32(v["sender_seed_hex"].as_str().unwrap()).unwrap();
@@ -659,9 +771,14 @@ pub(crate) mod tests {
                 files: &files,
                 wake: want.wake,
             };
+            let digest = digest_of(&draft).unwrap();
             assert_eq!(
-                crate::hex::to_hex(&digest_of(&draft).unwrap()),
+                crate::hex::to_hex(&digest),
                 v["digest_hex"].as_str().unwrap()
+            );
+            assert_eq!(
+                crate::hex::to_hex(&signed_bytes(&digest, want.wake)),
+                v["signed_hex"].as_str().unwrap()
             );
             assert_eq!(sign(&sk, &pk, &draft).unwrap(), want, "same signature");
             verify(

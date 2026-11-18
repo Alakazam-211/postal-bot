@@ -21,4 +21,9 @@ sha2 = "0.10"
 spki = { version = "0.7", features = ["pem"] }
 subtle = "2.6"
 ulid = "1"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+zeroize = "1"
+
+[features]
+# HoldSeal-v1 (p5-hold-v1), for p5's old hold routes only.
+hold-v1 = []

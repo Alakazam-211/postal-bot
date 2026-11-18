@@ -26,6 +26,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
+use zeroize::Zeroizing;
 
 use crate::address::Address;
 use crate::host::{Arrival, VerifiedMessage};
@@ -52,15 +53,19 @@ pub const MIN_SEALED: usize = HEADER + AEAD_TAG;
 pub trait Opener {
     /// X25519 of this handle's key (Ed25519 scalar, as a Montgomery secret)
     /// with `their_public`.
-    fn agree(&self, their_public: &[u8; 32]) -> [u8; 32];
+    fn agree(&self, their_public: &[u8; 32]) -> Zeroizing<[u8; 32]>;
 }
 
 impl Opener for ed25519_dalek::SigningKey {
-    fn agree(&self, their_public: &[u8; 32]) -> [u8; 32] {
-        let secret = StaticSecret::from(self.to_scalar_bytes());
-        *secret
-            .diffie_hellman(&XPublic::from(*their_public))
-            .as_bytes()
+    fn agree(&self, their_public: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+        // StaticSecret and SharedSecret zeroize on drop; so do the copies.
+        let scalar = Zeroizing::new(self.to_scalar_bytes());
+        let secret = StaticSecret::from(*scalar);
+        Zeroizing::new(
+            *secret
+                .diffie_hellman(&XPublic::from(*their_public))
+                .as_bytes(),
+        )
     }
 }
 
@@ -102,12 +107,40 @@ pub enum HoldError {
     Wire(WireError),
 }
 
+/// What the host does with a held item that [`open`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// Leave it on the plane and try again later (the seen list failed).
+    Retry,
+    /// ACK it: this message was already delivered (its live copy came
+    /// first, or the host crashed after recording it). Nothing new to store.
+    Ack,
+    /// Refuse it for good with this code (`POST /hold/refuse`).
+    Refuse(crate::plane::RefuseCode),
+}
+
 impl HoldError {
     /// Whether retrying the same item could succeed (only a seen-list
-    /// storage error). Anything else is permanent: refuse it.
+    /// storage error).
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Wire(w) if w.is_retryable())
+    }
+
+    /// What to do with the item. A replay is ACKed, not refused; anything
+    /// that can't be opened or verified is refused as `gated` (oversize as
+    /// `too_large`), so the sender's receipt ends instead of waiting 7 days.
+    #[must_use]
+    pub fn disposition(&self) -> Disposition {
+        use crate::plane::RefuseCode;
+        match self {
+            Self::Wire(WireError::Replayed) => Disposition::Ack,
+            e if e.is_retryable() => Disposition::Retry,
+            Self::TooLarge | Self::Wire(WireError::TooLarge) => {
+                Disposition::Refuse(RefuseCode::TooLarge)
+            }
+            _ => Disposition::Refuse(RefuseCode::Gated),
+        }
     }
 }
 
@@ -131,24 +164,24 @@ impl std::error::Error for HoldError {}
 fn seal_with(
     recipient: &PublicKey,
     msg: &WireMessage,
-    eph: [u8; 32],
+    eph: &Zeroizing<[u8; 32]>,
     nonce: [u8; NONCE],
 ) -> Result<Vec<u8>, HoldError> {
     let r = recipient_x(recipient)?;
-    let eph = StaticSecret::from(eph);
+    let eph = StaticSecret::from(**eph);
     let eph_pub = XPublic::from(&eph);
     let shared = eph.diffie_hellman(&XPublic::from(r));
     if !shared.was_contributory() {
         return Err(HoldError::BadKey);
     }
     let key = derive_key(shared.as_bytes(), eph_pub.as_bytes(), &r);
-    let pt = encode_json(msg).map_err(|_| HoldError::NotWire)?;
-    let ct = ChaCha20Poly1305::new((&key).into())
+    let pt = Zeroizing::new(encode_json(msg).map_err(|_| HoldError::NotWire)?);
+    let ct = ChaCha20Poly1305::new((&*key).into())
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: &pt,
-                aad: &aad(&Outer::of(msg)),
+                aad: &aad(&Outer::of(msg))?,
             },
         )
         .map_err(|_| HoldError::TooLarge)?;
@@ -169,11 +202,11 @@ fn seal_with(
 /// [`HoldError::BadKey`], [`HoldError::TooLarge`], or
 /// [`HoldError::NotWire`] if the OS RNG fails.
 pub fn seal(recipient: &PublicKey, msg: &WireMessage) -> Result<Vec<u8>, HoldError> {
-    let mut eph = [0u8; 32];
+    let mut eph = Zeroizing::new([0u8; 32]);
     let mut nonce = [0u8; NONCE];
-    getrandom::getrandom(&mut eph).map_err(|_| HoldError::NotWire)?;
+    getrandom::getrandom(&mut *eph).map_err(|_| HoldError::NotWire)?;
     getrandom::getrandom(&mut nonce).map_err(|_| HoldError::NotWire)?;
-    seal_with(recipient, msg, eph, nonce)
+    seal_with(recipient, msg, &eph, nonce)
 }
 
 /// What [`open`] needs from the host.
@@ -195,8 +228,8 @@ pub struct OpenWith<'a> {
 /// in `seen`, and the host stores it before ACKing the plane.
 ///
 /// # Errors
-/// [`HoldError`]. Only [`HoldError::is_retryable`] errors should be left on
-/// the plane; refuse the rest.
+/// [`HoldError`]; act on [`HoldError::disposition`]: retry, ACK a replay,
+/// refuse the rest.
 pub fn open(
     outer: &Outer,
     sealed: &[u8],
@@ -213,19 +246,21 @@ pub fn open(
     let nonce = &sealed[1 + EPH..HEADER];
     let r = recipient_x(with.me)?;
     let shared = with.opener.agree(&eph_pub);
-    if shared == [0u8; 32] {
+    if *shared == [0u8; 32] {
         return Err(HoldError::Open);
     }
     let key = derive_key(&shared, &eph_pub, &r);
-    let pt = ChaCha20Poly1305::new((&key).into())
+    let aad = aad(outer)?;
+    let pt = ChaCha20Poly1305::new((&*key).into())
         .decrypt(
             Nonce::from_slice(nonce),
             Payload {
                 msg: &sealed[HEADER..],
-                aad: &aad(outer),
+                aad: &aad,
             },
         )
         .map_err(|_| HoldError::Open)?;
+    let pt = Zeroizing::new(pt);
     let msg = decode_json(&pt).map_err(|_| HoldError::NotWire)?;
     if Outer::of(&msg) != *outer {
         return Err(HoldError::Relabelled);
@@ -251,28 +286,28 @@ fn recipient_x(pk: &PublicKey) -> Result<[u8; 32], HoldError> {
     Ok(x)
 }
 
-fn derive_key(shared: &[u8; 32], eph_pub: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
+fn derive_key(shared: &[u8; 32], eph_pub: &[u8; 32], r: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     let mut info = Vec::with_capacity(TAG.len() + 64);
     info.extend_from_slice(TAG.as_bytes());
     info.extend_from_slice(eph_pub);
     info.extend_from_slice(r);
-    let mut key = [0u8; 32];
+    let mut key = Zeroizing::new([0u8; 32]);
     Hkdf::<Sha256>::new(Some(TAG.as_bytes()), shared)
-        .expand(&info, &mut key)
+        .expand(&info, &mut *key)
         .expect("32 bytes is a valid HKDF-SHA256 length");
     key
 }
 
-fn aad(o: &Outer) -> Vec<u8> {
+fn aad(o: &Outer) -> Result<Vec<u8>, HoldError> {
     let mut out = Vec::with_capacity(TAG.len() + 128);
     out.extend_from_slice(TAG.as_bytes());
     out.push(HOLDSEAL_V2);
     for field in [o.from.to_string(), o.to.to_string(), o.client_id.clone()] {
-        // Addresses are at most 64 + 2 + 74 bytes and ids 26; never truncated.
-        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        let len = u32::try_from(field.len()).map_err(|_| HoldError::Open)?;
+        out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(field.as_bytes());
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -492,12 +527,49 @@ mod tests {
         assert_eq!(err.unwrap_err(), WireError::TooLarge);
     }
 
+    /// K2 review SHOULD 4: a replay is ACKed, never refused.
+    #[test]
+    fn dispositions() {
+        use crate::plane::RefuseCode;
+        let (outer, blob) = sealed();
+        let (scout_sk, scout) = key(0x22);
+        let (_, alice) = key(0x11);
+        let to = scout_addr();
+        let with = OpenWith {
+            opener: &scout_sk,
+            me: &scout,
+            to: &to,
+            sender: &alice,
+            now: T0 + 60,
+        };
+        let mut seen = MemorySeen::default();
+        open(&outer, &blob, &with, &mut seen).unwrap();
+        let replay = open(&outer, &blob, &with, &mut seen).unwrap_err();
+        assert_eq!(replay.disposition(), Disposition::Ack);
+        assert_eq!(
+            HoldError::Open.disposition(),
+            Disposition::Refuse(RefuseCode::Gated)
+        );
+        assert_eq!(
+            HoldError::TooLarge.disposition(),
+            Disposition::Refuse(RefuseCode::TooLarge)
+        );
+        assert_eq!(
+            HoldError::Wire(WireError::Store("disk".into())).disposition(),
+            Disposition::Retry
+        );
+        assert_eq!(
+            HoldError::Wire(WireError::Stale).disposition(),
+            Disposition::Refuse(RefuseCode::Gated)
+        );
+    }
+
     #[test]
     fn deterministic_core_is_stable() {
         let msg = signed(&[]);
         let (_, scout) = key(0x22);
-        let a = seal_with(&scout, &msg, EPH_SEED, NONCE_SEED).unwrap();
-        let b = seal_with(&scout, &msg, EPH_SEED, NONCE_SEED).unwrap();
+        let a = seal_with(&scout, &msg, &Zeroizing::new(EPH_SEED), NONCE_SEED).unwrap();
+        let b = seal_with(&scout, &msg, &Zeroizing::new(EPH_SEED), NONCE_SEED).unwrap();
         assert_eq!(a, b);
         open_as_scout(&Outer::of(&msg), &a).unwrap();
     }
@@ -519,17 +591,23 @@ mod tests {
             let sk = ed25519_dalek::SigningKey::from_bytes(&h("recipient_seed_hex"));
             let eph_pub = h("eph_pub_hex");
             let shared = sk.agree(&eph_pub);
-            assert_eq!(shared, h("shared_hex"));
-            assert_eq!(derive_key(&shared, &eph_pub, &r), h("key_hex"));
+            assert_eq!(*shared, h("shared_hex"));
+            assert_eq!(*derive_key(&shared, &eph_pub, &r), h("key_hex"));
             let msg: WireMessage = serde_json::from_value(wire0["message"].clone()).unwrap();
             let outer = Outer::of(&msg);
             assert_eq!(v["outer"]["client_id"], msg.id.as_str());
-            assert_eq!(crate::hex::to_hex(&aad(&outer)), s("aad_hex"));
+            assert_eq!(crate::hex::to_hex(&aad(&outer).unwrap()), s("aad_hex"));
             let nonce: [u8; 12] = crate::hex::from_hex(&s("nonce_hex"))
                 .unwrap()
                 .try_into()
                 .unwrap();
-            let blob = seal_with(&recipient, &msg, h("eph_secret_hex"), nonce).unwrap();
+            let blob = seal_with(
+                &recipient,
+                &msg,
+                &Zeroizing::new(h("eph_secret_hex")),
+                nonce,
+            )
+            .unwrap();
             assert_eq!(crate::b64::encode(&blob), s("sealed_b64"));
             let sender = PublicKey::from_pem(wire0["sender_pem"].as_str().unwrap()).unwrap();
             open(
