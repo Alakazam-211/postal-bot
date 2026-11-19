@@ -306,21 +306,31 @@ fn publish_me(addr: &PostalAddr, typ: &str) -> String {
 
 // ---- S7: stand down for a handle another host (K2) adopted ----------------
 
-/// The box key for signing and opening. Creates one only while p5 still
-/// owns its key: once `release-key` ran, a missing file stays missing, so
-/// p5 never mints a fresh identity behind the adopter's back. An unreadable
-/// `adopted.json` refuses too (fail closed).
+/// The box key for signing and opening, created on first use. Refused
+/// outright, with no load and no create, once the key has been exported or
+/// released: from then on p5 has no use for it (every handle sharing it
+/// stood down), and refusing from export on, well before `release-key`, means
+/// a pull racing the release can't mint a fresh identity or keep using a
+/// leftover copy. The state is read again after the load, to catch an export
+/// that landed in between. An unreadable `adopted.json` refuses too (fail
+/// closed).
 pub fn box_key(root: &Path) -> Result<p5_crypto::KeyPair, p5_crypto::CryptoError> {
+    key_moved(root)?;
+    let key = p5_crypto::KeyPair::load_or_create(root)?;
+    key_moved(root)?;
+    Ok(key)
+}
+
+fn key_moved(root: &Path) -> Result<(), p5_crypto::CryptoError> {
     let adopted = Adopted::load(root)
         .map_err(|e| p5_crypto::CryptoError::Key(format!("adopted.json unreadable: {e}")))?;
-    if adopted.key_released.is_some() {
-        return p5_crypto::KeyPair::load(root)?.ok_or_else(|| {
-            p5_crypto::CryptoError::Key(
-                "key_released — this box's key moved to its adopter; p5 has none".into(),
-            )
-        });
+    let exported = adopted.handles.values().any(|s| s.key_exported_at.is_some());
+    if exported || adopted.key_released.is_some() {
+        return Err(p5_crypto::CryptoError::Key(
+            "key_moved — this box's key went to its adopter; p5 no longer uses it".into(),
+        ));
     }
-    p5_crypto::KeyPair::load_or_create(root)
+    Ok(())
 }
 
 /// What `status` / `stand-down` / `resume` print with `--json`.
@@ -759,6 +769,9 @@ mod tests {
         stand_down_at(tmp.path(), ROVER, "k2", 2).unwrap();
         let pem = export_key_at(tmp.path(), SCOUT, 3).unwrap();
         assert!(pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+        // From export on, p5 refuses its own key: no load, no create.
+        assert!(box_key(tmp.path()).is_err());
+        assert!(p5_crypto::KeyPair::load(tmp.path()).unwrap().is_some(), "still there");
         // A failed pipe isn't a dead end: export again, same key, until release.
         assert_eq!(export_key_at(tmp.path(), SCOUT, 9).unwrap(), pem);
         assert_eq!(export_key_at(tmp.path(), ROVER, 9).unwrap(), pem);
@@ -798,6 +811,17 @@ mod tests {
             export_key_at(tmp.path(), SCOUT, 7).unwrap_err(),
             HandleError::KeyReleased
         ));
+    }
+
+    #[test]
+    fn box_key_works_until_the_key_moves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = box_with(tmp.path(), &[SCOUT]);
+        assert_eq!(box_key(tmp.path()).unwrap().fingerprint(), key.fingerprint());
+        stand_down_at(tmp.path(), SCOUT, "k2", 1).unwrap();
+        assert!(box_key(tmp.path()).is_ok(), "a stand-down alone keeps the key");
+        std::fs::write(tmp.path().join(p5_core::ADOPTED_FILE), b"{oops").unwrap();
+        assert!(box_key(tmp.path()).is_err(), "unreadable state fails closed");
     }
 
     #[test]
