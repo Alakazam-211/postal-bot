@@ -490,6 +490,18 @@ pub fn flush_outbox(ctx: &SmContext, now: std::time::SystemTime) -> Result<Flush
     let mut report = FlushReport::default();
     for item in ctx.mailbox.due_outbox(now)? {
         report.tried += 1;
+        // S7: mail queued before a stand-down must not go out signed with
+        // the box key. The adopter sends for this handle now; fail the row
+        // so it shows in `p5 sent` instead of leaving it to retry.
+        if let Some(sd) = ctx.adopted.get(&item.from) {
+            let why = format!("{REASON_STOOD_DOWN}: {} sends for {} now", sd.by, item.from);
+            let _ = ctx.mailbox.record_last_error(&item.id, why);
+            match ctx.mailbox.mark(&item.id, DeliveryStatus::Failed, None) {
+                Ok(_) => report.failed += 1,
+                Err(err) => eprintln!("p5: outbox {}: not failed: {err}", item.id),
+            }
+            continue;
+        }
         // One bad row must not stall the rest: an error counts as an attempt
         // (so its backoff grows and it reaches the cap) and we move on.
         let status = match deliver_item(ctx, &item, &item.to, &item.from, &item.body, false) {
@@ -1301,6 +1313,39 @@ mod tests {
             other => panic!("expected host_down, got {other:?}"),
         }
         assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn flush_fails_mail_queued_before_a_stand_down_and_sends_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        // Remote and no live target: the send stays queued in the outbox.
+        ctx.live_base = Some("http://127.0.0.1:9".into());
+        ctx.live_timeout = Duration::from_millis(200);
+        let mut req = msg("jarvis::other.postal.bot", "before");
+        req.session_ids = vec!["sess-1".into()];
+        req.cwd = Some(PathBuf::from("/srv/scout"));
+        let resp = send_msg(&ctx, &req).unwrap();
+        let id = resp.id.clone().unwrap();
+        assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1, "{resp:?}");
+
+        stand_down(&mut ctx, "scout::acme.postal.bot");
+        // A live target that records any request: it must see none.
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        ctx.live_base = Some(format!("http://{}", listener.local_addr().unwrap()));
+        listener.set_nonblocking(true).unwrap();
+        let far = std::time::SystemTime::now() + Duration::from_secs(365 * 86400);
+        let report = flush_outbox(&ctx, far).unwrap();
+        if listener.accept().is_ok() {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!((report.tried, report.failed), (1, 1));
+        assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
+        let row = ctx.mailbox.read_sent(&id).unwrap();
+        assert_eq!(row.status, DeliveryStatus::Failed);
+        assert!(row.last_error.unwrap().starts_with("stood_down"));
     }
 
     #[test]

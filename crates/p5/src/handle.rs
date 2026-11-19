@@ -306,6 +306,23 @@ fn publish_me(addr: &PostalAddr, typ: &str) -> String {
 
 // ---- S7: stand down for a handle another host (K2) adopted ----------------
 
+/// The box key for signing and opening. Creates one only while p5 still
+/// owns its key: once `release-key` ran, a missing file stays missing, so
+/// p5 never mints a fresh identity behind the adopter's back. An unreadable
+/// `adopted.json` refuses too (fail closed).
+pub fn box_key(root: &Path) -> Result<p5_crypto::KeyPair, p5_crypto::CryptoError> {
+    let adopted = Adopted::load(root)
+        .map_err(|e| p5_crypto::CryptoError::Key(format!("adopted.json unreadable: {e}")))?;
+    if adopted.key_released.is_some() {
+        return p5_crypto::KeyPair::load(root)?.ok_or_else(|| {
+            p5_crypto::CryptoError::Key(
+                "key_released — this box's key moved to its adopter; p5 has none".into(),
+            )
+        });
+    }
+    p5_crypto::KeyPair::load_or_create(root)
+}
+
 /// What `status` / `stand-down` / `resume` print with `--json`.
 #[derive(Debug, Serialize)]
 pub struct StandDownReport {
@@ -432,6 +449,10 @@ pub fn resume_at(root: &Path, handle: &str) -> Result<StandDownReport, HandleErr
 /// Write the box's private key (PKCS#8 PEM) to stdout for the adopter's
 /// vault. Never to a file, never to a terminal, and only when every handle
 /// on this box has stood down, since they all sign with this one key.
+///
+/// The terminal check only stops a human reading it off the screen: a shell
+/// redirect (`> file`) is not a terminal and passes. The adopter must pipe it
+/// straight into its vault, never to a file.
 pub fn run_export_key(handle: String) -> Result<(), HandleError> {
     use std::io::{IsTerminal, Write};
     let mut out = std::io::stdout().lock();
@@ -498,28 +519,59 @@ pub fn release_key_at(
     now: i64,
 ) -> Result<StandDownReport, HandleError> {
     let (addr, _) = ours(root, handle)?;
+    let want = fingerprint.trim().to_ascii_lowercase();
     let mut adopted = Adopted::load(root)?;
+    // Order: record `key_released` first, then delete. Once it is recorded,
+    // `box_key` never creates a key, so a crash between the two can't mint a
+    // fresh identity; and every repeat call deletes whatever is still on
+    // disk, so a failed delete is retried rather than forgotten.
     if let Some(done) = &adopted.key_released {
-        if done.fingerprint == fingerprint.trim() {
-            return Ok(report_for(&addr, &adopted));
+        if done.fingerprint != want {
+            return Err(HandleError::KeyReleased);
         }
-        return Err(HandleError::KeyReleased);
+        remove_key_files(root)?;
+        return Ok(report_for(&addr, &adopted));
     }
-    if !adopted.get(&addr).is_some_and(|s| s.key_exported_at.is_some()) {
+    if adopted.get(&addr).and_then(|s| s.key_exported_at).is_none() {
         return Err(HandleError::NotExported(addr.to_string()));
     }
     let key = p5_crypto::KeyPair::load(root)
         .map_err(|e| HandleError::Io(e.to_string()))?
         .ok_or(HandleError::NoKey)?;
     let fp = key.fingerprint();
-    if fp != fingerprint.trim().to_ascii_lowercase() {
+    if fp != want {
         return Err(HandleError::FingerprintMismatch);
     }
+    drop(key);
     adopted.key_released = Some(KeyReleased { fingerprint: fp, at: now });
     adopted.save(root)?;
-    let path = root.join(p5_crypto::KEYS_DIR).join(p5_crypto::IDENTITY_FILE);
-    std::fs::remove_file(&path).map_err(|e| HandleError::Io(e.to_string()))?;
+    remove_key_files(root)?;
     Ok(report_for(&addr, &adopted))
+}
+
+/// Delete `keys/identity.pem` and any stray `.identity.pem.*.tmp` from an
+/// interrupted create. Already gone is fine.
+fn remove_key_files(root: &Path) -> Result<(), HandleError> {
+    let dir = root.join(p5_crypto::KEYS_DIR);
+    let gone = |r: std::io::Result<()>| match r {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(HandleError::Io(e.to_string())),
+        _ => Ok(()),
+    };
+    gone(std::fs::remove_file(dir.join(p5_crypto::IDENTITY_FILE)))?;
+    let stray = format!(".{}.", p5_crypto::IDENTITY_FILE);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(HandleError::Io(e.to_string())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| HandleError::Io(e.to_string()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&stray) && name.ends_with(".tmp") {
+            gone(std::fs::remove_file(entry.path()))?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -731,6 +783,17 @@ mod tests {
         assert!(done.key_released);
         assert!(p5_crypto::KeyPair::load(tmp.path()).unwrap().is_none());
         assert!(release_key_at(tmp.path(), ROVER, &fp, 6).is_ok(), "idempotent");
+        // After release p5 never mints a fresh identity on its own.
+        assert!(box_key(tmp.path()).is_err());
+        assert!(p5_crypto::KeyPair::load(tmp.path()).unwrap().is_none());
+        // A key left on disk (a delete that failed) goes on the next call,
+        // with the fingerprint in either case, and so do stray temp files.
+        let keys = tmp.path().join(p5_crypto::KEYS_DIR);
+        let left = p5_crypto::KeyPair::load_or_create(tmp.path()).unwrap();
+        drop(left);
+        std::fs::write(keys.join(".identity.pem.0011223344556677.tmp"), b"x").unwrap();
+        release_key_at(tmp.path(), SCOUT, &fp.to_ascii_uppercase(), 8).unwrap();
+        assert_eq!(std::fs::read_dir(&keys).unwrap().count(), 0);
         assert!(matches!(
             export_key_at(tmp.path(), SCOUT, 7).unwrap_err(),
             HandleError::KeyReleased

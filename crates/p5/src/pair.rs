@@ -73,7 +73,7 @@ impl PairCtx {
     }
 
     fn keys(&self) -> Result<KeyPair, PairError> {
-        Ok(KeyPair::load_or_create(&self.root)?)
+        Ok(crate::handle::box_key(&self.root)?)
     }
 
     fn public_pem(&self) -> Result<String, PairError> {

@@ -220,7 +220,7 @@ pub fn pull_held(root: &Path) -> Result<PullReport, PullError> {
     let ctx = SmContext::load(root)?;
     let cfg = PlaneConfig::load(root)?;
     let client = PlaneClient::new(&cfg.base_url, cfg.require_token()?);
-    let keys = KeyPair::load_or_create(root)?;
+    let keys = crate::handle::box_key(root)?;
     pull_with(&ctx, &client, &keys)
 }
 

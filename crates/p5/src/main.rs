@@ -213,7 +213,8 @@ enum HandleAction {
         json: bool,
     },
     /// Print the box key (PKCS#8 PEM) to stdout for the adopter. Pipe only;
-    /// needs every handle on this box stood down (exit 2: key shared)
+    /// needs every handle on this box stood down (exit 2: key shared).
+    /// `> file` is not a terminal and passes: pipe it into a vault, never a file
     #[command(name = "export-key")]
     ExportKey { handle: String },
     /// Delete p5's copy of the box key after the adopter confirms it
