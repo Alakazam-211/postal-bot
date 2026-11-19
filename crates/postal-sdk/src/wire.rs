@@ -1,6 +1,7 @@
 //! Wire v2: the signed message. `v` is [`crate::WIRE_VERSION`].
 //!
-//! The same JSON goes out live (`POST /p5/msg`) and, sealed, into the hold
+//! The same JSON goes out live (`POST /postal/v2/msg`, see
+//! `docs/postal-wire-v2.md`) and, sealed, into the hold
 //! ([`crate::hold`]). The signature is Ed25519, raw, over
 //!
 //! ```text
@@ -13,8 +14,14 @@
 //! edit can't wake an agent the sender asked to keep quiet; the field is
 //! required, never defaulted.
 //!
-//! The hop-auth proof on `POST /p5/msg` (`p5-msg-v1`) is separate: it
-//! authenticates the HTTP request. [`WireMessage::sig`] authenticates the mail.
+//! There is no hop proof on the v2 route: [`WireMessage::sig`] authenticates
+//! the mail. (The `p5-msg-v1` proof belongs to the old v1 `POST /p5/msg`.)
+//!
+//! A receiver runs [`precheck`] before it looks the sender up, then
+//! [`verify`] with the sender's pinned key. Answer an unknown sender and a
+//! bad signature the same way (403 `not_connected`), or a junk signature
+//! tells anyone who is friends with whom. Record the seen entry in the same
+//! transaction that stores the message (see [`SeenStore`]).
 //!
 //! Retrying a send: sign again with the same `id` and a fresh `sent_at`. A
 //! signed message older than [`crate::replay::MAX_SKEW_SECS`] is refused live
@@ -209,6 +216,44 @@ pub struct Expect<'a> {
     pub arrival: Arrival,
 }
 
+/// The checks that need no secrets, in [`verify`]'s order: version,
+/// recipient, time window, encoded sizes, then decoding, id and sizes. Run
+/// it before looking up the sender, so the reply to a stale or malformed
+/// message is the same whether or not `from` is a friend. [`verify`] runs
+/// it again.
+///
+/// # Errors
+/// [`WireError::BadVersion`], [`WireError::NotForUs`], [`WireError::Stale`],
+/// [`WireError::TooLarge`], [`WireError::BadFile`] or [`WireError::BadId`].
+pub fn precheck(
+    msg: &WireMessage,
+    to: &Address,
+    now: i64,
+    arrival: Arrival,
+) -> Result<(), WireError> {
+    checked_files(msg, to, now, arrival).map(drop)
+}
+
+fn checked_files(
+    msg: &WireMessage,
+    to: &Address,
+    now: i64,
+    arrival: Arrival,
+) -> Result<Vec<FileBytes>, WireError> {
+    if msg.v != crate::WIRE_VERSION {
+        return Err(WireError::BadVersion);
+    }
+    if &msg.to != to {
+        return Err(WireError::NotForUs);
+    }
+    if !in_window(msg.sent_at, now, arrival) {
+        return Err(WireError::Stale);
+    }
+    let files = decode_files(&msg.files)?;
+    check_shape(&msg.id, &msg.content_type, &msg.body, &files)?;
+    Ok(files)
+}
+
 /// Verify `msg` and record it as seen. In order: version, recipient, time
 /// window, encoded sizes, then decoding, id and sizes, the signature, and
 /// last the seen list, so a forged or stale message never takes a slot in
@@ -221,17 +266,7 @@ pub fn verify(
     expect: &Expect<'_>,
     seen: &mut dyn SeenStore,
 ) -> Result<VerifiedMessage, WireError> {
-    if msg.v != crate::WIRE_VERSION {
-        return Err(WireError::BadVersion);
-    }
-    if &msg.to != expect.to {
-        return Err(WireError::NotForUs);
-    }
-    if !in_window(msg.sent_at, expect.now, expect.arrival) {
-        return Err(WireError::Stale);
-    }
-    let files = decode_files(&msg.files)?;
-    check_shape(&msg.id, &msg.content_type, &msg.body, &files)?;
+    let files = checked_files(msg, expect.to, expect.now, expect.arrival)?;
     let draft = Draft {
         id: &msg.id,
         from: &msg.from,
@@ -680,6 +715,40 @@ pub(crate) mod tests {
 
     /// K2 review SHOULD 3: recipient and time are checked before anything
     /// is decoded, and encoded sizes before decoding.
+    #[test]
+    fn precheck_needs_no_sender_and_matches_verify() {
+        let good = signed(&[]);
+        let scout = Address::parse("scout::bravo.postal.bot").unwrap();
+        assert_eq!(precheck(&good, &scout, T0, Arrival::Live), Ok(()));
+        let other = Address::parse("other::bravo.postal.bot").unwrap();
+        assert_eq!(
+            precheck(&good, &other, T0, Arrival::Live),
+            Err(WireError::NotForUs)
+        );
+        assert_eq!(
+            precheck(&good, &scout, T0 + 10_000, Arrival::Live),
+            Err(WireError::Stale)
+        );
+        let mut bad = good.clone();
+        bad.files = vec![WireFile {
+            name: "x".into(),
+            content: "not base64!".into(),
+        }];
+        assert_eq!(
+            precheck(&bad, &scout, T0, Arrival::Live),
+            Err(WireError::BadFile)
+        );
+        // A forged signature passes precheck: only verify, with the pinned
+        // key, can tell, and the host answers that like an unknown sender.
+        let mut forged = good.clone();
+        forged.body = "edited".into();
+        assert_eq!(precheck(&forged, &scout, T0, Arrival::Live), Ok(()));
+        assert_eq!(
+            check(&forged, T0, Arrival::Live).unwrap_err(),
+            WireError::BadSig
+        );
+    }
+
     #[test]
     fn cheap_checks_come_before_decoding() {
         let mut m = signed(&[]);
