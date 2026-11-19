@@ -591,6 +591,32 @@ pub fn after_events(status: u16, body: &[u8]) -> AfterEvents {
     }
 }
 
+// ---------------------------------------------------------------- me
+
+#[derive(Serialize)]
+struct MeBody<'a> {
+    addr: &'a Address,
+    public_key_pem: &'a str,
+    typ: Typ,
+}
+
+/// `PUT /me {addr, public_key_pem, typ}`: register a handle's key.
+#[must_use]
+pub fn me_put(addr: &Address, key: &PublicKey, typ: Typ) -> Request {
+    Request {
+        method: Method::Put,
+        path: format!("{API}/me"),
+        body: Some(
+            serde_json::to_string(&MeBody {
+                addr,
+                public_key_pem: key.pem(),
+                typ,
+            })
+            .expect("plane bodies serialize"),
+        ),
+    }
+}
+
 // ---------------------------------------------------------------- pairs
 
 /// The client's own pair id: a ULID, because the commitment binds it.
@@ -1056,6 +1082,9 @@ mod tests {
         assert_eq!(body(&r), json!({"na": reveal.to_hex()}));
         assert_eq!(pair_revoke(id).unwrap().body.as_deref(), Some("{}"));
         assert_eq!(pairs_list().path, "/api/postal/v1/pairs");
+        let me = me_put(&from, &key(0x11).1, Typ::Session);
+        assert_eq!((me.method, me.path.as_str()), (Method::Put, "/api/postal/v1/me"));
+        assert_eq!(body(&me)["addr"], "alice::acme.postal.bot");
         assert_eq!(
             pair_get(id).unwrap().path,
             format!("/api/postal/v1/pairs/{id}")

@@ -307,6 +307,17 @@ impl Decision {
             Self::Mismatch => "mismatch",
         }
     }
+
+    /// The wire spelling, as the plane relays a stored confirmation.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "accept" => Some(Self::Accept),
+            "reject" => Some(Self::Reject),
+            "mismatch" => Some(Self::Mismatch),
+            _ => None,
+        }
+    }
 }
 
 /// Pairing attempts with one peer, kept by the box (not the plane, which
