@@ -6,6 +6,7 @@
 //! `inbox/<handle>/`, `sent/`, `outbox/`. The live session map is not on disk.
 
 mod addr;
+mod adopted;
 mod homes;
 mod mailbox;
 mod roster;
@@ -14,6 +15,7 @@ mod tools;
 mod types;
 
 pub use addr::{AddrError, PostalAddr};
+pub use adopted::{Adopted, KeyReleased, StandDown, ADOPTED_FILE};
 pub use homes::{HomeRow, Homes};
 pub use mailbox::{
     apply_jitter, backoff_secs, default_root, sanitize_sidecar_filename, wake_pointer_text,

@@ -288,6 +288,19 @@ fn handle_msg(state: &AgentState, headers: &[(String, String)], body: &[u8]) -> 
             return HttpOut::json(400, json!({"error":"bad_address","hint": err.to_string()}));
         }
     };
+    // S7: before any proof check or plane call. The sender holds and the
+    // adopter pulls it from hold.
+    if ctx.adopted.is_stood_down(&to) {
+        return HttpOut::json(
+            503,
+            json!({
+                "already": false,
+                "status": "failed",
+                "reason": REASON_HOST_DOWN,
+                "hint": "this handle is adopted by another host; hold it",
+            }),
+        );
+    }
     if auth == MsgAuth::Proof {
         if let Err(out) = verify_pairing_proof(&ctx, headers, body, &from) {
             // Website Accept only writes the plane. CLI accept also
@@ -771,6 +784,27 @@ mod tests {
             &body,
         );
         assert_eq!(wrong.status, 401);
+        assert!(Mailbox::new(tmp.path())
+            .list_inbox(None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn post_msg_to_a_stood_down_handle_is_503_host_down_and_stores_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_home(tmp.path(), Some("s3cret"));
+        let mut adopted = p5_core::Adopted::default();
+        adopted.handles.insert(
+            "scout::acme.postal.bot".into(),
+            p5_core::StandDown { by: "k2".into(), since: 1, key_exported_at: None },
+        );
+        adopted.save(tmp.path()).unwrap();
+        let headers = msg_headers("s3cret", SAMPLE_ID);
+        let out = handle_http(&state, "POST", "/p5/msg", &headers, &sample_msg(SAMPLE_ID));
+        assert_eq!(out.status, 503, "{}", out.body);
+        let v: Value = serde_json::from_str(&out.body).unwrap();
+        assert_eq!(v["reason"], "host_down");
         assert!(Mailbox::new(tmp.path())
             .list_inbox(None, None)
             .unwrap()

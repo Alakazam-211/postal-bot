@@ -169,6 +169,10 @@ enum KnockMiss {
 
 fn knock_once(ctx: &SmContext, id: &str, no_wake: bool) -> Result<(), KnockMiss> {
     let item = ctx.mailbox.read_inbox(id).map_err(|_| KnockMiss::Gone)?;
+    // S7: the adopter delivers for this handle now; p5 never knocks for it.
+    if ctx.adopted.is_stood_down(&item.to) {
+        return Err(KnockMiss::Gone);
+    }
     let Some(home) = ctx.homes.get(&item.to) else {
         return Err(KnockMiss::Gone);
     };

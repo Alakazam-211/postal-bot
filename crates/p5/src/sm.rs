@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use p5_core::{
-    default_root, DeliveryMode, DeliveryStatus, HomeRow, Homes, MailItem, Mailbox, MailboxError,
+    default_root, Adopted, DeliveryMode, DeliveryStatus, HomeRow, Homes, MailItem, Mailbox, MailboxError,
     PeerType, PostalAddr, ReceiveRequest, Roster, SendRequest, StoreError, Trust, EXIT_GATED,
     MAX_BODY_BYTES,
 };
@@ -39,6 +39,8 @@ pub const REASON_ERROR: &str = "error";
 pub const REASON_HOST_DOWN: &str = "host_down";
 pub const REASON_RATE_LIMITED: &str = "rate_limited";
 pub const REASON_QUOTA: &str = "quota";
+/// S7: another host (K2) adopted this handle; p5 stands down for it.
+pub const REASON_STOOD_DOWN: &str = "stood_down";
 
 /// CLI / test input for [`send_msg`].
 #[derive(Debug, Clone)]
@@ -86,7 +88,10 @@ impl MsgResponse {
         }
         match self.reason.as_deref() {
             Some(REASON_BAD_ADDRESS) | Some(REASON_TOO_LARGE) => EXIT_USAGE,
-            Some(REASON_GATED) | Some(REASON_NOT_CONNECTED) | Some(REASON_QUOTA) => EXIT_GATED,
+            Some(REASON_GATED)
+            | Some(REASON_NOT_CONNECTED)
+            | Some(REASON_QUOTA)
+            | Some(REASON_STOOD_DOWN) => EXIT_GATED,
             _ => EXIT_ERROR,
         }
     }
@@ -162,6 +167,9 @@ impl MsgResponse {
 pub struct SmContext {
     pub mailbox: Mailbox,
     pub homes: Homes,
+    /// S7 stand-downs. A stood-down handle is not local, not ours to send
+    /// from, and never received for.
+    pub adopted: Adopted,
     pub roster: Roster,
     /// Shared with the resident agent when one is running; never clone-and-forget.
     pub sessions: Arc<Mutex<SessionMap>>,
@@ -197,6 +205,7 @@ impl SmContext {
         Self {
             mailbox: Mailbox::new(&root),
             homes: Homes::new(),
+            adopted: Adopted::default(),
             roster: Roster::new(),
             sessions: Arc::new(Mutex::new(SessionMap::new())),
             local_recv: false,
@@ -220,6 +229,8 @@ impl SmContext {
         let mut ctx = Self::new(root);
         let root = ctx.mailbox.root();
         ctx.homes = Homes::load(root)?;
+        // An unreadable adopted.json fails the load: closed, not open.
+        ctx.adopted = Adopted::load(root)?;
         ctx.roster = Roster::load(root)?;
         ctx.local_recv = env_flag("P5_LOCAL_RECV");
         ctx.our_typ = load_our_typ(root);
@@ -249,7 +260,7 @@ impl SmContext {
     }
 
     pub fn dest_is_local(&self, addr: &PostalAddr) -> bool {
-        self.local_recv || self.homes.get(addr).is_some()
+        !self.adopted.is_stood_down(addr) && (self.local_recv || self.homes.get(addr).is_some())
     }
 
     pub fn live_session(&self, addr: &PostalAddr) -> Option<crate::session_map::LiveSession> {
@@ -355,6 +366,16 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         }
         Err(err) => return Err(err),
     };
+
+    if let Some(sd) = ctx.adopted.get(&from) {
+        return Ok(MsgResponse::fail(
+            None,
+            Some(&to),
+            None,
+            REASON_STOOD_DOWN,
+            format!("{} sends for {from} now; p5 stood down for it", sd.by),
+        ));
+    }
 
     if ctx.billing {
         match crate::billing::collect_with(
@@ -469,6 +490,18 @@ pub fn flush_outbox(ctx: &SmContext, now: std::time::SystemTime) -> Result<Flush
     let mut report = FlushReport::default();
     for item in ctx.mailbox.due_outbox(now)? {
         report.tried += 1;
+        // S7: mail queued before a stand-down must not go out signed with
+        // the box key. The adopter sends for this handle now; fail the row
+        // so it shows in `p5 sent` instead of leaving it to retry.
+        if let Some(sd) = ctx.adopted.get(&item.from) {
+            let why = format!("{REASON_STOOD_DOWN}: {} sends for {} now", sd.by, item.from);
+            let _ = ctx.mailbox.record_last_error(&item.id, why);
+            match ctx.mailbox.mark(&item.id, DeliveryStatus::Failed, None) {
+                Ok(_) => report.failed += 1,
+                Err(err) => eprintln!("p5: outbox {}: not failed: {err}", item.id),
+            }
+            continue;
+        }
         // One bad row must not stall the rest: an error counts as an attempt
         // (so its backoff grows and it reaches the cap) and we move on.
         let status = match deliver_item(ctx, &item, &item.to, &item.from, &item.body, false) {
@@ -714,6 +747,14 @@ impl From<MailboxError> for ReceiveError {
 
 /// Inbound entry for the resident agent. Branch on **our** type (K22).
 pub fn receive_msg(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome, ReceiveError> {
+    // S7: the adopter receives for this handle (it pulls from hold), so the
+    // sender should hold, not retry us.
+    if ctx.adopted.is_stood_down(&inbound.to) {
+        return Err(permanent(
+            REASON_HOST_DOWN,
+            "this handle is adopted by another host; hold it",
+        ));
+    }
     if inbound_is_turn(ctx, inbound) {
         receive_turn(ctx, inbound)
     } else {
@@ -1241,6 +1282,85 @@ mod tests {
             .insert(home("scout::acme.postal.bot", wake, true))
             .unwrap();
         ctx
+    }
+
+    fn stand_down(ctx: &mut SmContext, a: &str) {
+        ctx.adopted.handles.insert(
+            a.into(),
+            p5_core::StandDown { by: "k2".into(), since: 1, key_exported_at: None },
+        );
+    }
+
+    #[test]
+    fn a_stood_down_handle_is_not_local_and_never_received_for() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        stand_down(&mut ctx, "scout::acme.postal.bot");
+        let to = addr("scout::acme.postal.bot");
+        assert!(!ctx.dest_is_local(&to));
+        let inbound = Inbound {
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            to: to.clone(),
+            from: addr("jarvis::other.postal.bot"),
+            body: "hi".into(),
+            mode: DeliveryMode::Live,
+            typ: PeerType::Session,
+            files: Vec::new(),
+            no_wake: false,
+        };
+        match receive_msg(&ctx, &inbound) {
+            Err(ReceiveError::Permanent { reason, .. }) => assert_eq!(reason, REASON_HOST_DOWN),
+            other => panic!("expected host_down, got {other:?}"),
+        }
+        assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn flush_fails_mail_queued_before_a_stand_down_and_sends_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        // Remote and no live target: the send stays queued in the outbox.
+        ctx.live_base = Some("http://127.0.0.1:9".into());
+        ctx.live_timeout = Duration::from_millis(200);
+        let mut req = msg("jarvis::other.postal.bot", "before");
+        req.session_ids = vec!["sess-1".into()];
+        req.cwd = Some(PathBuf::from("/srv/scout"));
+        let resp = send_msg(&ctx, &req).unwrap();
+        let id = resp.id.clone().unwrap();
+        assert_eq!(ctx.mailbox.list_outbox().unwrap().len(), 1, "{resp:?}");
+
+        stand_down(&mut ctx, "scout::acme.postal.bot");
+        // A live target that records any request: it must see none.
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        ctx.live_base = Some(format!("http://{}", listener.local_addr().unwrap()));
+        listener.set_nonblocking(true).unwrap();
+        let far = std::time::SystemTime::now() + Duration::from_secs(365 * 86400);
+        let report = flush_outbox(&ctx, far).unwrap();
+        if listener.accept().is_ok() {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!((report.tried, report.failed), (1, 1));
+        assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
+        let row = ctx.mailbox.read_sent(&id).unwrap();
+        assert_eq!(row.status, DeliveryStatus::Failed);
+        assert!(row.last_error.unwrap().starts_with("stood_down"));
+    }
+
+    #[test]
+    fn p5_refuses_to_send_from_a_stood_down_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        stand_down(&mut ctx, "scout::acme.postal.bot");
+        let mut req = msg("jarvis::other.postal.bot", "hi");
+        req.session_ids = vec!["sess-1".into()];
+        req.cwd = Some(PathBuf::from("/srv/scout"));
+        let resp = send_msg(&ctx, &req).unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.reason.as_deref(), Some(REASON_STOOD_DOWN));
+        assert_eq!(resp.exit_code(), EXIT_GATED);
+        assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
     }
 
     fn msg(to: &str, body: &str) -> MsgRequest {
