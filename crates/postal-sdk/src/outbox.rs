@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! Queued ──live 2xx──────────────────────────▶ Delivered
-//!   │ ──definite miss (refused, 404, 503 host_down)──▶ hold
-//!   │ ──soft miss (timeout, 429, 5xx)──▶ Queued, backoff;
+//!   │ ──definite miss (refused, 404, 503 host_down, 429)──▶ hold
+//!   │ ──soft miss (timeout, 408, other 5xx)──▶ Queued, backoff;
 //!   │        still missing after SOFT_HOLD_AFTER ──▶ hold
 //!   └─ hold: POST /hold ─▶ Held ── receipt delivered ─▶ Delivered
 //!                          │      receipt refused:x  ─▶ Dead(Refused x)
@@ -66,10 +66,11 @@ pub enum DeadReason {
     /// The plane refused the hold for good (`code` as the plane spelled it).
     Plane { code: String },
     /// The live endpoint refused it for good (4xx other than 404/408/429).
+    /// See `docs/postal-wire-v2.md` for the reply table.
     Live { status: u16 },
 }
 
-/// The result of `POST https://<label>.postal.bot/p5/msg`, as the host saw it.
+/// The result of `POST https://<label>.postal.bot/postal/v2/msg`, as the host saw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Live {
     /// Any HTTP status.
@@ -167,6 +168,10 @@ impl Item {
             }
             Live::Refused => self.definite_miss("connection refused".into(), now),
             Live::Status(404, _) => self.definite_miss("404".into(), now),
+            // The receiver is up but won't take more now: hold rather than
+            // keep knocking (docs/postal-wire-v2.md). Its pull drains the hold
+            // at its own pace.
+            Live::Status(429, _) => self.definite_miss("429 rate_limited".into(), now),
             Live::Status(503, body) if body.contains("host_down") => {
                 self.definite_miss("503 host_down".into(), now);
             }
@@ -318,6 +323,10 @@ mod tests {
             Live::Refused,
             Live::Status(404, String::new()),
             Live::Status(503, r#"{"error":"host_down"}"#.into()),
+            Live::Status(
+                429,
+                r#"{"error":{"code":"rate_limited","message":"","retry_after_s":30}}"#.into(),
+            ),
         ] {
             let mut i = item();
             i.on_live(&live, T0, 0.0);
@@ -342,7 +351,7 @@ mod tests {
         assert!(now - T0 < SOFT_HOLD_AFTER_SECS);
         while now - T0 < SOFT_HOLD_AFTER_SECS {
             assert_eq!(i.next(now), Step::Live);
-            i.on_live(&Live::Status(429, String::new()), now, 0.0);
+            i.on_live(&Live::Status(502, String::new()), now, 0.0);
             if let Step::Wait { at } = i.next(now) {
                 now = at;
             }

@@ -73,31 +73,43 @@ Strings are framed as a u32 big-endian length followed by the bytes, and
 
 ## What the receiver checks, in order
 
-1. **Size, before parsing.** A body over `MAX_WIRE_JSON` returns 413
-   `too_large`, and nothing is parsed.
+Everything that needs no secrets comes first, so the reply to a junk
+message is the same whether or not `from` is a friend of `to`.
+
+1. **Size, on the bytes actually read.** Count the body as it streams in,
+   chunked bodies included, and stop at `MAX_WIRE_JSON`: 413 `too_large`,
+   nothing parsed. A `Content-Length` over the cap can be refused before
+   reading, but a short or missing one proves nothing.
 2. Parse the JSON (`deny_unknown_fields`). A failure returns 400 `bad_wire`.
 3. `v == 2`, else 400 `bad_wire`.
-4. **Recipient.** `to` must be a handle this host serves and hasn't stood down
-   for (a handle another host has adopted gets 503 `host_down`). Otherwise
-   403 `not_connected`.
-5. **Sender.** `from` must be a confirmed friend of `to`, which gives the pinned
-   key. Otherwise 403 `not_connected`.
-6. **Time.** `|now − sent_at| ≤ 300 s`, else 400 `stale`.
-7. Decode the files and check the shape (ULID, sizes). A failure returns
+4. **Recipient.** `to` must be a handle this host serves. A handle another
+   host has adopted gets 503 `host_down`; an unknown one, 403 `not_connected`.
+5. **Time.** `|now − sent_at| ≤ 300 s`, else 400 `stale`.
+6. Decode the files and check the shape (ULID, sizes). A failure returns
    400 `bad_wire`.
-8. **Signature** against the pinned key. A failure returns 403 `bad_sig`.
-9. **Seen.** Record `(from, id)`, and keep it until `sent_at` + 7 d + 600 s.
-   If it was already seen, return 200 `{"ok":true,"already":true}` and deliver
-   nothing.
-10. Store the message durably, then return 200 `{"ok":true,"already":false}`.
+
+   Steps 3–6 are `wire::precheck` in the SDK.
+7. **Sender and signature, as one answer.** Look up `from` among `to`'s
+   confirmed friends to get the pinned key, then check the signature
+   (`wire::verify`). An unknown sender and a bad signature both get the same
+   403 `not_connected`, the same body and, as far as practical, the same
+   timing. Otherwise a junk signature would answer "is X a friend of Y?".
+8. **Seen, and store, in one atomic step.** Record `(from, id)`, kept until
+   `sent_at` + 7 d + 600 s, in the same transaction that stores the message;
+   a unique index on `(from, id)` in the delivery table does both. If it was
+   already there, return 200 `{"ok":true,"already":true}` and deliver
+   nothing. Otherwise commit and return 200 `{"ok":true,"already":false}`.
+   If the seen entry were committed separately and the host crashed before
+   storing, the sender's retry would get `already: true` and the mail would
+   be lost.
 
 The seen record is written only after the signature verifies, so a forged
-message can't use up an id. Nothing is decoded for a message that is too big,
-isn't for us, or is stale.
+message can't use up an id.
 
 ## Replies
 
-Errors use the plane's envelope:
+Errors use the plane's envelope, on every v2 error including the 503 for an
+adopted handle:
 
 ```json
 {"error": {"code": "not_connected", "message": "…", "hint": "…", "retry_after_s": 30}}
@@ -107,16 +119,17 @@ Errors use the plane's envelope:
 |---|---|---|
 | 200 | `{"ok":true,"already":bool}` | Delivered. Done |
 | 400 | `bad_wire`, `stale` | Final (dead). `stale` means the sender's clock is off |
-| 403 | `not_connected`, `bad_sig` | Final (dead) |
+| 403 | `not_connected` | Final (dead). Covers an unknown recipient, an unknown sender and a bad signature |
 | 413 | `too_large` | Final (dead) |
 | 429 | `rate_limited` (with `retry_after_s`) | **Hold now**, the same as 503 |
 | 503 | `host_down` | **Hold now** |
 | connection refused, 404 | n/a | **Hold now** (a definite miss) |
-| timeout, other 5xx, no status | n/a | Retry live with backoff (15 s · 2ⁿ, at most 30 min, with jitter). Hold after 3 misses and 10 min |
+| timeout, 408, other 5xx, no status | n/a | Retry live with backoff (15 s · 2ⁿ, at most 30 min, with jitter). Hold after 3 misses and 10 min |
 
 "Hold now" means: seal the same message (same `id`) with HoldSeal-v2 and
 `POST /api/postal/v1/hold`. Receipts then come back through the plane's
-`receipt` events or `GET /hold/sent`.
+`receipt` events or `GET /hold/sent`. The SDK's `outbox::Item::on_live`
+follows this table.
 
 ## Held mail arriving
 

@@ -61,6 +61,13 @@ impl SeenEntry {
 }
 
 /// The host's durable seen list.
+///
+/// Make the insert and the storing of the message one atomic step, such as
+/// a unique index on `(from, id)` in the delivery table, written in the
+/// same transaction as the message. If the seen entry were committed first
+/// and the host crashed before storing, the sender's retry would get
+/// `already: true` and the mail would be lost. If the store fails, roll the
+/// entry back too.
 pub trait SeenStore {
     /// Record `entry` if `(from, id)` is new and return `Ok(true)`; return
     /// `Ok(false)` if it was already there. Must be atomic and durable
