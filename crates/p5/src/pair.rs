@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use p5_core::{
-    default_root, Homes, KeyMerge, PeerType, PostalAddr, Roster, StoreError, Trust, TypeParseError,
+    default_root, Adopted, Homes, KeyMerge, PeerType, PostalAddr, Roster, StoreError, Trust, TypeParseError,
     EXIT_GATED,
 };
 use p5_crypto::{fingerprint_spki_pem, sas_code, KeyPair};
@@ -30,14 +30,39 @@ pub struct PairCtx {
     root: PathBuf,
     cfg: PlaneConfig,
     homes: Homes,
+    adopted: Adopted,
 }
 
 impl PairCtx {
     pub fn load() -> Result<Self, PairError> {
         let root = default_root();
         let cfg = PlaneConfig::load(&root)?;
-        let homes = Homes::load(&root)?;
-        Ok(Self { root, cfg, homes })
+        let mut homes = Homes::load(&root)?;
+        // S7: a stood-down handle's pairs and `/me` row are the adopter's.
+        // Drop it here so no publish, roster sync or From pick touches it.
+        let adopted = Adopted::load(&root)?;
+        let gone: Vec<PostalAddr> = homes
+            .iter()
+            .filter(|(addr, _)| adopted.is_stood_down(addr))
+            .map(|(addr, _)| addr.clone())
+            .collect();
+        for addr in &gone {
+            homes.remove(addr);
+        }
+        Ok(Self { root, cfg, homes, adopted })
+    }
+
+    /// Refuse to change a pair whose local side p5 stood down for.
+    fn refuse_adopted(&self, view: Option<&PairView>) -> Result<(), PairError> {
+        let Some(view) = view else { return Ok(()) };
+        for raw in [&view.from, &view.to] {
+            if let Ok(addr) = PostalAddr::parse(raw, None) {
+                if let Some(sd) = self.adopted.get(&addr) {
+                    return Err(PairError::StoodDown(addr.to_string(), sd.by.clone()));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn client(&self) -> Result<PlaneClient, PairError> {
@@ -219,6 +244,7 @@ pub fn run_accept(id: String, sas: Option<String>) -> Result<(), PairError> {
     let client = ctx.client()?;
     let lists = client.list_pairs(false)?;
     let view = lists.find(&id);
+    ctx.refuse_adopted(view)?;
     let typed = sas.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     // Accepting a pairing that would move a friend's pinned key needs a SAS a
     // person typed, checked here against the key in *this* pairing. p5 never
@@ -306,6 +332,8 @@ pub fn run_reject(id: String) -> Result<(), PairError> {
     require_owner_pair()?;
     let ctx = PairCtx::load()?;
     let client = ctx.client()?;
+    let lists = client.list_pairs(false)?;
+    ctx.refuse_adopted(lists.find(&id))?;
     client.reject(&id)?;
     refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
     println!("ok");
@@ -316,6 +344,8 @@ pub fn run_revoke(id: String) -> Result<(), PairError> {
     require_owner_pair()?;
     let ctx = PairCtx::load()?;
     let client = ctx.client()?;
+    let lists = client.list_pairs(false)?;
+    ctx.refuse_adopted(lists.find(&id))?;
     client.revoke(&id)?;
     refresh_roster(&client, &ctx.root, &ctx.configured_addrs())?;
     println!("ok");
@@ -657,12 +687,14 @@ pub enum PairError {
     NotFound(String),
     Gated,
     PrivateKey,
+    /// S7: (address, adopter).
+    StoodDown(String, String),
 }
 
 impl PairError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Gated => EXIT_GATED,
+            Self::Gated | Self::StoodDown(..) => EXIT_GATED,
             Self::BadAddress(_) | Self::BadTyp(_) | Self::MissingPem => EXIT_USAGE,
             Self::Plane(e) => e.exit_code(),
             _ => EXIT_ERROR,
@@ -697,6 +729,9 @@ impl fmt::Display for PairError {
             Self::NotFound(id) => write!(f, "pair not found: {id}"),
             Self::Gated => write!(f, "{REASON_GATED}"),
             Self::PrivateKey => f.write_str("refusing to upload a private key"),
+            Self::StoodDown(addr, by) => {
+                write!(f, "stood_down — {addr} is adopted by {by}; its pairs are {by}'s now")
+            }
         }
     }
 }

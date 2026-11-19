@@ -306,7 +306,8 @@ fn take_one(
 }
 
 fn is_ours(ctx: &SmContext, to: &PostalAddr) -> bool {
-    ctx.dest_is_local(to) || ctx.homes.get(to).is_some()
+    // S7: a stood-down handle's held mail is the adopter's; never ACK it.
+    !ctx.adopted.is_stood_down(to) && (ctx.dest_is_local(to) || ctx.homes.get(to).is_some())
 }
 
 fn from_trusted(ctx: &SmContext, from: &PostalAddr) -> bool {
@@ -792,6 +793,48 @@ mod tests {
             .requests
             .iter()
             .any(|(m, p, _)| m == "POST" && p.ends_with("/ack")));
+    }
+
+    #[test]
+    fn pull_leaves_a_stood_down_handles_mail_for_the_adopter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let alice = KeyPair::load_or_create(tmp.path()).unwrap();
+        let mut ctx = SmContext::new(tmp.path());
+        ctx.homes
+            .insert(home_row("alice::acme.postal.bot"))
+            .unwrap();
+        ctx.adopted.handles.insert(
+            "alice::acme.postal.bot".into(),
+            p5_core::StandDown { by: "k2".into(), since: 1, key_exported_at: None },
+        );
+        let bob = KeyPair::generate();
+        ctx.roster
+            .insert(addr("bob::acme.postal.bot"), roster_peer(&bob));
+        let env = seal_envelope(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "alice::acme.postal.bot",
+            "bob::acme.postal.bot",
+            b"for k2",
+            &alice.public_key_pem(),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let state = Arc::new(Mutex::new(HoldState {
+            items: vec![env],
+            requests: Vec::new(),
+        }));
+        let plane = spawn_hold_plane(state.clone());
+        let client = PlaneClient::new(plane, "k2c_test");
+        let report = pull_with(&ctx, &client, &alice).unwrap();
+        assert_eq!((report.pulled, report.acked, report.skipped), (0, 0, 1));
+        assert_eq!(state.lock().unwrap().items.len(), 1, "still held for the adopter");
+        assert!(!state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|(m, p, _)| m == "POST" && p.ends_with("/ack")));
+        assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
     }
 
     #[test]

@@ -189,6 +189,43 @@ enum HandleAction {
     },
     /// Remove a homes row (owner-gated: `P5_OWNER_PAIR=1`)
     Drop { handle: String },
+    /// Is p5 serving this handle, or stood down for another host? (S7)
+    Status {
+        handle: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop serving a handle another host adopted (run by `k2 postal adopt`).
+    /// Idempotent. Exit 2: not a p5 handle
+    #[command(name = "stand-down")]
+    StandDown {
+        handle: String,
+        /// The adopting host (`k2`)
+        #[arg(long)]
+        by: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Serve a stood-down handle again. Refused once its key was exported
+    Resume {
+        handle: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the box key (PKCS#8 PEM) to stdout for the adopter. Pipe only;
+    /// needs every handle on this box stood down (exit 2: key shared)
+    #[command(name = "export-key")]
+    ExportKey { handle: String },
+    /// Delete p5's copy of the box key after the adopter confirms it
+    #[command(name = "release-key")]
+    ReleaseKey {
+        handle: String,
+        /// SHA-256 of the SPKI DER (hex) the adopter now holds
+        #[arg(long)]
+        fingerprint: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -652,6 +689,17 @@ fn run_handle(action: HandleAction) {
         HandleAction::List { json } => crate::handle::run_list(json),
         HandleAction::Show { handle, json } => crate::handle::run_show(handle, json),
         HandleAction::Drop { handle } => crate::handle::run_drop(handle),
+        HandleAction::Status { handle, json } => crate::handle::run_status(handle, json),
+        HandleAction::StandDown { handle, by, json } => {
+            crate::handle::run_stand_down(handle, by, json)
+        }
+        HandleAction::Resume { handle, json } => crate::handle::run_resume(handle, json),
+        HandleAction::ExportKey { handle } => crate::handle::run_export_key(handle),
+        HandleAction::ReleaseKey {
+            handle,
+            fingerprint,
+            json,
+        } => crate::handle::run_release_key(handle, fingerprint, json),
     };
     if let Err(err) = result {
         eprintln!("{err}");

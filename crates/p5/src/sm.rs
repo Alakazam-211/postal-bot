@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use p5_core::{
-    default_root, DeliveryMode, DeliveryStatus, HomeRow, Homes, MailItem, Mailbox, MailboxError,
+    default_root, Adopted, DeliveryMode, DeliveryStatus, HomeRow, Homes, MailItem, Mailbox, MailboxError,
     PeerType, PostalAddr, ReceiveRequest, Roster, SendRequest, StoreError, Trust, EXIT_GATED,
     MAX_BODY_BYTES,
 };
@@ -39,6 +39,8 @@ pub const REASON_ERROR: &str = "error";
 pub const REASON_HOST_DOWN: &str = "host_down";
 pub const REASON_RATE_LIMITED: &str = "rate_limited";
 pub const REASON_QUOTA: &str = "quota";
+/// S7: another host (K2) adopted this handle; p5 stands down for it.
+pub const REASON_STOOD_DOWN: &str = "stood_down";
 
 /// CLI / test input for [`send_msg`].
 #[derive(Debug, Clone)]
@@ -86,7 +88,10 @@ impl MsgResponse {
         }
         match self.reason.as_deref() {
             Some(REASON_BAD_ADDRESS) | Some(REASON_TOO_LARGE) => EXIT_USAGE,
-            Some(REASON_GATED) | Some(REASON_NOT_CONNECTED) | Some(REASON_QUOTA) => EXIT_GATED,
+            Some(REASON_GATED)
+            | Some(REASON_NOT_CONNECTED)
+            | Some(REASON_QUOTA)
+            | Some(REASON_STOOD_DOWN) => EXIT_GATED,
             _ => EXIT_ERROR,
         }
     }
@@ -162,6 +167,9 @@ impl MsgResponse {
 pub struct SmContext {
     pub mailbox: Mailbox,
     pub homes: Homes,
+    /// S7 stand-downs. A stood-down handle is not local, not ours to send
+    /// from, and never received for.
+    pub adopted: Adopted,
     pub roster: Roster,
     /// Shared with the resident agent when one is running; never clone-and-forget.
     pub sessions: Arc<Mutex<SessionMap>>,
@@ -197,6 +205,7 @@ impl SmContext {
         Self {
             mailbox: Mailbox::new(&root),
             homes: Homes::new(),
+            adopted: Adopted::default(),
             roster: Roster::new(),
             sessions: Arc::new(Mutex::new(SessionMap::new())),
             local_recv: false,
@@ -220,6 +229,8 @@ impl SmContext {
         let mut ctx = Self::new(root);
         let root = ctx.mailbox.root();
         ctx.homes = Homes::load(root)?;
+        // An unreadable adopted.json fails the load: closed, not open.
+        ctx.adopted = Adopted::load(root)?;
         ctx.roster = Roster::load(root)?;
         ctx.local_recv = env_flag("P5_LOCAL_RECV");
         ctx.our_typ = load_our_typ(root);
@@ -249,7 +260,7 @@ impl SmContext {
     }
 
     pub fn dest_is_local(&self, addr: &PostalAddr) -> bool {
-        self.local_recv || self.homes.get(addr).is_some()
+        !self.adopted.is_stood_down(addr) && (self.local_recv || self.homes.get(addr).is_some())
     }
 
     pub fn live_session(&self, addr: &PostalAddr) -> Option<crate::session_map::LiveSession> {
@@ -355,6 +366,16 @@ pub fn send_msg(ctx: &SmContext, req: &MsgRequest) -> Result<MsgResponse, SmErro
         }
         Err(err) => return Err(err),
     };
+
+    if let Some(sd) = ctx.adopted.get(&from) {
+        return Ok(MsgResponse::fail(
+            None,
+            Some(&to),
+            None,
+            REASON_STOOD_DOWN,
+            format!("{} sends for {from} now; p5 stood down for it", sd.by),
+        ));
+    }
 
     if ctx.billing {
         match crate::billing::collect_with(
@@ -714,6 +735,14 @@ impl From<MailboxError> for ReceiveError {
 
 /// Inbound entry for the resident agent. Branch on **our** type (K22).
 pub fn receive_msg(ctx: &SmContext, inbound: &Inbound) -> Result<ReceiveOutcome, ReceiveError> {
+    // S7: the adopter receives for this handle (it pulls from hold), so the
+    // sender should hold, not retry us.
+    if ctx.adopted.is_stood_down(&inbound.to) {
+        return Err(permanent(
+            REASON_HOST_DOWN,
+            "this handle is adopted by another host; hold it",
+        ));
+    }
     if inbound_is_turn(ctx, inbound) {
         receive_turn(ctx, inbound)
     } else {
@@ -1241,6 +1270,52 @@ mod tests {
             .insert(home("scout::acme.postal.bot", wake, true))
             .unwrap();
         ctx
+    }
+
+    fn stand_down(ctx: &mut SmContext, a: &str) {
+        ctx.adopted.handles.insert(
+            a.into(),
+            p5_core::StandDown { by: "k2".into(), since: 1, key_exported_at: None },
+        );
+    }
+
+    #[test]
+    fn a_stood_down_handle_is_not_local_and_never_received_for() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        stand_down(&mut ctx, "scout::acme.postal.bot");
+        let to = addr("scout::acme.postal.bot");
+        assert!(!ctx.dest_is_local(&to));
+        let inbound = Inbound {
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            to: to.clone(),
+            from: addr("jarvis::other.postal.bot"),
+            body: "hi".into(),
+            mode: DeliveryMode::Live,
+            typ: PeerType::Session,
+            files: Vec::new(),
+            no_wake: false,
+        };
+        match receive_msg(&ctx, &inbound) {
+            Err(ReceiveError::Permanent { reason, .. }) => assert_eq!(reason, REASON_HOST_DOWN),
+            other => panic!("expected host_down, got {other:?}"),
+        }
+        assert!(ctx.mailbox.list_inbox(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn p5_refuses_to_send_from_a_stood_down_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_home(tmp.path(), true);
+        stand_down(&mut ctx, "scout::acme.postal.bot");
+        let mut req = msg("jarvis::other.postal.bot", "hi");
+        req.session_ids = vec!["sess-1".into()];
+        req.cwd = Some(PathBuf::from("/srv/scout"));
+        let resp = send_msg(&ctx, &req).unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.reason.as_deref(), Some(REASON_STOOD_DOWN));
+        assert_eq!(resp.exit_code(), EXIT_GATED);
+        assert!(ctx.mailbox.list_outbox().unwrap().is_empty());
     }
 
     fn msg(to: &str, body: &str) -> MsgRequest {
