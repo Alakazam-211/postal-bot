@@ -447,7 +447,8 @@ pub fn run_export_key(handle: String) -> Result<(), HandleError> {
 
 /// Checks, reads the key, marks every handle `key_exported_at`, and returns
 /// the PEM. Marking first means a failed write still blocks `resume`: the
-/// key may have gone out.
+/// key may have gone out. Re-running is allowed until `release-key` (it is
+/// the same key), so a failed pipe is never a dead end.
 pub fn export_key_at(root: &Path, handle: &str, now: i64) -> Result<String, HandleError> {
     let (addr, homes) = ours(root, handle)?;
     let mut adopted = Adopted::load(root)?;
@@ -706,6 +707,14 @@ mod tests {
         stand_down_at(tmp.path(), ROVER, "k2", 2).unwrap();
         let pem = export_key_at(tmp.path(), SCOUT, 3).unwrap();
         assert!(pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+        // A failed pipe isn't a dead end: export again, same key, until release.
+        assert_eq!(export_key_at(tmp.path(), SCOUT, 9).unwrap(), pem);
+        assert_eq!(export_key_at(tmp.path(), ROVER, 9).unwrap(), pem);
+        assert_eq!(
+            Adopted::load(tmp.path()).unwrap().handles[SCOUT].key_exported_at,
+            Some(3),
+            "the first export time stays"
+        );
         // Once the key is out, neither handle can resume.
         for h in [SCOUT, ROVER] {
             let err = resume_at(tmp.path(), h).unwrap_err();
