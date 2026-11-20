@@ -41,7 +41,7 @@ pub const LABEL_ENV: &str = "P5_TUNNEL_LABEL";
 pub const TOKEN_ENV: &str = "P5_CONNECT_TOKEN";
 /// Explicit `frpc` path (tests inject a stub).
 pub const FRPC_ENV: &str = "P5_FRPC";
-/// frps host override. Default is the shared k2e-01 relay.
+/// frps host override. Default is `frp.postal.bot`.
 pub const FRP_SERVER_ENV: &str = "P5_FRP_SERVER";
 /// frps bindPort override.
 pub const FRP_PORT_ENV: &str = "P5_FRP_PORT";

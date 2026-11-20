@@ -5,7 +5,7 @@
 #
 # Lands `p5` on PATH at /usr/local/bin or ~/.local/bin. Idempotent.
 # No GitHub login. Prefers a platform tarball; otherwise a source
-# tree + cargo (Cortana has rust, not a private clone).
+# tree + cargo (needs rustc/cargo on PATH, not a private clone).
 #
 # Local cargo (from a checkout):
 #   P5_LOCAL=1 ./install/install.sh

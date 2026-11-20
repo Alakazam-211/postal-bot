@@ -1,11 +1,14 @@
 //! Loopback inbound HTTP. Never binds a public address.
 
-use std::io::Read;
-use std::net::{SocketAddr, TcpListener};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 use p5_core::{DeliveryMode, PeerType, PostalAddr, Roster, Trust};
 use serde::Deserialize;
@@ -438,28 +441,72 @@ pub fn tls_paths(root: &Path) -> Result<Option<(PathBuf, PathBuf)>, String> {
     Ok(None)
 }
 
-fn ssl_config(cert: &Path, key: &Path) -> Result<tiny_http::SslConfig, String> {
-    let certificate = std::fs::read(cert).map_err(|e| format!("read P5_TLS_CERT: {e}"))?;
-    let private_key = std::fs::read(key).map_err(|e| format!("read P5_TLS_KEY: {e}"))?;
-    Ok(tiny_http::SslConfig {
-        certificate,
-        private_key,
-    })
+/// Loopback HTTP server. TLS is rustls 0.23 (ring 0.17); plaintext is tiny_http.
+pub enum HttpServer {
+    Plain(Server),
+    Tls {
+        listener: TcpListener,
+        config: Arc<ServerConfig>,
+    },
+}
+
+impl HttpServer {
+    pub fn unblock(&self) {
+        match self {
+            Self::Plain(s) => s.unblock(),
+            Self::Tls { listener, .. } => {
+                let _ = listener.set_nonblocking(true);
+                if let Ok(addr) = listener.local_addr() {
+                    let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(80));
+                }
+            }
+        }
+    }
+}
+
+fn ssl_config(cert: &Path, key: &Path) -> Result<Arc<ServerConfig>, String> {
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+        .map_err(|e| format!("read P5_TLS_CERT: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse P5_TLS_CERT: {e}"))?;
+    if certs.is_empty() {
+        return Err("P5_TLS_CERT has no certificates".into());
+    }
+    let key = PrivateKeyDer::from_pem_file(key).map_err(|e| format!("read P5_TLS_KEY: {e}"))?;
+    let cfg = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("tls cert/key: {e}"))?;
+    Ok(Arc::new(cfg))
 }
 
 pub fn bind_http(
     addr: SocketAddr,
-    ssl: Option<tiny_http::SslConfig>,
-) -> Result<(Server, SocketAddr), String> {
+    tls: Option<Arc<ServerConfig>>,
+) -> Result<(HttpServer, SocketAddr), String> {
     let listener = TcpListener::bind(addr).map_err(|e| format!("http bind {addr}: {e}"))?;
     let local = listener
         .local_addr()
         .map_err(|e| format!("http local addr: {e}"))?;
-    let server = Server::from_listener(listener, ssl).map_err(|e| format!("http server: {e}"))?;
+    let server = match tls {
+        Some(config) => HttpServer::Tls { listener, config },
+        None => {
+            let server =
+                Server::from_listener(listener, None).map_err(|e| format!("http server: {e}"))?;
+            HttpServer::Plain(server)
+        }
+    };
     Ok((server, local))
 }
 
-pub fn serve_http(server: Arc<Server>, state: Arc<AgentState>) {
+pub fn serve_http(server: Arc<HttpServer>, state: Arc<AgentState>) {
+    match &*server {
+        HttpServer::Plain(plain) => serve_plain(plain, state),
+        HttpServer::Tls { listener, config } => serve_tls(listener, config, state),
+    }
+}
+
+fn serve_plain(server: &Server, state: Arc<AgentState>) {
     while !state.stop.load(Ordering::Relaxed) {
         match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(mut request)) => {
@@ -522,6 +569,133 @@ pub fn serve_http(server: Arc<Server>, state: Arc<AgentState>) {
             }
         }
     }
+}
+
+fn serve_tls(listener: &TcpListener, config: &Arc<ServerConfig>, state: Arc<AgentState>) {
+    let _ = listener.set_nonblocking(true);
+    while !state.stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((tcp, _)) => {
+                let _ = tcp.set_nonblocking(false);
+                let Ok(conn) = ServerConnection::new(Arc::clone(config)) else {
+                    continue;
+                };
+                let mut stream = StreamOwned::new(conn, tcp);
+                match read_http_request(&mut stream) {
+                    Ok((method, url, headers, body)) => {
+                        let out = handle_http(&state, &method, &url, &headers, &body);
+                        let _ = write_http_response(&mut stream, &out);
+                    }
+                    Err(out) => {
+                        let _ = write_http_response(&mut stream, &out);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread_sleep();
+            }
+            Err(_) => {
+                if state.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread_sleep();
+            }
+        }
+    }
+}
+
+fn thread_sleep() {
+    std::thread::sleep(Duration::from_millis(50));
+}
+
+fn read_http_request<R: Read>(
+    r: &mut R,
+) -> Result<(String, String, Vec<(String, String)>, Vec<u8>), HttpOut> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    let header_end = loop {
+        let n = r
+            .read(&mut tmp)
+            .map_err(|_| HttpOut::json(400, json!({"error":"bad_request"})))?;
+        if n == 0 {
+            return Err(HttpOut::json(400, json!({"error":"bad_request"})));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        if buf.len() > 64 * 1024 {
+            return Err(HttpOut::json(431, json!({"error":"too_large"})));
+        }
+    };
+    let header_str = String::from_utf8_lossy(&buf[..header_end]);
+    let mut lines = header_str.split("\r\n");
+    let req = lines.next().unwrap_or("");
+    let mut parts = req.splitn(3, ' ');
+    let method = parts.next().unwrap_or("").to_string();
+    let url = parts.next().unwrap_or("/").to_string();
+    let mut headers = Vec::new();
+    let mut content_len: Option<usize> = None;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim();
+            let v = v.trim();
+            if k.eq_ignore_ascii_case("content-length") {
+                content_len = v.parse().ok();
+            }
+            headers.push((k.to_string(), v.to_string()));
+        }
+    }
+    let is_msg = method == "POST" && url.split('?').next().unwrap_or(&url) == "/p5/msg";
+    let cap = match content_len {
+        Some(n) if n > MAX_POST_BYTES => {
+            return Err(HttpOut::json(413, json!({"error":"too_large"})));
+        }
+        Some(n) => n,
+        None if is_msg => return Err(HttpOut::json(413, json!({"error":"too_large"}))),
+        None => 0,
+    };
+    let mut body = buf[header_end + 4..].to_vec();
+    while body.len() < cap {
+        let n = r
+            .read(&mut tmp)
+            .map_err(|_| HttpOut::json(400, json!({"error":"bad_request"})))?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&tmp[..n]);
+        if body.len() > MAX_POST_BYTES {
+            return Err(HttpOut::json(413, json!({"error":"too_large"})));
+        }
+    }
+    body.truncate(cap);
+    Ok((method, url, headers, body))
+}
+
+fn write_http_response<W: Write>(w: &mut W, out: &HttpOut) -> std::io::Result<()> {
+    let reason = match out.status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    let head = format!(
+        "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        out.status,
+        out.body.len()
+    );
+    w.write_all(head.as_bytes())?;
+    w.write_all(out.body.as_bytes())?;
+    w.flush()
 }
 
 fn check_post_length(len: Option<usize>) -> Result<usize, HttpOut> {
@@ -588,11 +762,11 @@ fn json_header() -> Header {
     Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).expect("header")
 }
 
-pub fn load_ssl_from_env() -> Result<Option<tiny_http::SslConfig>, String> {
+pub fn load_ssl_from_env() -> Result<Option<Arc<ServerConfig>>, String> {
     load_ssl(&p5_core::default_root())
 }
 
-pub fn load_ssl(root: &Path) -> Result<Option<tiny_http::SslConfig>, String> {
+pub fn load_ssl(root: &Path) -> Result<Option<Arc<ServerConfig>>, String> {
     match tls_paths(root)? {
         Some((cert, key)) => ssl_config(&cert, &key).map(Some),
         None => Ok(None),
@@ -1088,6 +1262,66 @@ mod tests {
         );
         let unauthorized = raw_http(addr, &bad);
         assert!(unauthorized.contains("401"), "{unauthorized}");
+
+        stop.stop.store(true, Ordering::Relaxed);
+        server.unblock();
+        serve.join().unwrap();
+    }
+
+    #[test]
+    fn tls_health() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut homes = Homes::new();
+        homes.insert(home_row()).unwrap();
+        homes.save(tmp.path()).unwrap();
+        let tunnel = tmp.path().join("tunnel");
+        std::fs::create_dir_all(&tunnel).unwrap();
+        let params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        std::fs::write(tunnel.join("cert.pem"), cert.pem()).unwrap();
+        std::fs::write(tunnel.join("key.pem"), key.serialize_pem()).unwrap();
+        let tls = load_ssl(tmp.path()).unwrap().expect("tls");
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (server, addr) = bind_http(bind, Some(tls)).unwrap();
+        let state = Arc::new(AgentState::new(tmp.path(), addr, Some("s3cret".into())));
+        let stop = Arc::clone(&state);
+        let server = Arc::new(server);
+        let serve = {
+            let server = Arc::clone(&server);
+            let state = Arc::clone(&state);
+            thread::spawn(move || serve_http(server, state))
+        };
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(
+                cert.der().as_ref().to_vec(),
+            ))
+            .unwrap();
+        let cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut conn = rustls::ClientConnection::new(
+            Arc::new(cfg),
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        let mut sock = TcpStream::connect(addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        {
+            let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+            tls.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut buf = Vec::new();
+            let _ = tls.read_to_end(&mut buf);
+            let body = String::from_utf8_lossy(&buf);
+            assert!(body.contains("200"), "{body}");
+            assert!(
+                body.contains("\"ok\":true") || body.contains("\"ok\": true"),
+                "{body}"
+            );
+        }
 
         stop.stop.store(true, Ordering::Relaxed);
         server.unblock();
