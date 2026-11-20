@@ -264,8 +264,18 @@
     </section>
 
     <article class="rel">
+      <h2>0.1.13</h2>
+      <p class="when">20 Nov 2026</p>
+      <p>Inbound TLS is rustls 0.23 (ring 0.17). Each connection runs on its own thread, with read and handshake timeouts, so a stalled client cannot hang the listen port. <code>frpc</code> downloads are checksum-pinned to the official v0.61.1 builds. Native p5 tarballs and the four standalone <code>frpc-*.tar.gz</code> files carry frp&rsquo;s Apache-2.0 <code>LICENSE</code> from that tag, byte for byte, as <code>frpc.LICENSE</code>. 0.1.11 and 0.1.12 were tagged and never shipped.</p>
+    </article>
+    <article class="rel">
+      <h2>0.1.12</h2>
+      <p class="when">never shipped</p>
+      <p>Tagged. Not released. Its TLS stack, frpc checksum pin, and licence files shipped in 0.1.13.</p>
+    </article>
+    <article class="rel">
       <h2>0.1.11</h2>
-      <p class="when">17 Nov 2026</p>
+      <p class="when">never shipped</p>
       <p>The tunnel now connects to <code>frp.postal.bot</code> by name, not a fixed address, so the relay can move without a new p5. <code>P5_FRP_SERVER</code> still overrides it. The tunnel writes a log to <code>~/.postal/tunnel/frpc.log</code>. Mail that couldn&rsquo;t be sent is retried on its own (<code>p5 outbox flush</code> to retry now). A friend&rsquo;s key is pinned: if it changes, nothing is delivered until you accept the new key with its code. K2 links use a key scoped to one workspace (<code>p5 k2 link &lt;ws&gt; --key-stdin</code>), and every line of K2 mail is quoted. The development secret works only in development builds, and never with the tunnel on.</p>
     </article>
     <article class="rel">

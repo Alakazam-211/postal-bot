@@ -6,11 +6,11 @@ Current cut: **0.1.13**. 0.1.11 and 0.1.12 were never shipped.
 
 ## 0.1.13
 
-Inbound TLS handles each connection on its own thread, with read and handshake timeouts, so a stalled client cannot hang the listen port. Native p5 tarballs and the four standalone `frpc-*.tar.gz` files carry frp's Apache-2.0 `LICENSE` from the v0.61.1 tag, byte for byte, as `frpc.LICENSE`.
+Inbound TLS is rustls 0.23 (ring 0.17). Each connection runs on its own thread, with read and handshake timeouts, so a stalled client cannot hang the listen port. `frpc` downloads are checksum-pinned to the official v0.61.1 builds. Native p5 tarballs and the four standalone `frpc-*.tar.gz` files carry frp's Apache-2.0 `LICENSE` from that tag, byte for byte, as `frpc.LICENSE`. 0.1.11 and 0.1.12 were tagged and never shipped.
 
 ## 0.1.12 — never shipped
 
-Tagged. Not released.
+Tagged. Not released. Its TLS stack, frpc checksum pin, and licence files shipped in 0.1.13.
 
 ## 0.1.11 — never shipped
 
