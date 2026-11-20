@@ -51,4 +51,4 @@ Human gate. `p5 pair add friend::their.postal.bot` then the owner accepts on htt
 - Markdown home: https://www.postal.bot/index.md
 - Markdown docs: https://www.postal.bot/docs.md
 - Skill: https://www.postal.bot/skills/first-run/SKILL.md
-- Current cut: 0.1.10 — https://www.postal.bot/whats-new.md
+- Current cut: 0.1.13 — https://www.postal.bot/whats-new.md

@@ -67,15 +67,16 @@ mkdir -p "${STAGE}/bin"
 cp "$BIN" "${STAGE}/bin/p5"
 chmod 755 "${STAGE}/bin/p5"
 
-# Licence texts Steward asked for in every native tarball.
+# Native tarball licence texts: p5 MIT, postal-sdk NOTICE, cargo-about THIRD-PARTY,
+# and frp's LICENSE from the v0.61.1 tag (byte for byte) as frpc.LICENSE.
 [ -f "${ROOT}/LICENSE" ] || { echo "pack-release: missing LICENSE" >&2; exit 1; }
 [ -f "${ROOT}/crates/postal-sdk/NOTICE" ] || { echo "pack-release: missing postal-sdk NOTICE" >&2; exit 1; }
 [ -f "${ROOT}/THIRD-PARTY.md" ] || { echo "pack-release: missing THIRD-PARTY.md (cargo about generate)" >&2; exit 1; }
-[ -f "${ROOT}/install/licenses/frpc.Apache-2.0" ] || { echo "pack-release: missing frpc Apache-2.0 text" >&2; exit 1; }
+[ -f "${ROOT}/install/licenses/frp.LICENSE" ] || { echo "pack-release: missing install/licenses/frp.LICENSE (frp v0.61.1 LICENSE)" >&2; exit 1; }
 cp "${ROOT}/LICENSE" "${STAGE}/bin/LICENSE"
 cp "${ROOT}/crates/postal-sdk/NOTICE" "${STAGE}/bin/NOTICE"
 cp "${ROOT}/THIRD-PARTY.md" "${STAGE}/bin/THIRD-PARTY"
-cp "${ROOT}/install/licenses/frpc.Apache-2.0" "${STAGE}/bin/frpc.LICENSE"
+cp "${ROOT}/install/licenses/frp.LICENSE" "${STAGE}/bin/frpc.LICENSE"
 
 # Bundle frpc (same origin as p5). Pin matches k2 / frpc.toml v0.61.
 # Checksums from https://github.com/fatedier/frp/releases/download/v0.61.1/frp_sha256_checksums.txt
@@ -120,7 +121,8 @@ fetch_frpc() {
     mkdir -p "$_out"
     cp "$_bin" "${_out}/frpc"
     chmod 755 "${_out}/frpc"
-    ( CDPATH= cd -- "$_out" && tar -czf "${DIST}/frpc-${_os}-${_arch}.tar.gz" frpc )
+    cp "${ROOT}/install/licenses/frp.LICENSE" "${_out}/frpc.LICENSE"
+    ( CDPATH= cd -- "$_out" && tar -czf "${DIST}/frpc-${_os}-${_arch}.tar.gz" frpc frpc.LICENSE )
     # Native p5 tarball also carries frpc so one extract is enough.
     if [ "p5-${_os}-${_arch}.tar.gz" = "$NATIVE" ]; then
         cp "${_out}/frpc" "${STAGE}/bin/frpc"

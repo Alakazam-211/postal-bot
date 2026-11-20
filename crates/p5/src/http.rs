@@ -32,6 +32,10 @@ pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// JSON envelope on top of [`p5_core::MAX_BODY_BYTES`].
 const MAX_POST_BYTES: usize = p5_core::MAX_BODY_BYTES as usize + 64 * 1024;
 
+/// Inbound TLS read / handshake timeout. The listen port is reachable
+/// through the tunnel, so a stalled client must not hold the accept loop.
+const TLS_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug)]
 pub enum BindError {
     Invalid(String),
@@ -589,20 +593,9 @@ fn serve_tls(listener: &TcpListener, config: &Arc<ServerConfig>, state: Arc<Agen
     while !state.stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((tcp, _)) => {
-                let _ = tcp.set_nonblocking(false);
-                let Ok(conn) = ServerConnection::new(Arc::clone(config)) else {
-                    continue;
-                };
-                let mut stream = StreamOwned::new(conn, tcp);
-                match read_http_request(&mut stream) {
-                    Ok((method, url, headers, body)) => {
-                        let out = handle_http(&state, &method, &url, &headers, &body);
-                        let _ = write_http_response(&mut stream, &out);
-                    }
-                    Err(out) => {
-                        let _ = write_http_response(&mut stream, &out);
-                    }
-                }
+                let config = Arc::clone(config);
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || handle_tls_conn(tcp, config, state));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread_sleep();
@@ -613,6 +606,25 @@ fn serve_tls(listener: &TcpListener, config: &Arc<ServerConfig>, state: Arc<Agen
                 }
                 thread_sleep();
             }
+        }
+    }
+}
+
+fn handle_tls_conn(tcp: TcpStream, config: Arc<ServerConfig>, state: Arc<AgentState>) {
+    let _ = tcp.set_nonblocking(false);
+    let _ = tcp.set_read_timeout(Some(TLS_IO_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(TLS_IO_TIMEOUT));
+    let Ok(conn) = ServerConnection::new(config) else {
+        return;
+    };
+    let mut stream = StreamOwned::new(conn, tcp);
+    match read_http_request(&mut stream) {
+        Ok((method, url, headers, body)) => {
+            let out = handle_http(&state, &method, &url, &headers, &body);
+            let _ = write_http_response(&mut stream, &out);
+        }
+        Err(out) => {
+            let _ = write_http_response(&mut stream, &out);
         }
     }
 }
@@ -1343,6 +1355,69 @@ mod tests {
         .unwrap();
         let mut sock = TcpStream::connect(addr).unwrap();
         sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        {
+            let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+            tls.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut buf = Vec::new();
+            let _ = tls.read_to_end(&mut buf);
+            let body = String::from_utf8_lossy(&buf);
+            assert!(body.contains("200"), "{body}");
+            assert!(
+                body.contains("\"ok\":true") || body.contains("\"ok\": true"),
+                "{body}"
+            );
+        }
+
+        stop.stop.store(true, Ordering::Relaxed);
+        server.unblock();
+        serve.join().unwrap();
+    }
+
+    #[test]
+    fn tls_stalled_client_does_not_block_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut homes = Homes::new();
+        homes.insert(home_row()).unwrap();
+        homes.save(tmp.path()).unwrap();
+        let tunnel = tmp.path().join("tunnel");
+        std::fs::create_dir_all(&tunnel).unwrap();
+        let params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        std::fs::write(tunnel.join("cert.pem"), cert.pem()).unwrap();
+        std::fs::write(tunnel.join("key.pem"), key.serialize_pem()).unwrap();
+        let tls = load_ssl(tmp.path()).unwrap().expect("tls");
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (server, addr) = bind_http(bind, Some(tls)).unwrap();
+        let state = Arc::new(AgentState::new(tmp.path(), addr, Some("s3cret".into())));
+        let stop = Arc::clone(&state);
+        let server = Arc::new(server);
+        let serve = {
+            let server = Arc::clone(&server);
+            let state = Arc::clone(&state);
+            thread::spawn(move || serve_http(server, state))
+        };
+
+        let _stalled = TcpStream::connect(addr).unwrap();
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(
+                cert.der().as_ref().to_vec(),
+            ))
+            .unwrap();
+        let cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut conn = rustls::ClientConnection::new(
+            Arc::new(cfg),
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        let mut sock = TcpStream::connect(addr).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        sock.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
         {
             let mut tls = rustls::Stream::new(&mut conn, &mut sock);
             tls.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
