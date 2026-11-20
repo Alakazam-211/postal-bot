@@ -82,7 +82,7 @@ cp "${ROOT}/install/licenses/frpc.Apache-2.0" "${STAGE}/bin/frpc.LICENSE"
 FRP_VER=0.61.1
 frp_sha256() {
     case "$1" in
-        darwin_arm64)  printf '%s\n' 3e65f13a17a284bd6013e6bb6856bc2720074cea6094cc446c1f4d3932154c2d ;;
+        darwin_arm64)  printf '%s\n' 3e65f13a17a284bd6013e6bb6856bc2720074cea6094cc446c1f4c3932154c2d ;;
         darwin_amd64)  printf '%s\n' 403a0ee5e92f083a863d984b7af1e9d70ba2aaa28e87f42f1fe085adf76b8491 ;;
         linux_amd64)   printf '%s\n' bff260b68ca7b1461182a46c4f34e9709ba32764eed30a15dd94ac97f50a2c40 ;;
         linux_arm64)   printf '%s\n' af6366f2b43920ebfe6235dba6060770399ed1fb18601e5818552bd46a7621f8 ;;
