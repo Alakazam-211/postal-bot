@@ -14,7 +14,7 @@ mod store;
 mod tools;
 mod types;
 
-pub use addr::{AddrError, PostalAddr};
+pub use addr::{is_base_label, AddrError, PostalAddr};
 pub use adopted::{Adopted, KeyReleased, StandDown, ADOPTED_FILE};
 pub use homes::{HomeRow, Homes};
 pub use mailbox::{

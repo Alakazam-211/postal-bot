@@ -100,23 +100,10 @@ pub(crate) fn normalize_label(label: &str) -> Result<String, SanError> {
     if label.is_empty() {
         return Err(SanError::EmptyLabel);
     }
-    if !is_base_label(&label) {
+    if !p5_core::is_base_label(&label) {
         return Err(SanError::InvalidLabel);
     }
     Ok(label)
-}
-
-fn is_base_label(label: &str) -> bool {
-    if label.len() < 3 || label.len() > 63 || label.contains('.') {
-        return false;
-    }
-    let bytes = label.as_bytes();
-    if !bytes[0].is_ascii_alphanumeric() || !bytes[label.len() - 1].is_ascii_alphanumeric() {
-        return false;
-    }
-    bytes
-        .iter()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
 #[cfg(test)]
@@ -134,7 +121,8 @@ mod tests {
             check_sans(&["ACME.POSTAL.BOT".into()]).unwrap(),
             "acme.postal.bot"
         );
-        assert_eq!(hostname_for_label("Www").unwrap(), "www.postal.bot");
+        assert_eq!(hostname_for_label("Z3").unwrap(), "z3.postal.bot");
+        assert_eq!(hostname_for_label("ab").unwrap(), "ab.postal.bot");
     }
 
     #[test]
@@ -190,7 +178,15 @@ mod tests {
             SanError::EmptyLabel
         );
         assert_eq!(
-            hostname_for_label("ab").unwrap_err(),
+            hostname_for_label("123").unwrap_err(),
+            SanError::InvalidLabel
+        );
+        assert_eq!(
+            hostname_for_label("a--b").unwrap_err(),
+            SanError::InvalidLabel
+        );
+        assert_eq!(
+            hostname_for_label("turn-x").unwrap_err(),
             SanError::InvalidLabel
         );
     }

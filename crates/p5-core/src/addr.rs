@@ -171,17 +171,31 @@ fn parse_host(host: &str) -> Result<String, AddrError> {
     Ok(host)
 }
 
-fn is_base_label(label: &str) -> bool {
-    if label.len() < 3 || label.len() > 63 || label.contains('.') {
+/// DNS 1–63 LDH. Same shape as `postal_sdk::address::is_label`: no `--`,
+/// not all digits, no `turn-` prefix. Dots stay unroutable (3-label guard).
+#[must_use]
+pub fn is_base_label(label: &str) -> bool {
+    if label.contains('.') {
         return false;
     }
-    let bytes = label.as_bytes();
-    if !bytes[0].is_ascii_alphanumeric() || !bytes[label.len() - 1].is_ascii_alphanumeric() {
+    let b = label.as_bytes();
+    if b.is_empty() || b.len() > 63 {
         return false;
     }
-    bytes
-        .iter()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+    let edge = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    if !edge(b[0]) || !edge(b[b.len() - 1]) {
+        return false;
+    }
+    if !b.iter().all(|&c| edge(c) || c == b'-') {
+        return false;
+    }
+    if b.windows(2).any(|w| w == b"--") {
+        return false;
+    }
+    if b.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    !label.starts_with("turn-")
 }
 
 #[cfg(test)]
@@ -291,7 +305,9 @@ mod tests {
     #[test]
     fn reject_invalid_handle_and_host_shapes() {
         let cases = [
-            ("scout::ab.postal.bot", AddrError::InvalidHost),
+            ("scout::123.postal.bot", AddrError::InvalidHost),
+            ("scout::a--b.postal.bot", AddrError::InvalidHost),
+            ("scout::turn-x.postal.bot", AddrError::InvalidHost),
             ("scout::acme.k2.dev", AddrError::InvalidHost),
             ("scout!::acme.postal.bot", AddrError::InvalidHandle),
             ("bad.handle::acme.postal.bot", AddrError::InvalidHandle),
@@ -304,11 +320,18 @@ mod tests {
     }
 
     #[test]
-    fn accept_three_char_label() {
-        let addr = PostalAddr::parse("scout::www.postal.bot", None).unwrap();
-        assert_eq!(addr.host(), "www.postal.bot");
-        assert_eq!(addr.to_string(), "scout::www.postal.bot");
-        assert_eq!(addr.live_base_url(), "https://www.postal.bot");
+    fn accept_short_dns_labels() {
+        for host in ["z3.postal.bot", "ab.postal.bot", "a.postal.bot"] {
+            let addr = PostalAddr::parse(&format!("scout::{host}"), None).unwrap();
+            assert_eq!(addr.host(), host);
+            assert_eq!(addr.to_string(), format!("scout::{host}"));
+            assert_eq!(addr.live_base_url(), format!("https://{host}"));
+        }
+        assert!(is_base_label("z3"));
+        assert!(is_base_label("www"));
+        assert!(!is_base_label("123"));
+        assert!(!is_base_label("a--b"));
+        assert!(!is_base_label("turn-x"));
     }
 
     #[test]

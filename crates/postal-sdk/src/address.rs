@@ -12,6 +12,48 @@ use std::str::FromStr;
 pub const ZONE: &str = "postal.bot";
 /// Longest handle.
 pub const MAX_HANDLE: usize = 64;
+/// DNS label floor and ceiling (RFC 1035).
+pub const MIN_LABEL: usize = 1;
+pub const MAX_LABEL: usize = 63;
+/// TURN host prefix. Copied from k2-dev-web `RESERVED_LABEL_PREFIXES`.
+pub const TURN_PREFIX: &str = "turn-";
+/// Labels that may not be claimed. Copied from k2-dev-web `RESERVED_LABELS`
+/// (`af91dee`, the 1–63 plane rule).
+pub const RESERVED_LABELS: &[&str] = &[
+    "www",
+    "api",
+    "app",
+    "admin",
+    "dashboard",
+    "account",
+    "billing",
+    "k2",
+    "k2c",
+    "connect",
+    "mail",
+    "smtp",
+    "ns1",
+    "ns2",
+    "status",
+    "help",
+    "support",
+    "blog",
+    "docs",
+    "k2-relay-probe",
+    "cert",
+    "relay",
+    "edge",
+    "frps",
+    "db",
+    "db-staging",
+    "supabase",
+    "dl",
+    "postal",
+    "postalbot",
+    "frp",
+    "acme",
+    "probe",
+];
 
 /// A canonical Postal address.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -24,7 +66,9 @@ impl Address {
     /// Parse `handle::label.postal.bot`.
     ///
     /// - handle: 1–64 of `[a-z0-9_-]`, starting with `[a-z0-9]`;
-    /// - label: 3–63 of `[a-z0-9-]`, starting and ending with `[a-z0-9]`;
+    /// - label: DNS 1–63 of `[a-z0-9-]`, starting and ending with `[a-z0-9]`,
+    ///   no `--`, not all digits, not `turn-…` (see [`is_label`]);
+    ///   hostname claim also uses [`is_claimable_label`] / [`RESERVED_LABELS`];
     /// - exactly one `::`, and the host is exactly `<label>.postal.bot`.
     ///
     /// # Errors
@@ -117,7 +161,7 @@ impl fmt::Display for AddressError {
         f.write_str(match self {
             Self::Separator => "address must be handle::label.postal.bot",
             Self::Handle => "handle must be 1-64 of a-z 0-9 _ -, starting a-z or 0-9",
-            Self::Host => "host must be <label>.postal.bot (label 3-63 of a-z 0-9 -)",
+            Self::Host => "host must be <label>.postal.bot (DNS label 1-63)",
         })
     }
 }
@@ -132,13 +176,42 @@ fn is_handle(h: &str) -> bool {
             .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
 }
 
-fn is_label(l: &str) -> bool {
+/// A Postal / Connect base label. Same DNS shape K2 0.46.17 and plane
+/// `validateLabel` use: 1–63 LDH, no `--`, not all digits, no `turn-` prefix.
+/// Hostname **claim** also consults [`RESERVED_LABELS`] via [`is_claimable_label`].
+/// [`Address::parse`] uses this (so live labels like `z3` register and pair).
+#[must_use]
+pub fn is_label(l: &str) -> bool {
     let b = l.as_bytes();
+    if !(MIN_LABEL..=MAX_LABEL).contains(&b.len()) {
+        return false;
+    }
     let edge = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
-    (3..=63).contains(&b.len())
-        && edge(b[0])
-        && edge(b[b.len() - 1])
-        && b.iter().all(|&c| edge(c) || c == b'-')
+    if !edge(b[0]) || !edge(b[b.len() - 1]) {
+        return false;
+    }
+    if !b.iter().all(|&c| edge(c) || c == b'-') {
+        return false;
+    }
+    if b.windows(2).any(|w| w == b"--") {
+        return false;
+    }
+    if b.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    !l.starts_with(TURN_PREFIX)
+}
+
+/// Plane reserved names. Copied from k2-dev-web `RESERVED_LABELS` (`af91dee`).
+#[must_use]
+pub fn is_reserved_label(l: &str) -> bool {
+    RESERVED_LABELS.contains(&l)
+}
+
+/// A label that may be claimed as a hostname: [`is_label`] and not reserved.
+#[must_use]
+pub fn is_claimable_label(l: &str) -> bool {
+    is_label(l) && !is_reserved_label(l)
 }
 
 #[cfg(test)]
@@ -149,6 +222,9 @@ mod tests {
     fn canonical_addresses_parse_and_round_trip() {
         for s in [
             "scout::acme.postal.bot",
+            "scout::z3.postal.bot",
+            "scout::ab.postal.bot",
+            "scout::a.postal.bot",
             "a::abc.postal.bot",
             "0_x-y::a-1.postal.bot",
             &format!("{}::{}.postal.bot", "h".repeat(64), "l".repeat(63)),
@@ -186,7 +262,6 @@ mod tests {
             "scout::acme",
             "scout::postal.bot",
             "scout::.postal.bot",
-            "scout::ab.postal.bot",
             "scout::-ab.postal.bot",
             "scout::ab-.postal.bot",
             "scout::a.b.postal.bot",
@@ -199,5 +274,42 @@ mod tests {
             assert!(Address::parse(s).is_err(), "{s:?}");
         }
         assert!(serde_json::from_str::<Address>("\"Scout::acme.postal.bot\"").is_err());
+    }
+
+    #[test]
+    fn dns_labels_one_to_sixty_three() {
+        assert!(is_label("z3"));
+        assert!(is_label("ab"));
+        assert!(is_label("a"));
+        assert!(is_label("a-1"));
+        assert!(is_label(&"x".repeat(63)));
+        assert!(!is_label(""));
+        assert!(!is_label(&"x".repeat(64)));
+        assert!(!is_label("123"));
+        assert!(!is_label("42"));
+        assert!(!is_label("a--b"));
+        assert!(!is_label("-ab"));
+        assert!(!is_label("ab-"));
+        assert!(!is_label("turn-x"));
+        assert!(!is_label("a_b"));
+        assert!(!is_label("AB"));
+        assert!(is_label("www"));
+        assert!(!is_claimable_label("www"));
+        assert!(!is_claimable_label("acme"));
+        assert!(!is_claimable_label("postal"));
+        assert!(!is_claimable_label("frp"));
+        assert!(!is_claimable_label("cert"));
+        assert!(is_claimable_label("z3"));
+        assert!(is_claimable_label("ab"));
+        assert!(Address::parse("scout::z3.postal.bot").is_ok());
+        assert!(Address::parse("scout::ab.postal.bot").is_ok());
+        assert!(Address::parse("scout::acme.postal.bot").is_ok());
+        for s in [
+            "scout::123.postal.bot",
+            "scout::a--b.postal.bot",
+            "scout::turn-x.postal.bot",
+        ] {
+            assert!(Address::parse(s).is_err(), "{s:?}");
+        }
     }
 }

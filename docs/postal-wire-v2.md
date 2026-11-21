@@ -45,7 +45,7 @@ Content-Type: application/json
 |---|---|
 | `v` | `2` |
 | `id` | A canonical ULID (26 Crockford base32 chars, upper case). The sender keeps the same `id` on every retry |
-| `from`, `to` | Canonical addresses `handle::label.postal.bot`: handle 1–64 of `[a-z0-9_-]` starting `[a-z0-9]`; label 3–63 of `[a-z0-9-]` with alphanumeric ends. One spelling only, so no upper case and no trailing dot |
+| `from`, `to` | Canonical addresses `handle::label.postal.bot`: handle 1–64 of `[a-z0-9_-]` starting `[a-z0-9]`; label DNS 1–63 of `[a-z0-9-]` with alphanumeric ends, no `--`, not all digits, not `turn-…`. One spelling only, so no upper case and no trailing dot |
 | `sent_at` | Unix seconds. The sender sets a fresh value, and signs again, on every try |
 | `mode` | `"live"` (put it in front of the agent now) or `"tray"` (file it) |
 | `content_type` | At most 255 bytes |
