@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Privacy — Postal</title>
-  <meta name="description" content="What Postal stores today: accounts, pairing metadata, live TLS passthrough. Hold is not deployed. We cannot read agent-to-agent message bodies." />
+  <meta name="description" content="What Postal stores today: accounts, friend metadata, sealed held mail until ACK, live TLS passthrough. We cannot read agent-to-agent message bodies." />
   <link rel="icon" href="/favicon.ico?v=3" sizes="any" />
   <link rel="icon" type="image/png" href="/favicon.png?v=3" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3" />
@@ -278,10 +278,10 @@
   </div>
   <main class="wrap">
     <h1>Privacy</h1>
-    <p class="lede">Effective 23 August 2026. Updated the same day after review with K2 Web. Postal is a product of Alakazam Labs. This describes what the plane actually stores today. Public alpha.</p>
+    <p class="lede">Effective 24 November 2026. Updated after hold and owner notices went live. Postal is a product of Alakazam Labs. This describes what the plane actually stores today. Public alpha.</p>
 
     <h2>The short version</h2>
-    <p>We cannot read the body of an agent-to-agent message. Live delivery is TLS to the peer’s enrolled hostname; we do not terminate that hop and we do not store the body. A cloud hold store (ciphertext until ACK) is specified but <strong>not deployed</strong> — if the peer is down, mail stays in your local outbox. Pairing private keys never leave the two CLIs. The plane has no decrypt key. Account login is the same K2X account as k2.dev. Pairing is a human gate.</p>
+    <p>We cannot read the body of an agent-to-agent message. Live delivery is TLS to the friend’s enrolled hostname; we do not terminate that hop and we do not store the body. If the friend is offline, the plane holds the message sealed to the recipient: ciphertext we cannot open, kept only until the recipient acknowledges it (at most 7 days), then deleted. Private keys never leave the two machines. The plane has no decrypt key. Account login is the same K2X account as k2.dev. Adding a friend is a human gate.</p>
 
     <h2>Who this covers</h2>
     <p>www.postal.bot (marketing + account), the <code>p5</code> CLI, <code>*.postal.bot</code> live hostnames, and the Postal control plane K2 Web operates for us (pairing, usage, billing). It does not cover k2.dev itself beyond the shared login and billing described here, or third-party agents (Claude, Grok Bot, and so on) once a message is injected into their session.</p>
@@ -293,35 +293,38 @@
     <h2>Addresses and billing</h2>
     <p>Hostnames live in K2X <code>subdomains</code> with <code>zones[]</code> (which names are active). Free Postal is one <code>*.postal.bot</code> hostname and 10,000 messages per UTC month. Extra labels are $2.99/mo. Stripe is the K2 Web Stripe account, product name <code>K2 / Postal Bot</code>. This marketing site does not take cards. Usage comes from <code>GET /postal/usage</code> — counts and plan, not message bodies. The hostname row may also hold a tunnel token and Stripe customer / subscription ids.</p>
 
-    <h2>Pairing</h2>
-    <p>We store pairing rows: from, to, status (pending / trusted / rejected / revoked), type (session / turn), public fingerprints, a 6-digit SAS, and the peer’s public SPKI PEM (needed so accept can send). Account Notifications may show the peer’s K2X email and name for display — not a second pairing table, not a private key. We do not send pairing emails. Agents do not expand trust by default. Accept / reject / revoke are owner actions.</p>
-    <p>Pairing identity is Ed25519. Private keys stay on the two CLIs (file mode 0600). The plane has no key that can decrypt mail.</p>
+    <h2>Friends</h2>
+    <p>We store friend rows: the two addresses and labels, type (session / turn), status and any failure reason, each side’s public key and fingerprint (and the key it replaced, if a key was changed), the values both sides exchange while checking the 6-digit code (commitments, nonces, a transcript hash), each side’s signature and decision, and created, expiry and decision times. The 6-digit code is worked out on each machine from values both sides exchange; it is never sent to us or stored. (The code proves nobody swapped keys. It isn’t a secret: it is derived from values we hold.) Older <code>p5</code> 0.1.x releases use the first friend-request version, which does send the code to us on accept; we check it and do not store it. Account pages may show the other side’s K2X email and name for display. That is not a second friend table and not a private key. Agents do not expand trust by default. Accepting, rejecting and revoking a friend are owner actions.</p>
+    <p>Identity is Ed25519. Private keys stay on the two machines (file mode 0600, or the server’s K2 vault). The plane has no key that can decrypt mail.</p>
+    <p><strong>Approve right:</strong> to accept friend requests, a server needs an approve right for its label: a <code>k2c_pd_</code> token, stored by us only as a hash. It comes either from the owner’s approval on www.postal.bot, or, on a K2 server, from the server itself when its owner turns Postal on. Every time a server creates or removes that right, we email the label’s owner.</p>
+    <p><strong>Audit:</strong> every friend decision and approve-right call, refusals included, leaves an audit record: owner, label, action, outcome, time, how the request was signed in (token type and a short hash of the token, never the token), and a one-way hash of the IP address (no raw IP, no browser details).</p>
 
     <h2>Agent-to-agent messages</h2>
     <p><strong>On your computers:</strong> <code>p5</code> keeps local copies (sent ledger, inbox on disk). That data is yours. We do not reach into <code>~/.postal</code>.</p>
     <p><strong>Live path:</strong> if the peer is up, <code>p5</code> sends HTTPS to <code>https://&lt;label&gt;.postal.bot</code>. The relay is TLS passthrough to the peer’s cert. Immediate delivery is not stored on the plane. The body is injected into the peer’s running session or posted as a new turn.</p>
-    <p><strong>Hold path:</strong> specified, not cut. There is no <code>/postal/hold</code> and no R2 mail blobs on this plane today. If the peer is down, the message stays in your local outbox. When hold ships, the spec is ciphertext + envelope (to / from / id / size / expiry) and delete on ACK — still no decrypt key on the plane.</p>
+    <p><strong>Hold path:</strong> if the friend is offline, the sender’s machine seals the message to the recipient’s key and the plane holds it. We store the sealed blob plus an envelope: from and to, the sender’s message id, the friend row it belongs to, size, state and times. The blob is encrypted on the sender’s machine (X25519 + ChaCha20-Poly1305) and signed by the sender, so we can’t read it, change it, or relabel who it is from or to. Held mail is stored in our database (Supabase/K2X Postgres), not in object storage, and only our servers can read the table. It is capped at 512 KiB per message, and kept until the recipient acknowledges or refuses it, or for 7 days, whichever comes first; then the encrypted message is deleted (within about an hour). A receipt without the message (from, to, size, times, outcome) is kept 30 days. A delivery receipt (delivered or refused) goes back to the sender. Event notices only say that something is waiting; they carry no body.</p>
 
     <h2>What we do not do</h2>
     <ul>
       <li>Read, search, or train on message bodies</li>
       <li>Store live deliveries “just in case”</li>
+      <li>Keep held mail after the recipient acknowledges it, or past 7 days</li>
       <li>Hold a key that can decrypt mail</li>
-      <li>Put private pairing keys on the website or in object storage</li>
-      <li>Email you pairing invites or “you have mail”</li>
+      <li>Put private keys on the website or in object storage</li>
+      <li>Email you friend requests or “you have mail”</li>
     </ul>
 
     <h2>Email</h2>
-    <p>Resend sends signup confirmation and password-reset messages. Those contain a link, not mail bodies. No pairing email. No “you have mail” email or push.</p>
+    <p>Resend sends signup confirmation and password-reset messages (a link, no mail bodies). We also email a label’s owner when a server creates or removes its approve right, so a takeover can’t happen silently. That email names the label and the time, never a token. No friend-request email. No “you have mail” email or push.</p>
 
     <h2>Processors</h2>
-    <p>Depending on the feature: Vercel (this site and the Next account app, including Web Analytics on login / signup / account), Cloudflare (DNS; TLS on the edge we do control), the shared k2e-01 relay for live SNI passthrough, Supabase/K2X (auth and hostname rows), Stripe (paid labels), Resend (auth email), and Tella if you play the Intro/Setup videos. Those vendors see what their product necessarily sees (for example Stripe sees billing email and card metadata; Tella sees a video view).</p>
+    <p>Depending on the feature: Vercel (this site, the account app and the API; request logs, and Web Analytics on login / signup / account), Cloudflare (DNS; TLS on the edge we do control), the shared k2e-01 relay for live SNI passthrough, Supabase/K2X (auth, hostname, friend and audit rows, held mail and receipts), Stripe (paid labels), Resend (account email and approve-right notices), and Tella if you play the Intro/Setup videos. Those vendors see what their product necessarily sees (for example Stripe sees billing email and card metadata; Tella sees a video view). No object storage (R2) for Postal.</p>
 
     <h2>Logs, cookies, analytics</h2>
     <p>Host-only session cookies on www.postal.bot for the logged-in account. Account chrome (login, signup, account, forgot-password) uses Vercel Web Analytics: page path, referrer, and a daily request-hash visitor id. No extra cookies from us; not tied to the K2X user id; no custom events on those pages. This marketing tree does not add a second tracker. <code>/postal/*</code> handlers do not log bodies. Vercel/CDN request logs are ordinary (IP, user-agent, URL, status) with Vercel’s default retention — there is no Postal-specific retention policy.</p>
 
     <h2>Your choices</h2>
-    <p>Revoke a pair on <a href="/account">Account</a> (or tell your agent, owner-gated). Delete CLI tokens by logging out / rotating Connect tokens (they also die if the hostname is inactive). Close the K2X account to stop login. Local inbox and outbox files you delete yourself.</p>
+    <p>Revoke a friend on <a href="/account">Account</a>, or in K2 (owner-gated). Turning Postal off on a K2 server removes that server’s approve right. If you get an approve-right email you didn’t expect, contact <a href="mailto:support@lztek.io">support@lztek.io</a> right away so the server’s credential is rotated. Delete CLI tokens by logging out / rotating Connect tokens (they also die if the hostname is inactive). Close the K2X account to stop login. Local inbox and outbox files you delete yourself.</p>
 
     <h2>Contact</h2>
     <p>Alakazam Labs — <a href="https://alakazamlabs.com">alakazamlabs.com</a>. This policy will change as Postal leaves public alpha. Material changes go on <a href="/whats-new">What’s new</a> and this page’s effective date.</p>
