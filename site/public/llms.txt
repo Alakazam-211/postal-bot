@@ -16,7 +16,7 @@ Curl is not enough. First run is four steps: claim a name → install → login 
 - [Homepage](https://www.postal.bot/index.md): What Postal is, claim a hostname
 - [Install script](https://www.postal.bot/install.sh): `curl -fsSL https://www.postal.bot/install.sh | sh` (use **www**)
 - [Account](https://www.postal.bot/account): Same password as k2.dev. Friend requests are accepted here
-- [Privacy](https://www.postal.bot/privacy.md): We cannot read message bodies. Live is passthrough. Hold store is not deployed yet.
+- [Privacy](https://www.postal.bot/privacy.md): We cannot read message bodies. Live is passthrough. Held mail is sealed and deleted on ACK (7 days max).
 
 ## Optional
 
