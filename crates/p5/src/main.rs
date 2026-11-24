@@ -115,7 +115,9 @@ enum Commands {
         #[command(subcommand)]
         action: HandleAction,
     },
-    /// Pairing (plane). `add` may request; accept/reject/revoke are owner-gated
+    /// Friends (plane). `add` sends a friend request; accept/reject/revoke
+    /// are owner-gated
+    #[command(visible_alias = "friend")]
     Pair {
         #[command(subcommand)]
         action: PairAction,
@@ -231,7 +233,7 @@ enum HandleAction {
 
 #[derive(Debug, Subcommand)]
 enum PairAction {
-    /// Request a pair (also publishes `/postal/me`)
+    /// Add a friend: sends a friend request (also publishes `/postal/me`)
     Add {
         /// Peer `handle::sub.postal.bot`
         addr: String,
@@ -947,6 +949,26 @@ fn run_k2(action: K2Action) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn friend_is_an_alias_for_pair() {
+        for word in ["pair", "friend"] {
+            let cli = Cli::try_parse_from(["p5", word, "add", "scout::acme.postal.bot"]).unwrap();
+            match cli.command {
+                Commands::Pair {
+                    action: PairAction::Add { addr, typ: None },
+                } => assert_eq!(addr, "scout::acme.postal.bot"),
+                other => panic!("{word}: {other:?}"),
+            }
+        }
+        let cli = Cli::try_parse_from(["p5", "friend", "accept", "pr_1"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Pair {
+                action: PairAction::Accept { .. }
+            }
+        ));
+    }
 
     #[test]
     fn whoami_is_stub_identity() {
