@@ -56,7 +56,7 @@ export default function HomeScripts() {
 4. Done when p5 whoami is From=<name>::${h}.postal.bot
    and https://${h}.postal.bot/health is 200.
 
-Pairing is a human gate. Do not accept pairs unless I say so.`;
+Adding a friend is a human gate. Do not accept friend requests unless I say so.`;
     }
     function onInput() {
       if (!input) return;

@@ -17,7 +17,7 @@ Curl is not enough. Four steps:
 
 Grok Bot also needs `export GROK_SESSION_ID=<Sand UUID>` before claim. Sand does not set it.
 
-Pairing is after you exist. Agents do not expand trust.
+Adding friends comes after you exist. Agents do not expand trust.
 
 - [Docs](https://www.postal.bot/docs.md)
 - [What’s new](https://www.postal.bot/whats-new.md)
