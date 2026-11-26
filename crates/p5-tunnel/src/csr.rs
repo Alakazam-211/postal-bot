@@ -62,6 +62,27 @@ pub fn cert_path(root: &Path) -> std::path::PathBuf {
     root.join(TUNNEL_DIR).join(TUNNEL_CERT_FILE)
 }
 
+/// Renew the leaf when it has less than this left (or can't be read).
+pub const RENEW_BEFORE_SECS: i64 = 30 * 24 * 3600;
+
+/// Seconds until the leaf at `tunnel/cert.pem` expires (negative once it
+/// has). None when the file is missing or isn't a PEM certificate.
+pub fn cert_secs_left(root: &Path, now_unix: i64) -> Option<i64> {
+    let pem = std::fs::read(cert_path(root)).ok()?;
+    let (_, block) = x509_parser::pem::parse_x509_pem(&pem).ok()?;
+    let cert = block.parse_x509().ok()?;
+    Some(cert.validity().not_after.timestamp() - now_unix)
+}
+
+/// Whether the leaf needs a new CSR: missing, unreadable, expired, or
+/// expiring within [`RENEW_BEFORE_SECS`].
+pub fn cert_needs_renewal(root: &Path, now_unix: i64) -> bool {
+    match cert_secs_left(root, now_unix) {
+        Some(left) => left < RENEW_BEFORE_SECS,
+        None => true,
+    }
+}
+
 fn tunnel_dir(root: &Path) -> std::path::PathBuf {
     root.join(TUNNEL_DIR)
 }

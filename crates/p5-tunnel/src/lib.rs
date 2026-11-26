@@ -145,9 +145,14 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
         Ok(k) => k,
         Err(err) => return TunnelHandle::down(err.to_string()),
     };
-    let reuse = csr::cert_path(opts.root).is_file()
-        && csr::key_path(opts.root).is_file()
-        && !env_truthy(REISSUE_ENV);
+    // Reuse the leaf while it has 30+ days left; otherwise ask the broker
+    // for a new one (same key). A failed renewal keeps the old leaf.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let has_leaf = csr::cert_path(opts.root).is_file() && csr::key_path(opts.root).is_file();
+    let reuse = has_leaf && !env_truthy(REISSUE_ENV) && !csr::cert_needs_renewal(opts.root, now);
     if !reuse {
         let csr = match build_csr_pem(&label, &key) {
             Ok(c) => c,
@@ -161,12 +166,17 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
             .map(str::to_string)
             .unwrap_or_else(broker_url);
         let token = opts.token.unwrap_or("");
-        let cert = match request_cert_at(&url, &csr, &label, token) {
-            Ok(c) => c,
+        match request_cert_at(&url, &csr, &label, token) {
+            Ok(cert) => {
+                if let Err(err) = csr::install_cert(opts.root, &cert) {
+                    return TunnelHandle::down(err.to_string());
+                }
+            }
+            // Renewing: keep serving the old leaf and try again next start.
+            Err(err) if has_leaf => {
+                eprintln!("postal: tunnel cert renewal failed, keeping the current one: {err}");
+            }
             Err(err) => return TunnelHandle::down(err.to_string()),
-        };
-        if let Err(err) = csr::install_cert(opts.root, &cert) {
-            return TunnelHandle::down(err.to_string());
         }
     }
 
@@ -324,6 +334,84 @@ mod tests {
         format!("http://127.0.0.1:{port}/cert")
     }
 
+    /// A self-signed leaf for acme.postal.bot that expires on 1 Jan `year`.
+    fn leaf_pem(year: i32) -> String {
+        let mut p = rcgen::CertificateParams::new(vec!["acme.postal.bot".into()]).unwrap();
+        p.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        p.not_after = rcgen::date_time_ymd(year, 1, 1);
+        let kp = rcgen::KeyPair::generate().unwrap();
+        p.self_signed(&kp).unwrap().pem()
+    }
+
+    #[test]
+    fn cert_expiry_drives_renewal() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::csr::load_or_generate_key(tmp.path()).unwrap();
+        let now = 1_795_000_000; // Nov 2026
+        assert!(crate::csr::cert_needs_renewal(tmp.path(), now), "missing");
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem(2099)).unwrap();
+        assert!(!crate::csr::cert_needs_renewal(tmp.path(), now));
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem(2026)).unwrap();
+        assert!(crate::csr::cert_needs_renewal(tmp.path(), now), "expired");
+        // 20 days before expiry is inside the 30-day window; 40 is not.
+        let expiry = now + crate::csr::cert_secs_left(tmp.path(), now).unwrap();
+        assert!(crate::csr::cert_needs_renewal(tmp.path(), expiry - 20 * 86_400));
+        assert!(!crate::csr::cert_needs_renewal(tmp.path(), expiry - 40 * 86_400));
+        std::fs::write(crate::csr::cert_path(tmp.path()), "junk").unwrap();
+        assert!(crate::csr::cert_needs_renewal(tmp.path(), now), "unreadable");
+    }
+
+    #[test]
+    fn expired_leaf_is_renewed_from_the_broker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = stub_frpc(tmp.path());
+        crate::csr::load_or_generate_key(tmp.path()).unwrap();
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem(2026)).unwrap();
+        let fresh = leaf_pem(2099);
+        let body = serde_json::json!({ "cert": fresh }).to_string();
+        let url = spawn_mock_broker("200 OK", &body);
+        let mut h = try_start(StartOpts {
+            root: tmp.path(),
+            label: "acme",
+            local_port: 8443,
+            broker_url: Some(&url),
+            token: Some("tok"),
+            frpc: Some(&stub),
+            server_addr: Some("127.0.0.1"),
+            server_port: Some(7000),
+        });
+        assert!(h.is_up(), "{:?}", h.reason());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(!crate::csr::cert_needs_renewal(tmp.path(), now), "new leaf installed");
+        h.stop();
+    }
+
+    #[test]
+    fn failed_renewal_keeps_the_old_leaf_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = stub_frpc(tmp.path());
+        crate::csr::load_or_generate_key(tmp.path()).unwrap();
+        let old = leaf_pem(2026);
+        std::fs::write(crate::csr::cert_path(tmp.path()), &old).unwrap();
+        let url = spawn_mock_broker("503 Service Unavailable", r#"{"error":"down"}"#);
+        let mut h = try_start(StartOpts {
+            root: tmp.path(),
+            label: "acme",
+            local_port: 8443,
+            broker_url: Some(&url),
+            token: Some("tok"),
+            frpc: Some(&stub),
+            server_addr: Some("127.0.0.1"),
+            server_port: Some(7000),
+        });
+        assert!(h.is_up(), "{:?}", h.reason());
+        assert_eq!(std::fs::read_to_string(crate::csr::cert_path(tmp.path())).unwrap(), old);
+        h.stop();
+    }
+
     #[test]
     fn start_from_env_disabled_is_down() {
         let _g = env_lock();
@@ -372,11 +460,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stub = stub_frpc(tmp.path());
         crate::csr::load_or_generate_key(tmp.path()).unwrap();
-        std::fs::write(
-            crate::csr::cert_path(tmp.path()),
-            "-----BEGIN CERTIFICATE-----\nUEs=\n-----END CERTIFICATE-----\n",
-        )
-        .unwrap();
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem(2099)).unwrap();
         let dead = {
             let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let p = l.local_addr().unwrap().port();
