@@ -14,6 +14,11 @@
 //! connect (primary, then standby). If the fetch fails it uses that copy; with
 //! no list at all it dials `frp.postal.bot`. `P5_FRP_SERVER` skips all this.
 //! The list is read again whenever the agent starts the tunnel.
+//!
+//! The token goes only to an https base (loopback http for tests), never
+//! across a redirect, and only to relays under postal.bot, k2.dev or k5.dev
+//! (or the relay IPs listed below). If no listed relay answers, p5 tries
+//! `frp.postal.bot` before settling on the primary.
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -68,11 +73,41 @@ impl RelayList {
     }
 }
 
+/// Relay names p5 will dial: frpc sends the tunnel token to the relay, so a
+/// bad cache or plane answer must not be able to point it anywhere else.
+const RELAY_DOMAINS: &[&str] = &["postal.bot", "k2.dev", "k5.dev"];
+/// Relays published by IP (k2e-02 primary, k2e-03 standby, 2026-11-26). A
+/// relay at a new IP needs a name under [`RELAY_DOMAINS`] or a release.
+const RELAY_IPS: &[&str] = &["147.135.65.8", "51.81.155.236"];
+
 fn valid_host(h: &str) -> bool {
-    !h.is_empty()
+    let h = h.to_ascii_lowercase();
+    if RELAY_IPS.contains(&h.as_str()) {
+        return true;
+    }
+    let shape = !h.is_empty()
         && h.len() <= 253
         && h.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b':')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    shape
+        && RELAY_DOMAINS
+            .iter()
+            .any(|d| h == *d || h.ends_with(&format!(".{d}")))
+}
+
+/// The base must be https, except plain http to loopback (tests): the
+/// request carries the tunnel token.
+fn valid_base(base: &str) -> bool {
+    if base.starts_with("https://") {
+        return true;
+    }
+    ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
+        .iter()
+        .any(|p| {
+            // Port digits and nothing else, so `localhost:x@elsewhere` fails.
+            base.strip_prefix(p)
+                .is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 pub fn relays_base() -> String {
@@ -89,15 +124,23 @@ fn cache_path(root: &Path) -> PathBuf {
 
 /// GET the list. Any failure (no token, transport, status, bad body) is None.
 pub fn fetch(base: &str, token: &str) -> Option<RelayList> {
-    if token.trim().is_empty() {
+    if token.trim().is_empty() || !valid_base(base) {
         return None;
     }
     let url = format!("{base}/api/tunnel/relays");
-    let resp = ureq::get(&url)
+    // No redirects: a 3xx would carry the Bearer to wherever it points.
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout(FETCH_TIMEOUT)
+        .build();
+    let resp = agent
+        .get(&url)
         .set("Authorization", &format!("Bearer {}", token.trim()))
         .call()
         .ok()?;
+    if resp.status() != 200 {
+        return None;
+    }
     let text = resp.into_string().ok()?;
     serde_json::from_str::<RelayList>(&text).ok()?.checked()
 }
@@ -157,7 +200,16 @@ pub fn choose_with(
                 source,
             };
         }
-        // None answered: keep the primary; frpc retries it on its own.
+        // None answered (say a stale cache naming a retired relay): try
+        // frp.postal.bot, which follows the active relay, before settling
+        // on the primary for frpc to keep retrying.
+        if probe(DEFAULT_FRP_SERVER, DEFAULT_FRP_PORT) {
+            return Choice {
+                host: DEFAULT_FRP_SERVER.to_string(),
+                port: DEFAULT_FRP_PORT,
+                source: "default (no listed relay answered)",
+            };
+        }
         let r = &list.relays[0];
         return Choice {
             host: r.host.clone(),
@@ -182,7 +234,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    const BODY: &str = r#"{"v":1,"relays":[{"host":"10.0.0.2","port":7001,"role":"standby"},{"host":"10.0.0.1","port":7000,"role":"primary"}],"refresh_s":21600,"ts":1}"#;
+    const BODY: &str = r#"{"v":1,"relays":[{"host":"r2.postal.bot","port":7001,"role":"standby"},{"host":"r1.postal.bot","port":7000,"role":"primary"}],"refresh_s":21600,"ts":1}"#;
 
     /// One-shot HTTP server; returns its base URL and the request it saw.
     fn serve(
@@ -219,7 +271,7 @@ mod tests {
         let c = choose_with(d.path(), &base, Some("tok123"), |_, _| true);
         assert_eq!(
             (c.host.as_str(), c.port, c.source),
-            ("10.0.0.1", 7000, "list")
+            ("r1.postal.bot", 7000, "list")
         );
         let req = h.join().unwrap();
         assert!(req.starts_with("GET /api/tunnel/relays "));
@@ -232,8 +284,8 @@ mod tests {
     fn standby_when_primary_does_not_answer() {
         let d = root();
         let (base, _h) = serve("200 OK", BODY);
-        let c = choose_with(d.path(), &base, Some("t"), |h, _| h == "10.0.0.2");
-        assert_eq!((c.host.as_str(), c.port), ("10.0.0.2", 7001));
+        let c = choose_with(d.path(), &base, Some("t"), |h, _| h == "r2.postal.bot");
+        assert_eq!((c.host.as_str(), c.port), ("r2.postal.bot", 7001));
     }
 
     #[test]
@@ -241,7 +293,67 @@ mod tests {
         let d = root();
         let (base, _h) = serve("200 OK", BODY);
         let c = choose_with(d.path(), &base, Some("t"), |_, _| false);
-        assert_eq!(c.host, "10.0.0.1");
+        assert_eq!(c.host, "r1.postal.bot");
+    }
+
+    #[test]
+    fn stale_cache_falls_back_to_the_default_when_it_answers() {
+        let d = root();
+        let (base, _h) = serve("200 OK", BODY);
+        choose_with(d.path(), &base, Some("t"), |_, _| true);
+        // Plane unreachable, cached relays dead, frp.postal.bot alive.
+        let c = choose_with(d.path(), "http://127.0.0.1:1", Some("t"), |h, _| {
+            h == DEFAULT_FRP_SERVER
+        });
+        assert_eq!(
+            (c.host.as_str(), c.port, c.source),
+            (
+                DEFAULT_FRP_SERVER,
+                DEFAULT_FRP_PORT,
+                "default (no listed relay answered)"
+            )
+        );
+    }
+
+    #[test]
+    fn a_redirect_is_a_failed_fetch() {
+        let d = root();
+        let (base, _h) = serve("302 Found\r\nLocation: http://127.0.0.1:1/x", "");
+        let c = choose_with(d.path(), &base, Some("t"), |_, _| true);
+        assert_eq!(c.source, "default");
+    }
+
+    #[test]
+    fn non_https_base_is_never_fetched() {
+        assert!(fetch("http://k5.dev", "t").is_none());
+        assert!(valid_base("https://k5.dev"));
+        assert!(valid_base("http://127.0.0.1:8080"));
+        assert!(!valid_base("http://127.0.0.1.evil.com"));
+        assert!(!valid_base("http://localhost:1@evil.com"));
+        assert!(!valid_base("http://localhost:"));
+    }
+
+    #[test]
+    fn relay_hosts_are_limited_to_ours() {
+        for ok in [
+            "frp.postal.bot",
+            "R1.K5.dev",
+            "k2.dev",
+            "147.135.65.8",
+            "51.81.155.236",
+        ] {
+            assert!(valid_host(ok), "{ok}");
+        }
+        for bad in [
+            "evil.com",
+            "postal.bot.evil.com",
+            "xpostal.bot",
+            "1.2.3.4",
+            "178.156.232.105",
+            "",
+        ] {
+            assert!(!valid_host(bad), "{bad}");
+        }
     }
 
     #[test]
@@ -257,7 +369,10 @@ mod tests {
         // ... and used when the next fetch fails.
         let (base, _h) = serve("500 Internal Server Error", "{}");
         let c = choose_with(d.path(), &base, Some("t"), |_, _| true);
-        assert_eq!((c.host.as_str(), c.source), ("10.0.0.1", "cached list"));
+        assert_eq!(
+            (c.host.as_str(), c.source),
+            ("r1.postal.bot", "cached list")
+        );
     }
 
     #[test]
