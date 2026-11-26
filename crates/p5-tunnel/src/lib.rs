@@ -6,6 +6,7 @@
 mod broker;
 mod child;
 mod csr;
+mod relays;
 mod render;
 mod san;
 
@@ -21,6 +22,7 @@ pub use render::{
     render_frpc_toml, write_frpc_toml, FrpcSpec, DEFAULT_FRP_PORT, DEFAULT_FRP_SERVER,
     FRPC_TOML_FILE,
 };
+pub use relays::{choose as choose_relay, Choice as RelayChoice, Relay, RelayList, DEFAULT_RELAYS_BASE, RELAYS_BASE_ENV, RELAYS_FILE};
 pub use san::{
     check_sans, hostname_for_label, label_from_host, sans_for_label, SanError, HOST_SUFFIX,
 };
@@ -41,7 +43,8 @@ pub const LABEL_ENV: &str = "P5_TUNNEL_LABEL";
 pub const TOKEN_ENV: &str = "P5_CONNECT_TOKEN";
 /// Explicit `frpc` path (tests inject a stub).
 pub const FRPC_ENV: &str = "P5_FRPC";
-/// frps host override. Default is `frp.postal.bot`.
+/// frps host override. Without it p5 follows the plane's relay list
+/// (see `relays`), falling back to `frp.postal.bot`.
 pub const FRP_SERVER_ENV: &str = "P5_FRP_SERVER";
 /// frps bindPort override.
 pub const FRP_PORT_ENV: &str = "P5_FRP_PORT";
@@ -172,11 +175,18 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
     } else {
         opts.local_port
     };
+    let (server_addr, list_port) = match opts.server_addr.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(addr) => (addr.to_string(), DEFAULT_FRP_PORT),
+        None => {
+            let c = relays::choose(opts.root, opts.token);
+            (c.host, c.port)
+        }
+    };
     let spec = FrpcSpec {
         label: label.clone(),
         local_port: port,
-        server_addr: opts.server_addr.unwrap_or(DEFAULT_FRP_SERVER).to_string(),
-        server_port: opts.server_port.unwrap_or(DEFAULT_FRP_PORT),
+        server_addr,
+        server_port: opts.server_port.unwrap_or(list_port),
         token: opts
             .token
             .map(str::trim)
