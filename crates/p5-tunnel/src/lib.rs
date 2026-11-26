@@ -127,6 +127,8 @@ pub struct StartOpts<'a> {
     pub frpc: Option<&'a Path>,
     pub server_addr: Option<&'a str>,
     pub server_port: Option<u16>,
+    /// The running p5's version, sent to frps as `metadatas.p5_version`.
+    pub p5_version: Option<&'a str>,
 }
 
 /// Provision a cert, render `frpc.toml`, spawn the child. On any failure the
@@ -211,6 +213,7 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        p5_version: opts.p5_version.map(str::to_string),
         log_file: Some(opts.root.join(csr::TUNNEL_DIR).join(render::FRPC_LOG_FILE)),
     };
     let toml_path = match write_frpc_toml(opts.root, &spec) {
@@ -232,7 +235,7 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
 }
 
 /// Agent entry: no-op unless `P5_TUNNEL=1`. Broker miss → down, not an error.
-pub fn start_from_env(root: &Path, local_port: u16) -> TunnelHandle {
+pub fn start_from_env(root: &Path, local_port: u16, p5_version: &str) -> TunnelHandle {
     if !enabled() {
         return TunnelHandle::down("disabled");
     }
@@ -263,6 +266,7 @@ pub fn start_from_env(root: &Path, local_port: u16) -> TunnelHandle {
         frpc: frpc.as_deref(),
         server_addr: server.as_deref(),
         server_port: port,
+        p5_version: Some(p5_version),
     })
 }
 
@@ -393,6 +397,7 @@ mod tests {
             frpc: Some(&stub),
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         });
         assert!(h.is_up(), "{:?}", h.reason());
         let now = std::time::SystemTime::now()
@@ -420,6 +425,7 @@ mod tests {
             frpc: Some(&stub),
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         });
         assert!(h.is_up(), "{:?}", h.reason());
         assert_eq!(std::fs::read_to_string(crate::csr::cert_path(tmp.path())).unwrap(), old);
@@ -432,7 +438,7 @@ mod tests {
         let prev = std::env::var_os(TUNNEL_ENV);
         std::env::remove_var(TUNNEL_ENV);
         let tmp = tempfile::tempdir().unwrap();
-        let mut h = start_from_env(tmp.path(), 8443);
+        let mut h = start_from_env(tmp.path(), 8443, "0.0.0-test");
         assert!(!h.is_up());
         assert_eq!(h.reason(), Some("disabled"));
         match prev {
@@ -459,6 +465,7 @@ mod tests {
             frpc: None,
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         });
         assert!(!h.is_up());
         let reason = h.reason().unwrap_or("");
@@ -490,6 +497,7 @@ mod tests {
             frpc: Some(&stub),
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         });
         assert!(
             h.is_up(),
@@ -513,6 +521,7 @@ mod tests {
             frpc: Some(&stub),
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         });
         assert!(h.is_up(), "{:?}", h.reason());
         assert!(tmp.path().join(TUNNEL_DIR).join(TUNNEL_CERT_FILE).exists());
@@ -532,6 +541,7 @@ mod tests {
             frpc: Some(stub),
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         })
     }
 
