@@ -76,8 +76,8 @@ impl RelayList {
 /// Relay names p5 will dial: frpc sends the tunnel token to the relay, so a
 /// bad cache or plane answer must not be able to point it anywhere else.
 const RELAY_DOMAINS: &[&str] = &["postal.bot", "k2.dev", "k5.dev"];
-/// Relays published by IP (k2e-02 primary, k2e-03 standby, 2026-11-26). A
-/// relay at a new IP needs a name under [`RELAY_DOMAINS`] or a release.
+/// Relays published by IP. A relay at a new IP needs a name under
+/// [`RELAY_DOMAINS`] or a release.
 const RELAY_IPS: &[&str] = &["147.135.65.8", "51.81.155.236"];
 
 fn valid_host(h: &str) -> bool {
