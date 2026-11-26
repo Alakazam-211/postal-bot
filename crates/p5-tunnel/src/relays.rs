@@ -95,19 +95,8 @@ fn valid_host(h: &str) -> bool {
             .any(|d| h == *d || h.ends_with(&format!(".{d}")))
 }
 
-/// The base must be https, except plain http to loopback (tests): the
-/// request carries the tunnel token.
 fn valid_base(base: &str) -> bool {
-    if base.starts_with("https://") {
-        return true;
-    }
-    ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
-        .iter()
-        .any(|p| {
-            // Port digits and nothing else, so `localhost:x@elsewhere` fails.
-            base.strip_prefix(p)
-                .is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
-        })
+    crate::broker::safe_url(base)
 }
 
 pub fn relays_base() -> String {

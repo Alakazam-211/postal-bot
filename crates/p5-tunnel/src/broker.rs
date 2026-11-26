@@ -16,6 +16,23 @@ pub const BROKER_URL_ENV: &str = "P5_CERT_BROKER";
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// https only, or plain http to loopback with a numeric port (tests). The
+/// broker and the relay list both carry the tunnel token.
+pub(crate) fn safe_url(url: &str) -> bool {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return !rest.is_empty();
+    }
+    ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
+        .iter()
+        .any(|p| {
+            url.strip_prefix(p).is_some_and(|rest| {
+                let port_end = rest.find('/').unwrap_or(rest.len());
+                let port = &rest[..port_end];
+                !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+}
+
 pub fn broker_url() -> String {
     match std::env::var(BROKER_URL_ENV) {
         Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
@@ -109,8 +126,18 @@ pub fn request_cert_at(
         "subdomain": subdomain,
         "token": token,
     });
-    let resp = ureq::post(url)
+    if !safe_url(url) {
+        return Err(BrokerError::Protocol(format!(
+            "refusing cert broker URL {url}: https only"
+        )));
+    }
+    // No redirects: the token is in the body and must not follow a 3xx.
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout(HTTP_TIMEOUT)
+        .build();
+    let resp = agent
+        .post(url)
         .set("Content-Type", "application/json")
         .send_json(body);
     let resp = match resp {

@@ -462,6 +462,18 @@ pub fn status_text() -> String {
 }
 
 pub fn status_text_at(root: &Path) -> String {
+    let mut out = agent_status_text(root);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if let Some(line) = p5_tunnel::cert_status_line(root, now) {
+        out.push_str(&format!("cert: {line}\n"));
+    }
+    out
+}
+
+fn agent_status_text(root: &Path) -> String {
     match control::try_status(root) {
         Some(StatusReport {
             agent,
@@ -493,6 +505,49 @@ pub fn logout() -> Result<(), AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_shows_an_expired_tunnel_cert_and_a_failing_renewal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = p5_tunnel::load_or_generate_key(tmp.path()).unwrap();
+        let mut p = rcgen::CertificateParams::new(vec!["acme.postal.bot".into()]).unwrap();
+        p.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        p.not_after = rcgen::date_time_ymd(2021, 1, 1);
+        let pem = p.self_signed(&key).unwrap().pem();
+        std::fs::write(
+            tmp.path()
+                .join(p5_tunnel::TUNNEL_DIR)
+                .join(p5_tunnel::TUNNEL_CERT_FILE),
+            pem,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path()
+                .join(p5_tunnel::TUNNEL_DIR)
+                .join(p5_tunnel::RENEW_ERROR_FILE),
+            "cert broker unreachable",
+        )
+        .unwrap();
+        let text = status_text_at(tmp.path());
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("cert: "))
+            .unwrap_or_default();
+        assert!(
+            line.starts_with("cert: tunnel certificate expired "),
+            "{text}"
+        );
+        assert!(
+            line.ends_with("renewal failing: cert broker unreachable"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_has_no_cert_line_without_a_tunnel_cert() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!status_text_at(tmp.path()).contains("cert:"));
+    }
 
     #[test]
     fn status_when_agent_not_running_is_down() {
