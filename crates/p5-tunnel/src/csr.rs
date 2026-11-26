@@ -62,6 +62,99 @@ pub fn cert_path(root: &Path) -> std::path::PathBuf {
     root.join(TUNNEL_DIR).join(TUNNEL_CERT_FILE)
 }
 
+/// Renew the leaf when it has less than this left (or can't be read).
+pub const RENEW_BEFORE_SECS: i64 = 30 * 24 * 3600;
+
+/// Seconds until the leaf at `tunnel/cert.pem` expires (negative once it
+/// has). None when the file is missing or isn't a PEM certificate.
+pub fn cert_secs_left(root: &Path, now_unix: i64) -> Option<i64> {
+    let pem = std::fs::read(cert_path(root)).ok()?;
+    let (_, block) = x509_parser::pem::parse_x509_pem(&pem).ok()?;
+    let cert = block.parse_x509().ok()?;
+    Some(cert.validity().not_after.timestamp() - now_unix)
+}
+
+/// Whether the leaf needs a new CSR: missing, unreadable, expired, or
+/// expiring within [`RENEW_BEFORE_SECS`].
+pub fn cert_needs_renewal(root: &Path, now_unix: i64) -> bool {
+    match cert_secs_left(root, now_unix) {
+        Some(left) => left < RENEW_BEFORE_SECS,
+        None => true,
+    }
+}
+
+/// Last renewal failure, cleared on success. `p5 status` shows it.
+pub const RENEW_ERROR_FILE: &str = "renew-error.txt";
+
+fn renew_error_path(root: &Path) -> std::path::PathBuf {
+    root.join(TUNNEL_DIR).join(RENEW_ERROR_FILE)
+}
+
+pub fn record_renew_error(root: &Path, err: &str) {
+    let _ = ensure_tunnel_dir(root);
+    let one_line: String = err.chars().filter(|c| !c.is_control()).take(300).collect();
+    let _ = fs::write(renew_error_path(root), one_line);
+}
+
+pub fn clear_renew_error(root: &Path) {
+    let _ = fs::remove_file(renew_error_path(root));
+}
+
+/// A line for `p5 status` when the leaf needs attention, else None:
+/// `tunnel certificate expired 3 days ago, renewal failing: …` or
+/// `tunnel certificate expires in 12 days, renewal failing: …`.
+pub fn cert_status_line(root: &Path, now_unix: i64) -> Option<String> {
+    if !cert_path(root).is_file() {
+        return None;
+    }
+    let err = fs::read_to_string(renew_error_path(root)).ok();
+    let mut line = match cert_secs_left(root, now_unix) {
+        None => "tunnel certificate unreadable".to_string(),
+        Some(left) if left < 0 => {
+            format!("tunnel certificate expired {} days ago", (-left) / 86_400)
+        }
+        Some(left) if left < RENEW_BEFORE_SECS => {
+            format!("tunnel certificate expires in {} days", left / 86_400)
+        }
+        Some(_) if err.is_none() => return None,
+        Some(left) => format!("tunnel certificate valid for {} days", left / 86_400),
+    };
+    if let Some(e) = err.filter(|e| !e.trim().is_empty()) {
+        line.push_str(&format!(", renewal failing: {}", e.trim()));
+    }
+    Some(line)
+}
+
+/// Check a broker answer before installing it: it parses, carries our
+/// public key, names `hostname`, and is valid at `now_unix`.
+pub fn check_leaf(pem: &str, key: &KeyPair, hostname: &str, now_unix: i64) -> Result<(), String> {
+    let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
+        .map_err(|e| format!("not a PEM cert: {e}"))?;
+    let cert = block
+        .parse_x509()
+        .map_err(|e| format!("bad certificate: {e}"))?;
+    if cert.public_key().raw != key.public_key_der().as_slice() {
+        return Err("certificate is not for our key".into());
+    }
+    let named = cert
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .is_some_and(|san| {
+            san.value.general_names.iter().any(|n| {
+                matches!(n, x509_parser::extensions::GeneralName::DNSName(d) if d.eq_ignore_ascii_case(hostname))
+            })
+        });
+    if !named {
+        return Err(format!("certificate does not name {hostname}"));
+    }
+    let v = cert.validity();
+    if now_unix < v.not_before.timestamp() || now_unix > v.not_after.timestamp() {
+        return Err("certificate is not currently valid".into());
+    }
+    Ok(())
+}
+
 fn tunnel_dir(root: &Path) -> std::path::PathBuf {
     root.join(TUNNEL_DIR)
 }

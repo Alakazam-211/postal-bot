@@ -15,7 +15,7 @@ pub use broker::{
 };
 pub use child::{resolve_frpc, spawn_frpc, FrpcBinary, TunnelChild};
 pub use csr::{
-    build_csr_pem, generate_key, load_or_generate_key, CsrError, TUNNEL_CERT_FILE, TUNNEL_DIR,
+    build_csr_pem, cert_status_line, check_leaf, RENEW_ERROR_FILE, generate_key, load_or_generate_key, CsrError, TUNNEL_CERT_FILE, TUNNEL_DIR,
     TUNNEL_KEY_FILE,
 };
 pub use render::{
@@ -145,9 +145,14 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
         Ok(k) => k,
         Err(err) => return TunnelHandle::down(err.to_string()),
     };
-    let reuse = csr::cert_path(opts.root).is_file()
-        && csr::key_path(opts.root).is_file()
-        && !env_truthy(REISSUE_ENV);
+    // Reuse the leaf while it has 30+ days left; otherwise ask the broker
+    // for a new one (same key). A failed renewal keeps the old leaf.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let has_leaf = csr::cert_path(opts.root).is_file() && csr::key_path(opts.root).is_file();
+    let reuse = has_leaf && !env_truthy(REISSUE_ENV) && !csr::cert_needs_renewal(opts.root, now);
     if !reuse {
         let csr = match build_csr_pem(&label, &key) {
             Ok(c) => c,
@@ -161,12 +166,26 @@ pub fn try_start(opts: StartOpts<'_>) -> TunnelHandle {
             .map(str::to_string)
             .unwrap_or_else(broker_url);
         let token = opts.token.unwrap_or("");
-        let cert = match request_cert_at(&url, &csr, &label, token) {
-            Ok(c) => c,
-            Err(err) => return TunnelHandle::down(err.to_string()),
-        };
-        if let Err(err) = csr::install_cert(opts.root, &cert) {
-            return TunnelHandle::down(err.to_string());
+        let issued = request_cert_at(&url, &csr, &label, token)
+            .map_err(|e| e.to_string())
+            .and_then(|cert| csr::check_leaf(&cert, &key, &hostname, now).map(|()| cert));
+        match issued {
+            Ok(cert) => {
+                if let Err(err) = csr::install_cert(opts.root, &cert) {
+                    return TunnelHandle::down(err.to_string());
+                }
+                csr::clear_renew_error(opts.root);
+            }
+            // Renewing: keep serving the old leaf, say so in `p5 status`,
+            // and try again next start.
+            Err(err) if has_leaf => {
+                eprintln!("postal: tunnel cert renewal failed, keeping the current one: {err}");
+                csr::record_renew_error(opts.root, &err);
+            }
+            Err(err) => {
+                csr::record_renew_error(opts.root, &err);
+                return TunnelHandle::down(err);
+            }
         }
     }
 
@@ -324,6 +343,89 @@ mod tests {
         format!("http://127.0.0.1:{port}/cert")
     }
 
+    /// A leaf for `host` with the tunnel key under `root` (created if
+    /// missing), expiring on 1 Jan `year`.
+    fn leaf_for(root: &Path, host: &str, year: i32) -> String {
+        let kp = crate::csr::load_or_generate_key(root).unwrap();
+        let mut p = rcgen::CertificateParams::new(vec![host.into()]).unwrap();
+        p.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        p.not_after = rcgen::date_time_ymd(year, 1, 1);
+        p.self_signed(&kp).unwrap().pem()
+    }
+
+    fn leaf_pem_at(root: &Path, year: i32) -> String {
+        leaf_for(root, "acme.postal.bot", year)
+    }
+
+    #[test]
+    fn cert_expiry_drives_renewal() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::csr::load_or_generate_key(tmp.path()).unwrap();
+        let now = 1_795_000_000; // Nov 2026
+        assert!(crate::csr::cert_needs_renewal(tmp.path(), now), "missing");
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem_at(tmp.path(), 2099)).unwrap();
+        assert!(!crate::csr::cert_needs_renewal(tmp.path(), now));
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem_at(tmp.path(), 2026)).unwrap();
+        assert!(crate::csr::cert_needs_renewal(tmp.path(), now), "expired");
+        // 20 days before expiry is inside the 30-day window; 40 is not.
+        let expiry = now + crate::csr::cert_secs_left(tmp.path(), now).unwrap();
+        assert!(crate::csr::cert_needs_renewal(tmp.path(), expiry - 20 * 86_400));
+        assert!(!crate::csr::cert_needs_renewal(tmp.path(), expiry - 40 * 86_400));
+        std::fs::write(crate::csr::cert_path(tmp.path()), "junk").unwrap();
+        assert!(crate::csr::cert_needs_renewal(tmp.path(), now), "unreadable");
+    }
+
+    #[test]
+    fn expired_leaf_is_renewed_from_the_broker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = stub_frpc(tmp.path());
+        crate::csr::load_or_generate_key(tmp.path()).unwrap();
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem_at(tmp.path(), 2026)).unwrap();
+        let fresh = leaf_pem_at(tmp.path(), 2099);
+        let body = serde_json::json!({ "cert": fresh }).to_string();
+        let url = spawn_mock_broker("200 OK", &body);
+        let mut h = try_start(StartOpts {
+            root: tmp.path(),
+            label: "acme",
+            local_port: 8443,
+            broker_url: Some(&url),
+            token: Some("tok"),
+            frpc: Some(&stub),
+            server_addr: Some("127.0.0.1"),
+            server_port: Some(7000),
+        });
+        assert!(h.is_up(), "{:?}", h.reason());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(!crate::csr::cert_needs_renewal(tmp.path(), now), "new leaf installed");
+        h.stop();
+    }
+
+    #[test]
+    fn failed_renewal_keeps_the_old_leaf_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = stub_frpc(tmp.path());
+        crate::csr::load_or_generate_key(tmp.path()).unwrap();
+        let old = leaf_pem_at(tmp.path(), 2026);
+        std::fs::write(crate::csr::cert_path(tmp.path()), &old).unwrap();
+        let url = spawn_mock_broker("503 Service Unavailable", r#"{"error":"down"}"#);
+        let mut h = try_start(StartOpts {
+            root: tmp.path(),
+            label: "acme",
+            local_port: 8443,
+            broker_url: Some(&url),
+            token: Some("tok"),
+            frpc: Some(&stub),
+            server_addr: Some("127.0.0.1"),
+            server_port: Some(7000),
+        });
+        assert!(h.is_up(), "{:?}", h.reason());
+        assert_eq!(std::fs::read_to_string(crate::csr::cert_path(tmp.path())).unwrap(), old);
+        h.stop();
+    }
+
     #[test]
     fn start_from_env_disabled_is_down() {
         let _g = env_lock();
@@ -372,11 +474,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let stub = stub_frpc(tmp.path());
         crate::csr::load_or_generate_key(tmp.path()).unwrap();
-        std::fs::write(
-            crate::csr::cert_path(tmp.path()),
-            "-----BEGIN CERTIFICATE-----\nUEs=\n-----END CERTIFICATE-----\n",
-        )
-        .unwrap();
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem_at(tmp.path(), 2099)).unwrap();
         let dead = {
             let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let p = l.local_addr().unwrap().port();
@@ -404,8 +502,7 @@ mod tests {
     fn try_start_mock_broker_and_stub_frpc_is_up() {
         let tmp = tempfile::tempdir().unwrap();
         let stub = stub_frpc(tmp.path());
-        let body = serde_json::json!({ "cert": "-----BEGIN CERTIFICATE-----\nUEs=\n-----END CERTIFICATE-----\n" })
-            .to_string();
+        let body = serde_json::json!({ "cert": leaf_pem_at(tmp.path(), 2099) }).to_string();
         let url = spawn_mock_broker("200 OK", &body);
         let mut h = try_start(StartOpts {
             root: tmp.path(),
@@ -423,5 +520,89 @@ mod tests {
             std::fs::read_to_string(tmp.path().join(TUNNEL_DIR).join(FRPC_TOML_FILE)).unwrap();
         assert!(toml.contains("localPort = 18765"), "{toml}");
         assert!(toml.contains("type = \"https\""), "{toml}");
+    }
+
+    fn start_with_broker(root: &Path, stub: &Path, url: &str) -> TunnelHandle {
+        try_start(StartOpts {
+            root,
+            label: "acme",
+            local_port: 8443,
+            broker_url: Some(url),
+            token: Some("tok"),
+            frpc: Some(stub),
+            server_addr: Some("127.0.0.1"),
+            server_port: Some(7000),
+        })
+    }
+
+    #[test]
+    fn a_broker_answer_that_fails_the_leaf_check_is_not_installed() {
+        let now = 1_795_000_000;
+        // Wrong key, wrong host, expired: each keeps the old leaf.
+        let other = tempfile::tempdir().unwrap();
+        let bad = |tmp: &tempfile::TempDir| -> Vec<(&'static str, String)> {
+            vec![
+                ("not for our key", leaf_for(other.path(), "acme.postal.bot", 2099)),
+                ("does not name", leaf_for(tmp.path(), "evil.postal.bot", 2099)),
+                ("not currently valid", leaf_for(tmp.path(), "acme.postal.bot", 2026)),
+            ]
+        };
+        for i in 0..3 {
+            let tmp = tempfile::tempdir().unwrap();
+            let stub = stub_frpc(tmp.path());
+            let old = leaf_pem_at(tmp.path(), 2026);
+            std::fs::write(crate::csr::cert_path(tmp.path()), &old).unwrap();
+            let (want, answer) = bad(&tmp).swap_remove(i);
+            let body = serde_json::json!({ "cert": answer }).to_string();
+            let url = spawn_mock_broker("200 OK", &body);
+            let mut h = start_with_broker(tmp.path(), &stub, &url);
+            assert!(h.is_up(), "{:?}", h.reason());
+            assert_eq!(std::fs::read_to_string(crate::csr::cert_path(tmp.path())).unwrap(), old);
+            let line = crate::csr::cert_status_line(tmp.path(), now).unwrap();
+            assert!(line.starts_with("tunnel certificate expired"), "{line}");
+            assert!(line.contains("renewal failing") && line.contains(want), "{line}");
+            h.stop();
+        }
+    }
+
+    #[test]
+    fn status_line_names_expiry_and_clears_after_renewal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = stub_frpc(tmp.path());
+        std::fs::write(crate::csr::cert_path(tmp.path()), leaf_pem_at(tmp.path(), 2026)).unwrap();
+        let now = 1_795_000_000;
+        // Expired, no failure recorded yet.
+        let line = crate::csr::cert_status_line(tmp.path(), now).unwrap();
+        assert!(line.starts_with("tunnel certificate expired"), "{line}");
+        // Expiring soon, renewal failing.
+        let expiry = now + crate::csr::cert_secs_left(tmp.path(), now).unwrap();
+        crate::csr::record_renew_error(tmp.path(), "cert broker unreachable");
+        let line = crate::csr::cert_status_line(tmp.path(), expiry - 12 * 86_400 - 60).unwrap();
+        assert_eq!(line, "tunnel certificate expires in 12 days, renewal failing: cert broker unreachable");
+        // A good renewal clears it.
+        let body = serde_json::json!({ "cert": leaf_pem_at(tmp.path(), 2099) }).to_string();
+        let url = spawn_mock_broker("200 OK", &body);
+        let mut h = start_with_broker(tmp.path(), &stub, &url);
+        assert!(h.is_up());
+        assert_eq!(crate::csr::cert_status_line(tmp.path(), now), None);
+        h.stop();
+    }
+
+    #[test]
+    fn broker_url_must_be_https_or_loopback() {
+        for ok in ["https://cert.postal.bot/cert", "http://127.0.0.1:8080/cert", "http://localhost:1"] {
+            assert!(crate::broker::safe_url(ok), "{ok}");
+        }
+        for bad in ["http://cert.postal.bot/cert", "http://localhost:1@evil.com/cert", "http://127.0.0.1.evil.com/", "ftp://x", "https://"] {
+            assert!(!crate::broker::safe_url(bad), "{bad}");
+        }
+        let err = request_cert_at("http://cert.postal.bot/cert", "csr", "acme", "tok").unwrap_err();
+        assert!(err.to_string().contains("https only"), "{err}");
+    }
+
+    #[test]
+    fn a_broker_redirect_is_a_failed_renewal() {
+        let url = spawn_mock_broker("302 Found\r\nLocation: http://127.0.0.1:1/steal", "");
+        assert!(request_cert_at(&url, "csr", "acme", "tok").is_err());
     }
 }

@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 p5-core.workspace = true
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+x509-parser = { version = "0.16", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
