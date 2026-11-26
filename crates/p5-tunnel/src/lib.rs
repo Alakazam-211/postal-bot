@@ -397,6 +397,7 @@ mod tests {
             frpc: Some(&stub),
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         });
         assert!(h.is_up(), "{:?}", h.reason());
         let now = std::time::SystemTime::now()
@@ -424,6 +425,7 @@ mod tests {
             frpc: Some(&stub),
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         });
         assert!(h.is_up(), "{:?}", h.reason());
         assert_eq!(std::fs::read_to_string(crate::csr::cert_path(tmp.path())).unwrap(), old);
@@ -539,6 +541,7 @@ mod tests {
             frpc: Some(stub),
             server_addr: Some("127.0.0.1"),
             server_port: Some(7000),
+            p5_version: Some("0.0.0-test"),
         })
     }
 
